@@ -200,6 +200,19 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 			       unsigned long **entries);
 
 /**
+ * stack_depot_fetch_into - Fetch a stack trace into caller-owned storage
+ *
+ * @handle:	Stack depot handle returned from stack_depot_save()
+ * @entries:	Caller-owned buffer to copy the stack trace into
+ * @max_entries:	Number of frames that fit in @entries
+ *
+ * Return: Number of frames copied, 0 on invalid handle or insufficient space
+ */
+unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
+				    unsigned long *entries,
+				    unsigned int max_entries);
+
+/**
  * stack_depot_print - Print a stack trace from stack depot
  *
  * @stack:	Stack depot handle returned from stack_depot_save()

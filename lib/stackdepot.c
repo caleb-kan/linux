@@ -777,6 +777,25 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 }
 EXPORT_SYMBOL_GPL(stack_depot_fetch);
 
+unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
+				    unsigned long *entries,
+				    unsigned int max_entries)
+{
+	unsigned long *stack_entries;
+	unsigned int nr_entries;
+
+	if (!entries)
+		return 0;
+
+	nr_entries = stack_depot_fetch(handle, &stack_entries);
+	if (!nr_entries || nr_entries > max_entries)
+		return 0;
+
+	memcpy(entries, stack_entries, nr_entries * sizeof(*entries));
+	return nr_entries;
+}
+EXPORT_SYMBOL_GPL(stack_depot_fetch_into);
+
 void stack_depot_put(depot_stack_handle_t handle)
 {
 	struct stack_record *stack;
