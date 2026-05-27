@@ -2693,6 +2693,19 @@ config HASH_KUNIT_TEST
 	  This is intended to help people writing architecture-specific
 	  optimized versions. If unsure, say N.
 
+config RESOURCE_KUNIT_TEST
+	tristate "KUnit test for resource API" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	select GET_FREE_REGION
+	help
+	  This builds the resource API unit test.
+	  Tests the logic of API provided by resource.c and ioport.h.
+	  For more information on KUnit and unit tests in general please refer
+	  to the KUnit documentation in Documentation/dev-tools/kunit/.
+
+	  If unsure, say N.
+
 config STACKDEPOT_KUNIT_TEST
 	tristate "KUnit test for stack depot" if !KUNIT_ALL_TESTS
 	depends on KUNIT && STACKDEPOT
@@ -2704,19 +2717,6 @@ config STACKDEPOT_KUNIT_TEST
 	  in TAP format (https://testanything.org/). Only useful for kernel
 	  developers running the KUnit test harness, and not intended for
 	  inclusion into a production build.
-
-	  If unsure, say N.
-
-config RESOURCE_KUNIT_TEST
-	tristate "KUnit test for resource API" if !KUNIT_ALL_TESTS
-	depends on KUNIT
-	default KUNIT_ALL_TESTS
-	select GET_FREE_REGION
-	help
-	  This builds the resource API unit test.
-	  Tests the logic of API provided by resource.c and ioport.h.
-	  For more information on KUnit and unit tests in general please refer
-	  to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
 

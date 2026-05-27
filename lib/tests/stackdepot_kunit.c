@@ -13,7 +13,11 @@ static void stackdepot_fetch_into_roundtrip(struct kunit *test)
 		0x1234567800020000UL,
 		0x1234567800030000UL,
 	};
-	unsigned long fetched[ARRAY_SIZE(entries)] = {};
+	unsigned long exact[ARRAY_SIZE(entries)] = {};
+	unsigned long fetched[ARRAY_SIZE(entries) + 1] = {
+		[ARRAY_SIZE(entries)] = 0xa5a5a5a5a5a5a5a5UL,
+	};
+	unsigned long expected_tail = fetched[ARRAY_SIZE(entries)];
 	depot_stack_handle_t handle;
 	unsigned int nr_entries;
 
@@ -23,9 +27,15 @@ static void stackdepot_fetch_into_roundtrip(struct kunit *test)
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
 
 	nr_entries =
+		stack_depot_fetch_into(handle, exact, ARRAY_SIZE(exact));
+	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, exact, entries, sizeof(entries));
+
+	nr_entries =
 		stack_depot_fetch_into(handle, fetched, ARRAY_SIZE(fetched));
 	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, fetched, entries, sizeof(entries));
+	KUNIT_EXPECT_EQ(test, fetched[ARRAY_SIZE(entries)], expected_tail);
 }
 
 static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
@@ -54,7 +64,14 @@ static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, nr_entries, 0);
 	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 
+	nr_entries = stack_depot_fetch_into(0, NULL, 0);
+	KUNIT_EXPECT_EQ(test, nr_entries, 0);
+
 	nr_entries = stack_depot_fetch_into(handle, NULL, ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries, 0);
+	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
+
+	nr_entries = stack_depot_fetch_into(handle, fetched, 0);
 	KUNIT_EXPECT_EQ(test, nr_entries, 0);
 	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 

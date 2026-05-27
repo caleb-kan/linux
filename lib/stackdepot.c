@@ -784,13 +784,17 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	unsigned long *stack_entries;
 	unsigned int nr_entries;
 
-	if (!entries)
+	if (!entries || !max_entries)
 		return 0;
 
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)
 		return 0;
 
+	/*
+	 * stack_depot_fetch() returns stackdepot-owned storage; the caller must
+	 * keep the handle valid while this helper copies from it.
+	 */
 	memcpy(entries, stack_entries, nr_entries * sizeof(*entries));
 	return nr_entries;
 }

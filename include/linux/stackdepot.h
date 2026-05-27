@@ -206,7 +206,18 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * @entries:	Caller-owned buffer to copy the stack trace into
  * @max_entries:	Number of frames that fit in @entries
  *
- * Return: Number of frames copied, 0 on invalid handle or insufficient space
+ * Copies the stack trace into caller-owned @entries if the whole trace fits.
+ * No partial copy is performed on failure.
+ *
+ * Callers must ensure @handle remains valid for the duration of this call.
+ * Handles saved with %STACK_DEPOT_FLAG_GET require a held reference; handles
+ * saved without %STACK_DEPOT_FLAG_GET are persistent, and callers must not call
+ * stack_depot_put() on them.
+ * Racing this helper with stack_depot_put() on the same handle is invalid.
+ *
+ * Return: Number of frames copied, 0 if @entries is NULL or @max_entries is 0,
+ * if the underlying fetch fails, or if @max_entries is less than the number of
+ * stored frames.
  */
 unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 				    unsigned long *entries,
