@@ -40,6 +40,12 @@ struct stack {
 	struct stack_record *stack_record;
 	struct stack *next;
 };
+
+struct page_owner_stack_seq {
+	struct stack *stack;
+	unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];
+};
+
 static struct stack dummy_stack;
 static struct stack failure_stack;
 static struct stack *stack_list;
@@ -858,6 +864,7 @@ static const struct file_operations proc_page_owner_operations = {
 
 static void *stack_start(struct seq_file *m, loff_t *ppos)
 {
+	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack;
 
 	if (*ppos == -1UL)
@@ -870,21 +877,22 @@ static void *stack_start(struct seq_file *m, loff_t *ppos)
 		 * value of stack_list.
 		 */
 		stack = smp_load_acquire(&stack_list);
-		m->private = stack;
 	} else {
-		stack = m->private;
+		stack = priv->stack;
 	}
+	priv->stack = stack;
 
 	return stack;
 }
 
 static void *stack_next(struct seq_file *m, void *v, loff_t *ppos)
 {
+	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
 
 	stack = stack->next;
 	*ppos = stack ? *ppos + 1 : -1UL;
-	m->private = stack;
+	priv->stack = stack;
 
 	return stack;
 }
@@ -893,24 +901,30 @@ static unsigned long page_owner_pages_threshold;
 
 static int stack_print(struct seq_file *m, void *v)
 {
-	int i, nr_base_pages;
+	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
-	unsigned long *entries;
-	unsigned long nr_entries;
 	struct stack_record *stack_record = stack->stack_record;
+	unsigned int i, nr_entries;
+	int nr_base_pages;
 
 	if (!stack->stack_record)
 		return 0;
 
-	nr_entries = stack_record->size;
-	entries = stack_record->entries;
 	nr_base_pages = refcount_read(&stack_record->count) - 1;
 
 	if (nr_base_pages < 1 || nr_base_pages < page_owner_pages_threshold)
 		return 0;
 
+	/* Keep show_stacks independent of stackdepot's internal storage layout. */
+	nr_entries = stack_depot_fetch_into(stack_record->handle.handle,
+					    priv->entries,
+					    ARRAY_SIZE(priv->entries));
+	/* Buffer matches the stored-depth cap; failure means an unresolved handle. */
+	if (!nr_entries)
+		return 0;
+
 	for (i = 0; i < nr_entries; i++)
-		seq_printf(m, " %pS\n", (void *)entries[i]);
+		seq_printf(m, " %pS\n", (void *)priv->entries[i]);
 	seq_printf(m, "nr_base_pages: %d\n\n", nr_base_pages);
 
 	return 0;
@@ -929,7 +943,8 @@ static const struct seq_operations page_owner_stack_op = {
 
 static int page_owner_stack_open(struct inode *inode, struct file *file)
 {
-	return seq_open_private(file, &page_owner_stack_op, 0);
+	return seq_open_private(file, &page_owner_stack_op,
+				sizeof(struct page_owner_stack_seq));
 }
 
 static const struct file_operations page_owner_stack_operations = {
