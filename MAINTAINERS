@@ -14281,7 +14281,9 @@ M:	Andrew Morton <akpm@linux-foundation.org>
 L:	linux-kernel@vger.kernel.org
 S:	Supported
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/akpm/mm.git mm-nonmm-unstable
+F:	include/linux/stackdepot.h
 F:	lib/*
+F:	lib/tests/stackdepot_kunit.c
 
 LICENSES and SPDX stuff
 M:	Thomas Gleixner <tglx@linutronix.de>
