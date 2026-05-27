@@ -66,6 +66,7 @@ static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
 
 	nr_entries = stack_depot_fetch_into(0, NULL, 0);
 	KUNIT_EXPECT_EQ(test, nr_entries, 0);
+	/* No buffer is supplied for this invalid-input combination. */
 
 	nr_entries = stack_depot_fetch_into(handle, NULL, ARRAY_SIZE(fetched));
 	KUNIT_EXPECT_EQ(test, nr_entries, 0);

@@ -37,7 +37,7 @@ struct page_owner {
 };
 
 struct stack {
-	struct stack_record *stack_record;
+	depot_stack_handle_t handle;
 	struct stack *next;
 };
 
@@ -118,6 +118,8 @@ static noinline void register_early_stack(void)
 
 static __init void init_page_owner(void)
 {
+	struct stack_record *stack_record;
+
 	if (!page_owner_enabled)
 		return;
 
@@ -126,12 +128,14 @@ static __init void init_page_owner(void)
 	register_early_stack();
 	init_early_allocated_pages();
 	/* Initialize dummy and failure stacks and link them to stack_list */
-	dummy_stack.stack_record = __stack_depot_get_stack_record(dummy_handle);
-	failure_stack.stack_record = __stack_depot_get_stack_record(failure_handle);
-	if (dummy_stack.stack_record)
-		refcount_set(&dummy_stack.stack_record->count, 1);
-	if (failure_stack.stack_record)
-		refcount_set(&failure_stack.stack_record->count, 1);
+	dummy_stack.handle = dummy_handle;
+	failure_stack.handle = failure_handle;
+	stack_record = __stack_depot_get_stack_record(dummy_handle);
+	if (stack_record)
+		refcount_set(&stack_record->count, 1);
+	stack_record = __stack_depot_get_stack_record(failure_handle);
+	if (stack_record)
+		refcount_set(&stack_record->count, 1);
 	dummy_stack.next = &failure_stack;
 	stack_list = &dummy_stack;
 	static_branch_enable(&page_owner_inited);
@@ -168,11 +172,13 @@ static noinline depot_stack_handle_t save_stack(gfp_t flags)
 	return handle;
 }
 
-static void add_stack_record_to_list(struct stack_record *stack_record,
-				     gfp_t gfp_mask)
+static void add_stack_record_to_list(depot_stack_handle_t handle, gfp_t gfp_mask)
 {
 	unsigned long flags;
 	struct stack *stack;
+
+	if (!handle)
+		return;
 
 	if (!gfpflags_allow_spinning(gfp_mask))
 		return;
@@ -185,7 +191,7 @@ static void add_stack_record_to_list(struct stack_record *stack_record,
 	}
 	unset_current_in_page_owner();
 
-	stack->stack_record = stack_record;
+	stack->handle = handle;
 	stack->next = NULL;
 
 	spin_lock_irqsave(&stack_list_lock, flags);
@@ -219,8 +225,8 @@ static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 		int old = REFCOUNT_SATURATED;
 
 		if (atomic_try_cmpxchg_relaxed(&stack_record->count.refs, &old, 1))
-			/* Add the new stack_record to our list */
-			add_stack_record_to_list(stack_record, gfp_mask);
+			/* Add the new stack to our list */
+			add_stack_record_to_list(handle, gfp_mask);
 	}
 	refcount_add(nr_base_pages, &stack_record->count);
 }
@@ -903,11 +909,16 @@ static int stack_print(struct seq_file *m, void *v)
 {
 	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
-	struct stack_record *stack_record = stack->stack_record;
+	depot_stack_handle_t handle = stack->handle;
+	struct stack_record *stack_record;
 	unsigned int i, nr_entries;
 	int nr_base_pages;
 
-	if (!stack->stack_record)
+	if (!handle)
+		return 0;
+
+	stack_record = __stack_depot_get_stack_record(handle);
+	if (!stack_record)
 		return 0;
 
 	nr_base_pages = refcount_read(&stack_record->count) - 1;
@@ -916,10 +927,9 @@ static int stack_print(struct seq_file *m, void *v)
 		return 0;
 
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
-	nr_entries = stack_depot_fetch_into(stack_record->handle.handle,
-					    priv->entries,
+	nr_entries = stack_depot_fetch_into(handle, priv->entries,
 					    ARRAY_SIZE(priv->entries));
-	/* Buffer matches the stored-depth cap; failure means an unresolved handle. */
+	/* Buffer matches the stored-depth cap; failure means no stack is available. */
 	if (!nr_entries)
 		return 0;
 
