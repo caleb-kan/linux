@@ -170,7 +170,7 @@ static void stackdepot_count_helpers(struct kunit *test)
 
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
-	unsigned long frame = 0xffffffff81234567UL;
+	unsigned long frame = 0xffff888000001000UL;
 	unsigned long out = 0x12345678UL;
 	u32 low = 0xfeedbeef;
 	u8 prefix_id = 0xaa;
@@ -181,18 +181,46 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, low, (u32)0xfeedbeef);
 
 	KUNIT_EXPECT_FALSE(test,
-			   __stack_depot_frame_decompress(0, 0x81234567, &out));
+			   __stack_depot_frame_decompress(1, 0x81234567, &out));
 	KUNIT_EXPECT_EQ(test, out, 0x12345678UL);
 
 	KUNIT_EXPECT_FALSE(test,
 			   __stack_depot_frame_decompress(0, 0x81234567, NULL));
 }
 
+#ifdef CONFIG_X86_64
+static void stackdepot_frame_x86_64(struct kunit *test)
+{
+	unsigned long direct_map = 0xffff888000001000UL;
+	unsigned long frame = 0xffffffff81234567UL;
+	unsigned long out;
+	bool compressed;
+	u32 low;
+	u8 prefix_id;
+
+	KUNIT_EXPECT_TRUE(test,
+			  __stack_depot_frame_try_compress(frame, &prefix_id, &low));
+	KUNIT_EXPECT_EQ(test, prefix_id, (u8)0);
+	KUNIT_EXPECT_EQ(test, low, (u32)0x81234567);
+	KUNIT_EXPECT_TRUE(test,
+			  __stack_depot_frame_decompress(prefix_id, low, &out));
+	KUNIT_EXPECT_EQ(test, out, frame);
+
+	compressed = __stack_depot_frame_try_compress(direct_map, &prefix_id, &low);
+	KUNIT_EXPECT_FALSE(test, compressed);
+	KUNIT_EXPECT_FALSE(test,
+			   __stack_depot_frame_decompress(1, low, &out));
+}
+#endif /* CONFIG_X86_64 */
+
 static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_count_helpers),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
+#ifdef CONFIG_X86_64
+	KUNIT_CASE(stackdepot_frame_x86_64),
+#endif
 	{}
 };
 
