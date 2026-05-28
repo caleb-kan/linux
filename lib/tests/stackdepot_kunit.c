@@ -82,9 +82,76 @@ static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 }
 
+static void stackdepot_count_helpers(struct kunit *test)
+{
+	unsigned long entries[] = {
+		0x1234567800210000UL,
+		0x1234567800220000UL,
+		0x1234567800230000UL,
+	};
+	unsigned long zero_entries[] = {
+		0x1234567800310000UL,
+		0x1234567800320000UL,
+		0x1234567800330000UL,
+	};
+	depot_stack_handle_t handle;
+	depot_stack_handle_t zero_handle;
+	unsigned int count;
+
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+
+	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(0, &count));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(0, NULL));
+	__stack_depot_set_count(0, 1);
+	__stack_depot_set_count(0, 0);
+	__stack_depot_set_count(0, INT_MAX);
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, 1));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, INT_MAX - 1));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(0, 1));
+
+	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+
+	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, INT_MAX));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
+
+	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(handle, 2));
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 3);
+
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, 4));
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 7);
+
+	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(handle, 5));
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 2);
+	__stack_depot_set_count(handle, 0);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 2);
+	__stack_depot_set_count(handle, INT_MAX);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 2);
+	__stack_depot_set_count(handle, 6);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 6);
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, INT_MAX));
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 6);
+
+	zero_handle = stack_depot_save(zero_entries, ARRAY_SIZE(zero_entries),
+				       GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, zero_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(zero_handle, 1));
+	KUNIT_EXPECT_TRUE(test,
+			  __stack_depot_dec_count_and_test(zero_handle, 2));
+}
+
 static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_count_helpers),
 	{}
 };
 

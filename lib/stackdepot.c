@@ -749,6 +749,81 @@ struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle)
 	return depot_fetch_stack(handle);
 }
 
+bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count)
+{
+	struct stack_record *stack;
+	unsigned int raw;
+
+	if (!handle || !count)
+		return false;
+
+	stack = depot_fetch_stack(handle);
+	if (!stack)
+		return false;
+
+	raw = refcount_read(&stack->count);
+	/* Saturated records are persistent but not in counted mode. */
+	if (raw > INT_MAX)
+		return false;
+
+	*count = raw;
+	return true;
+}
+
+void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count)
+{
+	struct stack_record *stack;
+
+	/* Reject values outside positive refcount space. */
+	if (!handle || !count || count >= INT_MAX)
+		return;
+
+	stack = depot_fetch_stack(handle);
+	if (!stack)
+		return;
+
+	refcount_set(&stack->count, (int)count);
+}
+
+bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
+{
+	struct stack_record *stack;
+	int new;
+	int old = REFCOUNT_SATURATED;
+	bool was_saturated = false;
+
+	if (!handle || !count || count >= INT_MAX)
+		return false;
+
+	stack = depot_fetch_stack(handle);
+	if (!stack)
+		return false;
+
+	new = 1 + (int)count;
+	/* Stack records are already published; only the counter value changes. */
+	if (atomic_try_cmpxchg_relaxed(&stack->count.refs, &old, new))
+		was_saturated = true;
+	else
+		refcount_add((int)count, &stack->count);
+
+	return was_saturated;
+}
+
+bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
+				      unsigned int count)
+{
+	struct stack_record *stack;
+
+	if (!handle || !count || count >= INT_MAX)
+		return false;
+
+	stack = depot_fetch_stack(handle);
+	if (!stack)
+		return false;
+
+	return refcount_sub_and_test((int)count, &stack->count);
+}
+
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 			       unsigned long **entries)
 {
@@ -784,7 +859,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	unsigned long *stack_entries;
 	unsigned int nr_entries;
 
-	if (!entries || !max_entries)
+	if (!handle || !entries || !max_entries)
 		return 0;
 
 	nr_entries = stack_depot_fetch(handle, &stack_entries);

@@ -50,6 +50,7 @@ union handle_parts {
 	};
 };
 
+/* Internal only. New users should not inspect stack records directly. */
 struct stack_record {
 	struct list_head hash_list;	/* Links in the hash table */
 	u32 hash;			/* Hash in hash table */
@@ -189,6 +190,62 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
 struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle);
 
 /**
+ * __stack_depot_get_count - Get a counted stack record count
+ *
+ * @handle: Stack depot handle
+ * @count:  Pointer to store the count
+ *
+ * This function is only for internal purposes.
+ *
+ * Return: true on success, false if @handle is invalid, @count is NULL, or the
+ * stack record is not in counted mode.
+ */
+bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
+
+/**
+ * __stack_depot_set_count - Set a stack record count
+ *
+ * @handle: Stack depot handle
+ * @count: Count to set
+ *
+ * This function is only for internal purposes.
+ * @count must be greater than 0 and less than %INT_MAX.
+ */
+void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
+
+/**
+ * __stack_depot_inc_count - Increment a stack record count
+ *
+ * @handle: Stack depot handle
+ * @count: Count to add
+ *
+ * This function is only for internal purposes.
+ * @count must be greater than 0 and less than %INT_MAX.
+ *
+ * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
+ * this helper switches a saturated record to counted mode, it stores @count + 1.
+ *
+ * Return: true if this call switched the record from saturated to counted,
+ * false otherwise.
+ */
+bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
+
+/**
+ * __stack_depot_dec_count_and_test - Decrement a stack record count
+ *
+ * @handle: Stack depot handle
+ * @count: Count to subtract
+ *
+ * This function is only for internal purposes.
+ * @count must be greater than 0 and less than %INT_MAX.
+ *
+ * Return: true if the resulting count is 0, false if the resulting count is
+ * non-zero or @handle is invalid.
+ */
+bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
+				      unsigned int count);
+
+/**
  * stack_depot_fetch - Fetch a stack trace from stack depot
  *
  * @handle:	Stack depot handle returned from stack_depot_save()
@@ -212,9 +269,9 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * entirely and 0 is returned.
  *
  * Callers must ensure @handle remains valid for the duration of this call.
- * Handles saved with %STACK_DEPOT_FLAG_GET require a held reference; handles
- * saved without %STACK_DEPOT_FLAG_GET are persistent, and callers must not call
- * stack_depot_put() on them.
+ * Persistent handles saved without %STACK_DEPOT_FLAG_GET require no extra
+ * reference; handles saved with %STACK_DEPOT_FLAG_GET require a held reference.
+ * Callers must not call stack_depot_put() on persistent handles.
  * Racing this helper with stack_depot_put() on the same handle is invalid.
  *
  * Return: Number of frames copied, 0 if @entries is NULL, @max_entries is 0,

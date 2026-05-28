@@ -118,8 +118,6 @@ static noinline void register_early_stack(void)
 
 static __init void init_page_owner(void)
 {
-	struct stack_record *stack_record;
-
 	if (!page_owner_enabled)
 		return;
 
@@ -130,12 +128,10 @@ static __init void init_page_owner(void)
 	/* Initialize dummy and failure stacks and link them to stack_list */
 	dummy_stack.handle = dummy_handle;
 	failure_stack.handle = failure_handle;
-	stack_record = __stack_depot_get_stack_record(dummy_handle);
-	if (stack_record)
-		refcount_set(&stack_record->count, 1);
-	stack_record = __stack_depot_get_stack_record(failure_handle);
-	if (stack_record)
-		refcount_set(&stack_record->count, 1);
+	if (dummy_handle)
+		__stack_depot_set_count(dummy_handle, 1);
+	if (failure_handle)
+		__stack_depot_set_count(failure_handle, 1);
 	dummy_stack.next = &failure_stack;
 	stack_list = &dummy_stack;
 	static_branch_enable(&page_owner_inited);
@@ -207,39 +203,17 @@ static void add_stack_record_to_list(depot_stack_handle_t handle, gfp_t gfp_mask
 }
 
 static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
-				   int nr_base_pages)
+				   unsigned int nr_base_pages)
 {
-	struct stack_record *stack_record = __stack_depot_get_stack_record(handle);
-
-	if (!stack_record)
-		return;
-
-	/*
-	 * New stack_record's that do not use STACK_DEPOT_FLAG_GET start
-	 * with REFCOUNT_SATURATED to catch spurious increments of their
-	 * refcount.
-	 * Since we do not use STACK_DEPOT_FLAG_GET API, let us
-	 * set a refcount of 1 ourselves.
-	 */
-	if (refcount_read(&stack_record->count) == REFCOUNT_SATURATED) {
-		int old = REFCOUNT_SATURATED;
-
-		if (atomic_try_cmpxchg_relaxed(&stack_record->count.refs, &old, 1))
-			/* Add the new stack to our list */
-			add_stack_record_to_list(handle, gfp_mask);
-	}
-	refcount_add(nr_base_pages, &stack_record->count);
+	/* The first count is the marker for stack_list membership. */
+	if (__stack_depot_inc_count(handle, nr_base_pages))
+		add_stack_record_to_list(handle, gfp_mask);
 }
 
 static void dec_stack_record_count(depot_stack_handle_t handle,
-				   int nr_base_pages)
+				   unsigned int nr_base_pages)
 {
-	struct stack_record *stack_record = __stack_depot_get_stack_record(handle);
-
-	if (!stack_record)
-		return;
-
-	if (refcount_sub_and_test(nr_base_pages, &stack_record->count))
+	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);
 }
@@ -910,20 +884,19 @@ static int stack_print(struct seq_file *m, void *v)
 	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
 	depot_stack_handle_t handle = stack->handle;
-	struct stack_record *stack_record;
+	unsigned int nr_base_pages;
 	unsigned int i, nr_entries;
-	int nr_base_pages;
 
 	if (!handle)
 		return 0;
 
-	stack_record = __stack_depot_get_stack_record(handle);
-	if (!stack_record)
+	if (!__stack_depot_get_count(handle, &nr_base_pages) || !nr_base_pages)
 		return 0;
+	nr_base_pages--;
 
-	nr_base_pages = refcount_read(&stack_record->count) - 1;
-
-	if (nr_base_pages < 1 || nr_base_pages < page_owner_pages_threshold)
+	/* Drop the list marker before applying the page-count threshold. */
+	if (!nr_base_pages ||
+	    (unsigned long)nr_base_pages < page_owner_pages_threshold)
 		return 0;
 
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
@@ -935,7 +908,7 @@ static int stack_print(struct seq_file *m, void *v)
 
 	for (i = 0; i < nr_entries; i++)
 		seq_printf(m, " %pS\n", (void *)priv->entries[i]);
-	seq_printf(m, "nr_base_pages: %d\n\n", nr_base_pages);
+	seq_printf(m, "nr_base_pages: %u\n\n", nr_base_pages);
 
 	return 0;
 }

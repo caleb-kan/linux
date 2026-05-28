@@ -2707,8 +2707,8 @@ config RESOURCE_KUNIT_TEST
 	  If unsure, say N.
 
 config STACKDEPOT_KUNIT_TEST
-	tristate "KUnit test for stack depot" if !KUNIT_ALL_TESTS
-	depends on KUNIT && STACKDEPOT
+	bool "KUnit test for stack depot" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && STACKDEPOT
 	default KUNIT_ALL_TESTS
 	help
 	  Enable this option to test stack depot API behavior at boot.
