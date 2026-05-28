@@ -856,7 +856,10 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 
 	old = refcount_read(&stack->count);
 	do {
-		if (old <= 0 || count > (unsigned int)old)
+		if (old <= 0)
+			return false;
+		if (WARN_ONCE(count > (unsigned int)old,
+			      "stack depot count underflow\n"))
 			return false;
 
 		new = old - (int)count;
