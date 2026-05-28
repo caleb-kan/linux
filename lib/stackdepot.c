@@ -36,6 +36,8 @@
 #include <linux/memblock.h>
 #include <linux/kasan-enabled.h>
 
+#include <asm/stackdepot.h>
+
 /*
  * The pool_index is offset by 1 so the first record does not have a 0 handle.
  */
@@ -854,7 +856,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 
 	old = refcount_read(&stack->count);
 	do {
-		if (old <= 0 || count > old)
+		if (old <= 0 || count > (unsigned int)old)
 			return false;
 
 		new = old - (int)count;
@@ -864,6 +866,24 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 		smp_acquire__after_ctrl_dep();
 
 	return !new;
+}
+
+bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
+				      u32 *low)
+{
+	if (!prefix_id || !low)
+		return false;
+
+	return arch_stack_depot_frame_try_compress(frame, prefix_id, low);
+}
+
+bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
+				    unsigned long *frame)
+{
+	if (!frame)
+		return false;
+
+	return arch_stack_depot_frame_decompress(prefix_id, low, frame);
 }
 
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
@@ -900,20 +920,27 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 {
 	unsigned long *stack_entries;
 	unsigned int nr_entries;
+	unsigned int copied = 0;
 
 	if (!handle || !entries || !max_entries)
 		return 0;
 
+	/* Protect against reuse if stack_depot_put() retires the record mid-copy. */
+	rcu_read_lock_sched_notrace();
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)
-		return 0;
+		goto out;
 
 	/*
 	 * stack_depot_fetch() returns stackdepot-owned storage; the caller must
 	 * keep the handle valid while this helper copies from it.
 	 */
 	memcpy(entries, stack_entries, nr_entries * sizeof(*entries));
-	return nr_entries;
+	copied = nr_entries;
+
+out:
+	rcu_read_unlock_sched_notrace();
+	return copied;
 }
 EXPORT_SYMBOL_GPL(stack_depot_fetch_into);
 

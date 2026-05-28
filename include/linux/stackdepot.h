@@ -204,6 +204,38 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);
 
 /**
+ * __stack_depot_frame_try_compress - Try to compress a stack frame
+ *
+ * @frame: Stack frame address
+ * @prefix_id: Storage for the architecture prefix id
+ * @low: Storage for the compressed low bits
+ *
+ * This function is only for internal purposes. The generic implementation is a
+ * raw fallback and never compresses.
+ * @prefix_id and @low must be non-NULL.
+ *
+ * Return: true if @frame was compressed, false otherwise.
+ */
+bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
+				      u32 *low);
+
+/**
+ * __stack_depot_frame_decompress - Decompress a stack frame
+ *
+ * @prefix_id: Architecture prefix id returned by compression
+ * @low: Compressed low bits returned by compression
+ * @frame: Storage for the decompressed frame
+ *
+ * This function is only for internal purposes. The generic raw fallback has no
+ * compressed representation to decode.
+ * @frame must be non-NULL.
+ *
+ * Return: true if @frame was decompressed, false otherwise.
+ */
+bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
+				    unsigned long *frame);
+
+/**
  * stack_depot_fetch - Fetch a stack trace from stack depot
  *
  * @handle:	Stack depot handle returned from stack_depot_save()
