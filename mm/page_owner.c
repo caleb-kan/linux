@@ -125,9 +125,10 @@ static __init void init_page_owner(void)
 	register_failure_stack();
 	register_early_stack();
 	init_early_allocated_pages();
-	/* Initialize dummy and failure stacks and link them to stack_list */
+	/* Initialize dummy and failure stacks and link them to stack_list. */
 	dummy_stack.handle = dummy_handle;
 	failure_stack.handle = failure_handle;
+	/* These counts are the stack_list membership markers. */
 	if (dummy_handle)
 		__stack_depot_set_count(dummy_handle, 1);
 	if (failure_handle)
@@ -205,7 +206,7 @@ static void add_stack_record_to_list(depot_stack_handle_t handle, gfp_t gfp_mask
 static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 				   unsigned int nr_base_pages)
 {
-	/* The first count is the marker for stack_list membership. */
+	/* The saturated-to-counted transition reserves the stack_list marker. */
 	if (__stack_depot_inc_count(handle, nr_base_pages))
 		add_stack_record_to_list(handle, gfp_mask);
 }
@@ -895,8 +896,7 @@ static int stack_print(struct seq_file *m, void *v)
 	nr_base_pages--;
 
 	/* Drop the list marker before applying the page-count threshold. */
-	if (!nr_base_pages ||
-	    (unsigned long)nr_base_pages < page_owner_pages_threshold)
+	if (!nr_base_pages || nr_base_pages < page_owner_pages_threshold)
 		return 0;
 
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */

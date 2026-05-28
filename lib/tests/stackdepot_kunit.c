@@ -95,7 +95,7 @@ static void stackdepot_count_helpers(struct kunit *test)
 		0x1234567800330000UL,
 	};
 	depot_stack_handle_t handle;
-	depot_stack_handle_t zero_handle;
+	depot_stack_handle_t second_handle;
 	unsigned int count;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
@@ -106,7 +106,7 @@ static void stackdepot_count_helpers(struct kunit *test)
 	__stack_depot_set_count(0, 0);
 	__stack_depot_set_count(0, INT_MAX);
 	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, 1));
-	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, INT_MAX - 1));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, INT_MAX - 2));
 	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(0, 1));
 
 	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
@@ -114,12 +114,15 @@ static void stackdepot_count_helpers(struct kunit *test)
 
 	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
 	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, INT_MAX));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, INT_MAX - 1));
+	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(handle, 1));
 	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
 
 	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(handle, 2));
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
 	KUNIT_EXPECT_EQ(test, count, 3);
 
+	/* Already-counted records take the refcount_add() path. */
 	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(handle, 4));
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
 	KUNIT_EXPECT_EQ(test, count, 7);
@@ -140,12 +143,14 @@ static void stackdepot_count_helpers(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
 	KUNIT_EXPECT_EQ(test, count, 6);
 
-	zero_handle = stack_depot_save(zero_entries, ARRAY_SIZE(zero_entries),
-				       GFP_KERNEL);
-	KUNIT_ASSERT_NE(test, zero_handle, (depot_stack_handle_t)0);
-	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(zero_handle, 1));
-	KUNIT_EXPECT_TRUE(test,
-			  __stack_depot_dec_count_and_test(zero_handle, 2));
+	second_handle = stack_depot_save(zero_entries, ARRAY_SIZE(zero_entries),
+					 GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, second_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(second_handle, 1));
+	KUNIT_EXPECT_FALSE(test,
+			   __stack_depot_dec_count_and_test(second_handle, 1));
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(second_handle, &count));
+	KUNIT_EXPECT_EQ(test, count, 1);
 }
 
 static struct kunit_case stackdepot_test_cases[] = {

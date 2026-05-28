@@ -39,44 +39,6 @@ typedef u32 depot_stack_handle_t;
 #define DEPOT_POOL_INDEX_BITS (DEPOT_HANDLE_BITS - DEPOT_OFFSET_BITS - \
 			       STACK_DEPOT_EXTRA_BITS)
 
-#ifdef CONFIG_STACKDEPOT
-/* Compact structure that stores a reference to a stack. */
-union handle_parts {
-	depot_stack_handle_t handle;
-	struct {
-		u32 pool_index_plus_1	: DEPOT_POOL_INDEX_BITS;
-		u32 offset		: DEPOT_OFFSET_BITS;
-		u32 extra		: STACK_DEPOT_EXTRA_BITS;
-	};
-};
-
-/* Internal only. New users should not inspect stack records directly. */
-struct stack_record {
-	struct list_head hash_list;	/* Links in the hash table */
-	u32 hash;			/* Hash in hash table */
-	u32 size;			/* Number of stored frames */
-	union handle_parts handle;	/* Constant after initialization */
-	refcount_t count;
-	union {
-		unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];	/* Frames */
-		struct {
-			/*
-			 * An important invariant of the implementation is to
-			 * only place a stack record onto the freelist iff its
-			 * refcount is zero. Because stack records with a zero
-			 * refcount are never considered as valid, it is safe to
-			 * union @entries and freelist management state below.
-			 * Conversely, as soon as an entry is off the freelist
-			 * and its refcount becomes non-zero, the below must not
-			 * be accessed until being placed back on the freelist.
-			 */
-			struct list_head free_list;	/* Links in the freelist */
-			unsigned long rcu_state;	/* RCU cookie */
-		};
-	};
-};
-#endif
-
 typedef u32 depot_flags_t;
 
 /*
@@ -179,17 +141,6 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
 				      unsigned int nr_entries, gfp_t alloc_flags);
 
 /**
- * __stack_depot_get_stack_record - Get a pointer to a stack_record struct
- *
- * @handle: Stack depot handle
- *
- * This function is only for internal purposes.
- *
- * Return: Returns a pointer to a stack_record struct
- */
-struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle);
-
-/**
  * __stack_depot_get_count - Get a counted stack record count
  *
  * @handle: Stack depot handle
@@ -209,7 +160,11 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
  * @count: Count to set
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than %INT_MAX.
+ * If @count is 0 or greater than or equal to %INT_MAX, this function is a
+ * no-op.
+ * Callers that use this to switch a saturated record to counted mode must
+ * separately make the record discoverable by their own tracking structure.
+ * Callers must have exclusive access to the stack record count.
  */
 void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
 
@@ -220,10 +175,12 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to add
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than %INT_MAX.
+ * @count must be greater than 0 and less than %INT_MAX - 1.
  *
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
+ * For records already in counted mode, cumulative overflow is handled by the
+ * underlying refcount_add() warning and saturation semantics.
  *
  * Return: true if this call switched the record from saturated to counted,
  * false otherwise.
@@ -237,10 +194,11 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to subtract
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than %INT_MAX.
+ * @count must be greater than 0 and less than %INT_MAX - 1.
  *
  * Return: true if the resulting count is 0, false if the resulting count is
- * non-zero or @handle is invalid.
+ * non-zero, @handle is invalid, the stack record is not in counted mode, or
+ * @count is greater than the current count.
  */
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);
@@ -277,6 +235,8 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * Return: Number of frames copied, 0 if @entries is NULL, @max_entries is 0,
  * @handle is 0 or invalid, stack depot is disabled, or @max_entries is less
  * than the number of stored frames.
+ * An invalid or post-put @handle may also trigger a warning from the underlying
+ * stack_depot_fetch() call.
  */
 unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 				    unsigned long *entries,

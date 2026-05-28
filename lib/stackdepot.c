@@ -54,6 +54,41 @@ static bool __stack_depot_early_init_passed __initdata;
 /* Initial seed for jhash2. */
 #define STACK_HASH_SEED 0x9747b28c
 
+/* Compact structure that stores a reference to a stack. */
+union handle_parts {
+	depot_stack_handle_t handle;
+	struct {
+		u32 pool_index_plus_1	: DEPOT_POOL_INDEX_BITS;
+		u32 offset				: DEPOT_OFFSET_BITS;
+		u32 extra				: STACK_DEPOT_EXTRA_BITS;
+	};
+};
+
+struct stack_record {
+	struct list_head hash_list;	/* Links in the hash table */
+	u32 hash;					/* Hash in hash table */
+	u32 size;					/* Number of stored frames */
+	union handle_parts handle;	/* Constant after initialization */
+	refcount_t count;
+	union {
+		unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];	/* Frames */
+		struct {
+			/*
+			 * An important invariant of the implementation is to
+			 * only place a stack record onto the freelist iff its
+			 * refcount is zero. Because stack records with a zero
+			 * refcount are never considered as valid, it is safe to
+			 * union @entries and freelist management state below.
+			 * Conversely, as soon as an entry is off the freelist
+			 * and its refcount becomes non-zero, the below must not
+			 * be accessed until being placed back on the freelist.
+			 */
+			struct list_head free_list;	/* Links in the freelist */
+			unsigned long rcu_state;	/* RCU cookie */
+		};
+	};
+};
+
 /* Hash table of stored stack records. */
 static struct list_head *stack_table;
 /* Fixed order of the number of table buckets. Used when KASAN is enabled. */
@@ -741,14 +776,6 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
 }
 EXPORT_SYMBOL_GPL(stack_depot_save);
 
-struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle)
-{
-	if (!handle)
-		return NULL;
-
-	return depot_fetch_stack(handle);
-}
-
 bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count)
 {
 	struct stack_record *stack;
@@ -761,7 +788,8 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count)
 	if (!stack)
 		return false;
 
-	raw = refcount_read(&stack->count);
+	/* Negative saturated counts wrap above INT_MAX when converted to unsigned. */
+	raw = (unsigned int)refcount_read(&stack->count);
 	/* Saturated records are persistent but not in counted mode. */
 	if (raw > INT_MAX)
 		return false;
@@ -792,7 +820,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	int old = REFCOUNT_SATURATED;
 	bool was_saturated = false;
 
-	if (!handle || !count || count >= INT_MAX)
+	if (!handle || !count || count >= (unsigned int)INT_MAX - 1)
 		return false;
 
 	stack = depot_fetch_stack(handle);
@@ -804,6 +832,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	if (atomic_try_cmpxchg_relaxed(&stack->count.refs, &old, new))
 		was_saturated = true;
 	else
+		/* Preserve refcount_add() overflow warning and saturation semantics. */
 		refcount_add((int)count, &stack->count);
 
 	return was_saturated;
@@ -813,15 +842,28 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count)
 {
 	struct stack_record *stack;
+	int new;
+	int old;
 
-	if (!handle || !count || count >= INT_MAX)
+	if (!handle || !count || count >= (unsigned int)INT_MAX - 1)
 		return false;
 
 	stack = depot_fetch_stack(handle);
 	if (!stack)
 		return false;
 
-	return refcount_sub_and_test((int)count, &stack->count);
+	old = refcount_read(&stack->count);
+	do {
+		if (old <= 0 || count > old)
+			return false;
+
+		new = old - (int)count;
+	} while (!atomic_try_cmpxchg_release(&stack->count.refs, &old, new));
+
+	if (!new)
+		smp_acquire__after_ctrl_dep();
+
+	return !new;
 }
 
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
