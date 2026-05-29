@@ -893,6 +893,7 @@ static int stack_print(struct seq_file *m, void *v)
 		return 0;
 
 	/* Counts can race with page_owner updates; seq_file output is best effort. */
+	/* A count of 1 is only the stack_list membership marker. */
 	if (!__stack_depot_get_count(handle, &nr_base_pages) || nr_base_pages <= 1)
 		return 0;
 	nr_base_pages--;

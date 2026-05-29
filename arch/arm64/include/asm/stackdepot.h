@@ -4,6 +4,7 @@
 
 #include <linux/sizes.h>
 #include <linux/types.h>
+#include <linux/limits.h>
 #include <asm/sections.h>
 
 #define STACK_DEPOT_ARM64_FRAME_LOW_MASK	0x00000000ffffffffUL
@@ -39,7 +40,7 @@ static inline bool arch_stack_depot_frame_prefix(u8 prefix_id,
 		*prefix = text_prefix;
 		return true;
 	case STACK_DEPOT_ARM64_NEXT_PREFIX_ID:
-		if (text_prefix > ~0UL - SZ_4G)
+		if (text_prefix > ULONG_MAX - SZ_4G)
 			return false;
 		*prefix = text_prefix + SZ_4G;
 		return true;

@@ -159,6 +159,7 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
  * @count:  Pointer to store the count
  *
  * This function is only for internal purposes.
+ * The returned count is an unsynchronized snapshot for diagnostics.
  *
  * Return: true on success, false if @handle is invalid, @count is NULL, or the
  * stack record is not in counted mode.
@@ -172,7 +173,7 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
  * @count: Count to set
  *
  * This function is only for internal purposes.
- * If @count is 0 or greater than or equal to %INT_MAX, this function is a
+ * If @count is 0 or greater than %INT_MAX, this function is a
  * no-op.
  * Callers that use this to switch a saturated record to counted mode must
  * separately make the record discoverable by their own tracking structure.
@@ -187,7 +188,8 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to add
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than or equal to %INT_MAX - 1.
+ * If @count is 0, this function is a no-op. Otherwise @count must be less
+ * than or equal to %INT_MAX - 1.
  *
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
@@ -215,7 +217,8 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  * Return: true if the resulting count is 0, false if the resulting count is
  * non-zero, @handle is invalid, the stack record is not in counted mode, or
  * @count is greater than the current count. Saturated persistent records are
- * not in counted mode and fail closed without changing the record.
+ * not in counted mode and fail closed without changing the record. Underflow
+ * attempts warn and leave the count unchanged.
  */
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);
@@ -284,7 +287,7 @@ int __stack_depot_frame_run_init(const unsigned long *entries,
  * This function is only for internal purposes. It does not write partial
  * compressed payloads: if any frame does not match @run, @dst is unchanged.
  * Compressed runs require @scratch to hold at least @run->nr_entries entries;
- * raw runs do not use @scratch.
+ * raw runs do not use @scratch. @dst must not overlap @entries.
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */

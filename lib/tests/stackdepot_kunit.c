@@ -248,6 +248,9 @@ static void stackdepot_count_helpers(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, count, 2);
 	__stack_depot_set_count(handle, INT_MAX);
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_EXPECT_EQ(test, count, (unsigned int)INT_MAX);
+	__stack_depot_set_count(handle, 2);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
 	KUNIT_EXPECT_EQ(test, count, 2);
 	__stack_depot_set_count(handle, 6);
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
@@ -401,6 +404,37 @@ static void stackdepot_frame_run_raw_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
+
+#ifdef CONFIG_ARM64
+static void stackdepot_frame_run_arm64_roundtrip(struct kunit *test)
+{
+	unsigned long entries[] = {
+		arch_stack_depot_frame_text_prefix() | 0x1000UL,
+		arch_stack_depot_frame_text_prefix() | 0x2000UL,
+	};
+	unsigned long read_scratch[ARRAY_SIZE(entries)];
+	unsigned long out[ARRAY_SIZE(entries)] = {};
+	struct stack_depot_frame_run run;
+	u32 payload[ARRAY_SIZE(entries)];
+	u32 write_scratch[ARRAY_SIZE(entries)];
+	int ret;
+
+	ret = frame_run_init(entries, ARRAY_SIZE(entries), &run);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, run.mode, STACK_DEPOT_FRAME_COMPRESSED);
+	KUNIT_EXPECT_EQ(test, run.nr_entries,
+			(unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_EQ(test, run.bytes, sizeof(payload));
+
+	ret = frame_run_write(&run, entries, payload, sizeof(payload),
+			      write_scratch, ARRAY_SIZE(write_scratch));
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	ret = frame_run_read(&run, payload, run.bytes, out, ARRAY_SIZE(out),
+			     read_scratch, ARRAY_SIZE(read_scratch));
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+}
+#endif
 
 #ifdef CONFIG_X86_64
 static void stackdepot_frame_run_x86_64_roundtrip(struct kunit *test)
@@ -568,6 +602,30 @@ static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 	fetched = tfetch(node, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+}
+
+static void stackdepot_trie_node_rejects_compressed_without_scratch(struct kunit *test)
+{
+	unsigned long entries[] = {
+#ifdef CONFIG_ARM64
+		arch_stack_depot_frame_text_prefix() | 0x1000UL,
+#else
+		0xffffffff81001000UL,
+#endif
+	};
+	struct stack_depot_frame_run run;
+	void *storage;
+	size_t size;
+	int ret;
+
+	KUNIT_ASSERT_EQ(test, frame_run_init(entries, ARRAY_SIZE(entries), &run), 0);
+	size = __stack_depot_trie_node_size(&run);
+	KUNIT_ASSERT_GT(test, size, (size_t)0);
+	storage = kunit_kzalloc(test, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, storage);
+	ret = tnode_init(storage, size, NULL, 1, entries, ARRAY_SIZE(entries),
+			 NULL, 0);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 #endif
 
@@ -770,6 +828,9 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_frame_arm64),
 #endif
 	KUNIT_CASE(stackdepot_frame_run_raw_roundtrip),
+#ifdef CONFIG_ARM64
+	KUNIT_CASE(stackdepot_frame_run_arm64_roundtrip),
+#endif
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_run_x86_64_roundtrip),
 	KUNIT_CASE(stackdepot_frame_run_x86_64_boundary),
@@ -780,6 +841,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_node_parent_chain),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 	KUNIT_CASE(stackdepot_trie_node_compressed_roundtrip),
+	KUNIT_CASE(stackdepot_trie_node_rejects_compressed_without_scratch),
 #endif
 	KUNIT_CASE(stackdepot_trie_node_rejects_short_storage),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)

@@ -821,7 +821,7 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count)
 	struct stack_record *stack;
 
 	/* Reject values outside positive refcount space. */
-	if (!handle || !count || count >= (unsigned int)INT_MAX)
+	if (!handle || !count || count > (unsigned int)INT_MAX)
 		return;
 
 	stack = depot_fetch_stack(handle);
@@ -852,10 +852,10 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	 * page_owner count. The cmpxchg only performs that one-way transition;
 	 * normal counted records continue through refcount_add().
 	 */
-	if (atomic_try_cmpxchg_release(&stack->count.refs, &old, new))
+	if (atomic_try_cmpxchg(&stack->count.refs, &old, new))
 		was_saturated = true;
 	else
-		/* Existing counted records only need refcount_add()'s relaxed ordering. */
+		/* Another caller may have won the transition; count this caller too. */
 		refcount_add((int)count, &stack->count);
 
 	return was_saturated;
@@ -934,6 +934,9 @@ bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
 {
 	return frame_decompress(prefix_id, low, frame);
 }
+
+static bool stack_depot_ranges_overlap(const void *a, size_t a_size,
+				       const void *b, size_t b_size);
 
 static size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
 {
@@ -1025,6 +1028,8 @@ stack_depot_frame_run_write_compressed(const struct stack_depot_frame_run *run,
 
 	if (!scratch || nr_scratch < run->nr_entries)
 		return -EINVAL;
+	if (stack_depot_ranges_overlap(dst, run->bytes, scratch, run->bytes))
+		return -EINVAL;
 
 	for (i = 0; i < run->nr_entries; i++) {
 		u8 prefix_id;
@@ -1052,6 +1057,9 @@ static int frame_run_write(const struct stack_depot_frame_run *run,
 	if (ret)
 		return ret;
 	if (dst_size < run->bytes)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(dst, run->bytes, entries,
+				       run->nr_entries * sizeof(*entries)))
 		return -EINVAL;
 
 	if (run->mode == STACK_DEPOT_FRAME_RAW) {
@@ -1100,21 +1108,23 @@ static int frame_run_read_to_scratch(const struct stack_depot_frame_run *run,
 				     const void *src, unsigned long *scratch,
 				     unsigned int nr_scratch)
 {
+	/* Private staging helper: the public frame-run read API rejects aliasing. */
 	return stack_depot_frame_run_read_compressed(run, src, scratch, scratch,
 						      nr_scratch);
 }
 
-static bool stack_depot_ranges_overlap(const void *a, const void *b, size_t size)
+static bool stack_depot_ranges_overlap(const void *a, size_t a_size,
+				       const void *b, size_t b_size)
 {
 	unsigned long a_start = (unsigned long)a;
 	unsigned long b_start = (unsigned long)b;
 	unsigned long a_end;
 	unsigned long b_end;
 
-	if (!size)
+	if (!a_size || !b_size)
 		return false;
-	if (check_add_overflow(a_start, size, &a_end) ||
-	    check_add_overflow(b_start, size, &b_end))
+	if (check_add_overflow(a_start, a_size, &a_end) ||
+	    check_add_overflow(b_start, b_size, &b_end))
 		return true;
 
 	return a_start < b_end && b_start < a_end;
@@ -1135,6 +1145,10 @@ static int frame_run_read(const struct stack_depot_frame_run *run,
 		return ret;
 	if (src_size < run->bytes || max_entries < run->nr_entries)
 		return -EINVAL;
+	if (stack_depot_ranges_overlap(entries,
+				       run->nr_entries * sizeof(*entries), src,
+				       run->bytes))
+		return -EINVAL;
 
 	if (run->mode == STACK_DEPOT_FRAME_RAW) {
 		memcpy(entries, src, run->bytes);
@@ -1142,8 +1156,9 @@ static int frame_run_read(const struct stack_depot_frame_run *run,
 	}
 	if (!scratch || nr_scratch < run->nr_entries)
 		return -EINVAL;
-	if (stack_depot_ranges_overlap(entries, scratch,
-				       run->nr_entries * sizeof(*entries)))
+	if (stack_depot_ranges_overlap(entries,
+				       run->nr_entries * sizeof(*entries), scratch,
+				       run->nr_entries * sizeof(*scratch)))
 		return -EINVAL;
 
 	return stack_depot_frame_run_read_compressed(run, src, entries, scratch,
@@ -1261,6 +1276,9 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 	total = node->stack_len;
 	if (max_entries < total || nr_scratch < total)
 		return 0;
+	if (stack_depot_ranges_overlap(entries, total * sizeof(*entries), scratch,
+				       total * sizeof(*scratch)))
+		return 0;
 
 	pos = total;
 	for (node = leaf; node; node = node->parent) {
@@ -1344,6 +1362,8 @@ stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *ar
 
 	if (!array || !pos || !found)
 		return -EINVAL;
+	*pos = 0;
+	*found = false;
 
 	right = array->nr_children;
 	while (left < right) {
@@ -1364,7 +1384,6 @@ stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *ar
 	}
 
 	*pos = left;
-	*found = false;
 	return 0;
 }
 
@@ -1397,6 +1416,7 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 	unsigned int i;
 	unsigned long frame;
 	size_t old_size;
+	bool overlaps;
 	bool found;
 
 	if (!node || !new_array || stack_depot_trie_node_first_frame(node, &frame))
@@ -1407,12 +1427,16 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 		return -EINVAL;
 	if (old_array == new_array)
 		return -EINVAL;
+	if (old_array && !IS_ALIGNED((unsigned long)old_array, __alignof__(*old_array)))
+		return -EINVAL;
 
 	nr_old = old_array ? old_array->nr_children : 0;
 	if (new_storage_size < __stack_depot_trie_child_array_size(nr_old + 1))
 		return -EINVAL;
 	old_size = __stack_depot_trie_child_array_size(nr_old);
-	if (old_array && stack_depot_ranges_overlap(old_array, new_array, old_size))
+	overlaps = old_array && stack_depot_ranges_overlap(old_array, old_size,
+							  new_array, new_storage_size);
+	if (overlaps)
 		return -EINVAL;
 
 	if (old_array) {
@@ -1475,7 +1499,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	if (!handle || !entries || !max_entries)
 		return 0;
 
-	/* Follow stackdepot's non-traceable RCU read-side convention while copying. */
+	/* Defer stack record reuse while copying from stackdepot-owned storage. */
 	rcu_read_lock_sched_notrace();
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)
