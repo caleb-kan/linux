@@ -23,6 +23,7 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
+#include <linux/overflow.h>
 #include <linux/poison.h>
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
@@ -91,6 +92,14 @@ struct stack_record {
 			unsigned long rcu_state;	/* RCU cookie */
 		};
 	};
+};
+
+struct stack_depot_trie_node {
+	const struct stack_depot_trie_node *parent;
+	u32 leaf_id;
+	u32 stack_len;
+	struct stack_depot_frame_run run;
+	unsigned char data[];
 };
 
 /* Hash table of stored stack records. */
@@ -832,7 +841,12 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 		return false;
 
 	new = 1 + (int)count;
-	/* No refcount_t helper conditionally converts saturation to a count. */
+	/*
+	 * Intentional refcount_t internals use: no helper conditionally
+	 * converts the persistent REFCOUNT_SATURATED sentinel to a positive
+	 * page_owner count. The cmpxchg only performs that one-way transition;
+	 * normal counted records continue through refcount_add().
+	 */
 	if (atomic_try_cmpxchg_relaxed(&stack->count.refs, &old, new))
 		was_saturated = true;
 	else
@@ -856,9 +870,14 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	if (!stack)
 		return false;
 
-	/* refcount_sub_and_test() would saturate; underflow must not change count. */
+	/*
+	 * Intentional refcount_t internals use: refcount_sub_and_test() would
+	 * saturate on underflow, but page_owner accounting must warn and leave
+	 * the existing count unchanged.
+	 */
 	old = refcount_read(&stack->count);
 	do {
+		/* Retry checks use the current count as the linearization point. */
 		/* Saturated counts are negative and intentionally fail closed here. */
 		if (old <= 0)
 			return false;
@@ -933,9 +952,10 @@ static int stack_depot_frame_run_validate(const struct stack_depot_frame_run *ru
 	return 0;
 }
 
-int __stack_depot_frame_run_init(const unsigned long *entries,
-				 unsigned int nr_entries,
-				 struct stack_depot_frame_run *run)
+static int frame_run_init_lows(const unsigned long *entries,
+			       unsigned int nr_entries,
+			       struct stack_depot_frame_run *run,
+			       u32 *lows, unsigned int nr_lows)
 {
 	u8 first_prefix = 0;
 	u32 low;
@@ -945,9 +965,14 @@ int __stack_depot_frame_run_init(const unsigned long *entries,
 	if (!entries || !nr_entries || !run ||
 	    nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
 		return -EINVAL;
+	/* The run length is not known yet, so scratch must cover the input. */
+	if (lows && nr_entries > nr_lows)
+		return -EINVAL;
 
 	/* Only prefix ids classify a run; low bits are scratch for the arch hook. */
 	compressed = frame_try_compress(entries[0], &first_prefix, &low);
+	if (compressed && lows)
+		lows[0] = low;
 	for (i = 1; i < nr_entries; i++) {
 		u8 prefix_id;
 		bool next;
@@ -957,6 +982,8 @@ int __stack_depot_frame_run_init(const unsigned long *entries,
 			break;
 		if (compressed && prefix_id != first_prefix)
 			break;
+		if (compressed && lows)
+			lows[i] = low;
 	}
 
 	/* @i is the first non-matching frame, or @nr_entries if all matched. */
@@ -966,6 +993,13 @@ int __stack_depot_frame_run_init(const unsigned long *entries,
 	run->bytes = i * stack_depot_frame_run_entry_bytes(run->mode);
 
 	return 0;
+}
+
+int __stack_depot_frame_run_init(const unsigned long *entries,
+				 unsigned int nr_entries,
+				 struct stack_depot_frame_run *run)
+{
+	return frame_run_init_lows(entries, nr_entries, run, NULL, 0);
 }
 
 static int
@@ -991,10 +1025,9 @@ stack_depot_frame_run_write_compressed(const struct stack_depot_frame_run *run,
 	return 0;
 }
 
-int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
-				  const unsigned long *entries, void *dst,
-				  size_t dst_size, u32 *scratch,
-				  unsigned int nr_scratch)
+static int frame_run_write(const struct stack_depot_frame_run *run,
+			   const unsigned long *entries, void *dst, size_t dst_size,
+			   u32 *scratch, unsigned int nr_scratch)
 {
 	int ret;
 
@@ -1014,6 +1047,14 @@ int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
 
 	return stack_depot_frame_run_write_compressed(run, entries, dst, scratch,
 						       nr_scratch);
+}
+
+int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
+				  const unsigned long *entries, void *dst,
+				  size_t dst_size, u32 *scratch,
+				  unsigned int nr_scratch)
+{
+	return frame_run_write(run, entries, dst, dst_size, scratch, nr_scratch);
 }
 
 static int
@@ -1036,15 +1077,39 @@ stack_depot_frame_run_read_compressed(const struct stack_depot_frame_run *run,
 			return -EINVAL;
 	}
 
-	memcpy(entries, scratch, run->nr_entries * sizeof(*entries));
+	if (entries != scratch)
+		memcpy(entries, scratch, run->nr_entries * sizeof(*entries));
 	return 0;
 }
 
-int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
-				 const void *src, size_t src_size,
-				 unsigned long *entries, unsigned int max_entries,
-				 unsigned long *scratch,
-				 unsigned int nr_scratch)
+static int frame_run_read_to_scratch(const struct stack_depot_frame_run *run,
+				     const void *src, unsigned long *scratch,
+				     unsigned int nr_scratch)
+{
+	return stack_depot_frame_run_read_compressed(run, src, scratch, scratch,
+						      nr_scratch);
+}
+
+static bool stack_depot_ranges_overlap(const void *a, const void *b, size_t size)
+{
+	unsigned long a_start = (unsigned long)a;
+	unsigned long b_start = (unsigned long)b;
+	unsigned long a_end;
+	unsigned long b_end;
+
+	if (!size)
+		return false;
+	if (check_add_overflow(a_start, size, &a_end) ||
+	    check_add_overflow(b_start, size, &b_end))
+		return true;
+
+	return a_start < b_end && b_start < a_end;
+}
+
+static int frame_run_read(const struct stack_depot_frame_run *run,
+			  const void *src, size_t src_size,
+			  unsigned long *entries, unsigned int max_entries,
+			  unsigned long *scratch, unsigned int nr_scratch)
 {
 	int ret;
 
@@ -1061,9 +1126,128 @@ int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
 		memcpy(entries, src, run->bytes);
 		return 0;
 	}
+	if (!scratch || nr_scratch < run->nr_entries)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(entries, scratch,
+				       run->nr_entries * sizeof(*entries)))
+		return -EINVAL;
 
 	return stack_depot_frame_run_read_compressed(run, src, entries, scratch,
 						      nr_scratch);
+}
+
+int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
+				 const void *src, size_t src_size,
+				 unsigned long *entries, unsigned int max_entries,
+				 unsigned long *scratch,
+				 unsigned int nr_scratch)
+{
+	return frame_run_read(run, src, src_size, entries, max_entries, scratch,
+			      nr_scratch);
+}
+
+size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run)
+{
+	size_t size;
+
+	if (stack_depot_frame_run_validate(run))
+		return 0;
+	size = sizeof(struct stack_depot_trie_node);
+	if (check_add_overflow(size, run->bytes, &size))
+		return 0;
+
+	return ALIGN(size, sizeof(unsigned long));
+}
+
+int __stack_depot_trie_node_init(void *storage, size_t storage_size,
+				 const void *parent, u32 leaf_id,
+				 const unsigned long *entries,
+				 unsigned int nr_entries, u32 *scratch,
+				 unsigned int nr_scratch)
+{
+	const struct stack_depot_trie_node *parent_node = parent;
+	struct stack_depot_trie_node *node = storage;
+	struct stack_depot_frame_run run;
+	u32 stack_len;
+	int ret;
+
+	if (!node || !entries)
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)node, __alignof__(*node)))
+		return -EINVAL;
+
+	ret = frame_run_init_lows(entries, nr_entries, &run, scratch, nr_scratch);
+	if (ret)
+		return ret;
+	if (run.nr_entries != nr_entries)
+		return -EINVAL;
+	if (storage_size < __stack_depot_trie_node_size(&run))
+		return -EINVAL;
+	/* frame_run_init_lows() permits NULL scratch for raw runs only. */
+	if (run.mode == STACK_DEPOT_FRAME_COMPRESSED &&
+	    (!scratch || nr_scratch < run.nr_entries))
+		return -EINVAL;
+	if (parent_node) {
+		if (!parent_node->stack_len ||
+		    parent_node->stack_len > U32_MAX - run.nr_entries)
+			return -EINVAL;
+		stack_len = parent_node->stack_len + run.nr_entries;
+	} else {
+		stack_len = run.nr_entries;
+	}
+
+	/* Caller-owned storage is not publishable unless the payload write succeeds. */
+	if (run.mode == STACK_DEPOT_FRAME_COMPRESSED)
+		/* Copy low-bit payloads staged by frame_run_init_lows(). */
+		memcpy(node->data, scratch, run.bytes);
+	else
+		memcpy(node->data, entries, run.bytes);
+
+	node->parent = parent_node;
+	node->leaf_id = leaf_id;
+	node->stack_len = stack_len;
+	node->run = run;
+	return 0;
+}
+
+unsigned int
+__stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
+			      unsigned int max_entries, unsigned long *scratch,
+			      unsigned int nr_scratch)
+{
+	const struct stack_depot_trie_node *node = leaf;
+	unsigned int pos;
+	unsigned int total;
+	int ret;
+
+	if (!node || !entries || !scratch || !node->stack_len || !node->leaf_id)
+		return 0;
+
+	total = node->stack_len;
+	if (max_entries < total || nr_scratch < total)
+		return 0;
+
+	pos = total;
+	for (node = leaf; node; node = node->parent) {
+		if (node->stack_len != pos || node->run.nr_entries > pos)
+			return 0;
+		pos -= node->run.nr_entries;
+		/* Decode directly into the staged output; node->data is separate. */
+		if (node->run.mode == STACK_DEPOT_FRAME_COMPRESSED)
+			ret = frame_run_read_to_scratch(&node->run, node->data,
+							&scratch[pos], nr_scratch - pos);
+		else
+			ret = frame_run_read(&node->run, node->data,
+					     node->run.bytes, &scratch[pos],
+					     nr_scratch - pos, NULL, 0);
+		if (ret)
+			return 0;
+	}
+	if (pos)
+		return 0;
+
+	memcpy(entries, scratch, total * sizeof(*entries));
+	return total;
 }
 
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,

@@ -192,9 +192,10 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
  * For records already in counted mode, cumulative overflow is handled by the
- * underlying refcount_add() warning and saturation semantics. If such an
- * overflow happens, later count get/decrement attempts treat the record as no
- * longer counted and fail closed.
+ * underlying refcount_add() saturation semantics; whether that also emits a
+ * warning depends on the refcount configuration. If such an overflow happens,
+ * later count get/decrement attempts treat the record as no longer counted and
+ * fail closed.
  *
  * Return: true if this call switched the record from saturated to counted,
  * false otherwise.
@@ -212,7 +213,8 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  *
  * Return: true if the resulting count is 0, false if the resulting count is
  * non-zero, @handle is invalid, the stack record is not in counted mode, or
- * @count is greater than the current count.
+ * @count is greater than the current count. Saturated persistent records are
+ * not in counted mode and fail closed without changing the record.
  */
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);
@@ -258,7 +260,9 @@ bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
  *
  * This function is only for internal purposes. It describes the longest prefix
  * of @entries that can be stored with one payload format: raw frames, or low
- * bits for frames that all share one architecture prefix id.
+ * bits for frames that all share one architecture prefix id. It does not write
+ * frame payload data; callers that need payload storage must call
+ * __stack_depot_frame_run_write().
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */
@@ -302,7 +306,8 @@ int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
  * This function is only for internal purposes. It does not write partial
  * compressed output: if any frame cannot be decoded, @entries is unchanged.
  * Compressed runs require @scratch to hold at least @run->nr_entries entries;
- * raw runs do not use @scratch.
+ * raw runs do not use @scratch. For compressed runs, @entries and @scratch
+ * must not overlap.
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */
@@ -311,6 +316,62 @@ int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
 				 unsigned long *entries, unsigned int max_entries,
 				 unsigned long *scratch,
 				 unsigned int nr_scratch);
+
+/**
+ * __stack_depot_trie_node_size - Get storage size for a trie node
+ *
+ * @run: Frame run to store in the node
+ *
+ * This function is only for internal purposes.
+ *
+ * Return: Aligned node storage size, 0 on invalid input.
+ */
+size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run);
+
+/**
+ * __stack_depot_trie_node_init - Initialize a trie node in caller storage
+ *
+ * @storage: Node storage to initialize
+ * @storage_size: Size of @storage in bytes
+ * @parent: Parent node or NULL for a root node
+ * @leaf_id: Non-zero id when this node terminates a stored stack
+ * @entries: Homogeneous frame run to store in this node
+ * @nr_entries: Number of frames in @entries
+ * @scratch: Scratch buffer for compressed frame payloads
+ * @nr_scratch: Number of 32-bit entries that fit in @scratch
+ *
+ * This function is only for internal purposes. It does not publish @storage;
+ * all @entries must fit in one raw or same-prefix compressed frame run. Callers
+ * remain responsible for lifetime and visibility. Callers must discard @storage
+ * unless this function returns 0.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int __stack_depot_trie_node_init(void *storage, size_t storage_size,
+				 const void *parent, u32 leaf_id,
+				 const unsigned long *entries,
+				 unsigned int nr_entries, u32 *scratch,
+				 unsigned int nr_scratch);
+
+/**
+ * __stack_depot_trie_fetch_into - Materialize a trie parent chain
+ *
+ * @leaf: Leaf node to materialize from
+ * @entries: Caller-owned output buffer
+ * @max_entries: Number of frames that fit in @entries
+ * @scratch: Caller-owned scratch buffer for staged output
+ * @nr_scratch: Number of frames that fit in @scratch
+ *
+ * This function is only for internal purposes. It stages the full stack into
+ * @scratch first, so failures do not partially write @entries. @scratch is
+ * caller-owned temporary storage and may be modified on failure.
+ *
+ * Return: Number of frames copied, 0 on invalid input or too-small buffers.
+ */
+unsigned int
+__stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
+			      unsigned int max_entries, unsigned long *scratch,
+			      unsigned int nr_scratch);
 
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot
