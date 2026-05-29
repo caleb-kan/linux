@@ -51,6 +51,18 @@ typedef u32 depot_flags_t;
 #define STACK_DEPOT_FLAGS_NUM	2
 #define STACK_DEPOT_FLAGS_MASK	((depot_flags_t)((1 << STACK_DEPOT_FLAGS_NUM) - 1))
 
+enum stack_depot_frame_mode {
+	STACK_DEPOT_FRAME_RAW,
+	STACK_DEPOT_FRAME_COMPRESSED,
+};
+
+struct stack_depot_frame_run {
+	enum stack_depot_frame_mode mode;
+	u8 prefix_id;
+	unsigned int nr_entries;
+	size_t bytes;
+};
+
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
  *
@@ -180,7 +192,9 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
  * For records already in counted mode, cumulative overflow is handled by the
- * underlying refcount_add() warning and saturation semantics.
+ * underlying refcount_add() warning and saturation semantics. If such an
+ * overflow happens, later count get/decrement attempts treat the record as no
+ * longer counted and fail closed.
  *
  * Return: true if this call switched the record from saturated to counted,
  * false otherwise.
@@ -234,6 +248,69 @@ bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
  */
 bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
 				    unsigned long *frame);
+
+/**
+ * __stack_depot_frame_run_init - Describe a homogeneous stack frame run
+ *
+ * @entries: Stack frames that start the run
+ * @nr_entries: Number of frames available in @entries
+ * @run: Storage for the resulting run description
+ *
+ * This function is only for internal purposes. It describes the longest prefix
+ * of @entries that can be stored with one payload format: raw frames, or low
+ * bits for frames that all share one architecture prefix id.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int __stack_depot_frame_run_init(const unsigned long *entries,
+				 unsigned int nr_entries,
+				 struct stack_depot_frame_run *run);
+
+/**
+ * __stack_depot_frame_run_write - Write a stack frame run payload
+ *
+ * @run: Run description returned by __stack_depot_frame_run_init()
+ * @entries: Stack frames to encode
+ * @dst: Payload buffer to write
+ * @dst_size: Size of @dst in bytes
+ * @scratch: Scratch buffer for compressed frame payloads
+ * @nr_scratch: Number of 32-bit entries that fit in @scratch
+ *
+ * This function is only for internal purposes. It does not write partial
+ * compressed payloads: if any frame does not match @run, @dst is unchanged.
+ * Compressed runs require @scratch to hold at least @run->nr_entries entries;
+ * raw runs do not use @scratch.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
+				  const unsigned long *entries, void *dst,
+				  size_t dst_size, u32 *scratch,
+				  unsigned int nr_scratch);
+
+/**
+ * __stack_depot_frame_run_read - Read a stack frame run payload
+ *
+ * @run: Run description for the payload
+ * @src: Payload buffer to read
+ * @src_size: Size of @src in bytes
+ * @entries: Storage for decoded stack frames
+ * @max_entries: Number of frames that fit in @entries
+ * @scratch: Scratch buffer for decoded compressed frames
+ * @nr_scratch: Number of frames that fit in @scratch
+ *
+ * This function is only for internal purposes. It does not write partial
+ * compressed output: if any frame cannot be decoded, @entries is unchanged.
+ * Compressed runs require @scratch to hold at least @run->nr_entries entries;
+ * raw runs do not use @scratch.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
+				 const void *src, size_t src_size,
+				 unsigned long *entries, unsigned int max_entries,
+				 unsigned long *scratch,
+				 unsigned int nr_scratch);
 
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot

@@ -15,6 +15,7 @@
 #define pr_fmt(fmt) "stackdepot: " fmt
 
 #include <linux/debugfs.h>
+#include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/jhash.h>
 #include <linux/kernel.h>
@@ -24,6 +25,7 @@
 #include <linux/mutex.h>
 #include <linux/poison.h>
 #include <linux/printk.h>
+#include <linux/ratelimit.h>
 #include <linux/rculist.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
@@ -830,7 +832,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 		return false;
 
 	new = 1 + (int)count;
-	/* Stack records are already published; only the counter value changes. */
+	/* No refcount_t helper conditionally converts saturation to a count. */
 	if (atomic_try_cmpxchg_relaxed(&stack->count.refs, &old, new))
 		was_saturated = true;
 	else
@@ -854,12 +856,14 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	if (!stack)
 		return false;
 
+	/* refcount_sub_and_test() would saturate; underflow must not change count. */
 	old = refcount_read(&stack->count);
 	do {
+		/* Saturated counts are negative and intentionally fail closed here. */
 		if (old <= 0)
 			return false;
-		if (WARN_ONCE(count > (unsigned int)old,
-			      "stack depot count underflow\n"))
+		if (WARN_RATELIMIT(count > (unsigned int)old,
+				   "stack depot count underflow\n"))
 			return false;
 
 		new = old - (int)count;
@@ -871,8 +875,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	return !new;
 }
 
-bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
-				      u32 *low)
+static bool frame_try_compress(unsigned long frame, u8 *prefix_id, u32 *low)
 {
 	if (!prefix_id || !low)
 		return false;
@@ -880,13 +883,187 @@ bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
 	return arch_stack_depot_frame_try_compress(frame, prefix_id, low);
 }
 
-bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
-				    unsigned long *frame)
+bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
+				      u32 *low)
+{
+	return frame_try_compress(frame, prefix_id, low);
+}
+
+static bool frame_decompress(u8 prefix_id, u32 low, unsigned long *frame)
 {
 	if (!frame)
 		return false;
 
 	return arch_stack_depot_frame_decompress(prefix_id, low, frame);
+}
+
+bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
+				    unsigned long *frame)
+{
+	return frame_decompress(prefix_id, low, frame);
+}
+
+static size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
+{
+	if (mode == STACK_DEPOT_FRAME_COMPRESSED)
+		return sizeof(u32);
+	return sizeof(unsigned long);
+}
+
+static int stack_depot_frame_run_validate(const struct stack_depot_frame_run *run)
+{
+	size_t bytes;
+
+	if (!run || !run->nr_entries ||
+	    run->nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return -EINVAL;
+
+	switch (run->mode) {
+	case STACK_DEPOT_FRAME_RAW:
+	case STACK_DEPOT_FRAME_COMPRESSED:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	bytes = run->nr_entries * stack_depot_frame_run_entry_bytes(run->mode);
+	if (run->bytes != bytes)
+		return -EINVAL;
+
+	return 0;
+}
+
+int __stack_depot_frame_run_init(const unsigned long *entries,
+				 unsigned int nr_entries,
+				 struct stack_depot_frame_run *run)
+{
+	u8 first_prefix = 0;
+	u32 low;
+	unsigned int i;
+	bool compressed;
+
+	if (!entries || !nr_entries || !run ||
+	    nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return -EINVAL;
+
+	/* Only prefix ids classify a run; low bits are scratch for the arch hook. */
+	compressed = frame_try_compress(entries[0], &first_prefix, &low);
+	for (i = 1; i < nr_entries; i++) {
+		u8 prefix_id;
+		bool next;
+
+		next = frame_try_compress(entries[i], &prefix_id, &low);
+		if (next != compressed)
+			break;
+		if (compressed && prefix_id != first_prefix)
+			break;
+	}
+
+	/* @i is the first non-matching frame, or @nr_entries if all matched. */
+	run->mode = compressed ? STACK_DEPOT_FRAME_COMPRESSED : STACK_DEPOT_FRAME_RAW;
+	run->prefix_id = compressed ? first_prefix : 0;
+	run->nr_entries = i;
+	run->bytes = i * stack_depot_frame_run_entry_bytes(run->mode);
+
+	return 0;
+}
+
+static int
+stack_depot_frame_run_write_compressed(const struct stack_depot_frame_run *run,
+				       const unsigned long *entries, void *dst,
+				       u32 *scratch, unsigned int nr_scratch)
+{
+	unsigned int i;
+
+	if (!scratch || nr_scratch < run->nr_entries)
+		return -EINVAL;
+
+	for (i = 0; i < run->nr_entries; i++) {
+		u8 prefix_id;
+
+		if (!frame_try_compress(entries[i], &prefix_id, &scratch[i]))
+			return -EINVAL;
+		if (prefix_id != run->prefix_id)
+			return -EINVAL;
+	}
+
+	memcpy(dst, scratch, run->bytes);
+	return 0;
+}
+
+int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
+				  const unsigned long *entries, void *dst,
+				  size_t dst_size, u32 *scratch,
+				  unsigned int nr_scratch)
+{
+	int ret;
+
+	if (!entries || !dst)
+		return -EINVAL;
+
+	ret = stack_depot_frame_run_validate(run);
+	if (ret)
+		return ret;
+	if (dst_size < run->bytes)
+		return -EINVAL;
+
+	if (run->mode == STACK_DEPOT_FRAME_RAW) {
+		memcpy(dst, entries, run->bytes);
+		return 0;
+	}
+
+	return stack_depot_frame_run_write_compressed(run, entries, dst, scratch,
+						       nr_scratch);
+}
+
+static int
+stack_depot_frame_run_read_compressed(const struct stack_depot_frame_run *run,
+				      const void *src, unsigned long *entries,
+				      unsigned long *scratch,
+				      unsigned int nr_scratch)
+{
+	unsigned int i;
+
+	if (!scratch || nr_scratch < run->nr_entries)
+		return -EINVAL;
+
+	/* Stage lows first so a bad compressed run cannot leave a partial write. */
+	for (i = 0; i < run->nr_entries; i++) {
+		u32 low;
+
+		memcpy(&low, (const char *)src + i * sizeof(low), sizeof(low));
+		if (!frame_decompress(run->prefix_id, low, &scratch[i]))
+			return -EINVAL;
+	}
+
+	memcpy(entries, scratch, run->nr_entries * sizeof(*entries));
+	return 0;
+}
+
+int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
+				 const void *src, size_t src_size,
+				 unsigned long *entries, unsigned int max_entries,
+				 unsigned long *scratch,
+				 unsigned int nr_scratch)
+{
+	int ret;
+
+	if (!src || !entries)
+		return -EINVAL;
+
+	ret = stack_depot_frame_run_validate(run);
+	if (ret)
+		return ret;
+	if (src_size < run->bytes || max_entries < run->nr_entries)
+		return -EINVAL;
+
+	if (run->mode == STACK_DEPOT_FRAME_RAW) {
+		memcpy(entries, src, run->bytes);
+		return 0;
+	}
+
+	return stack_depot_frame_run_read_compressed(run, src, entries, scratch,
+						      nr_scratch);
 }
 
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
@@ -928,7 +1105,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	if (!handle || !entries || !max_entries)
 		return 0;
 
-	/* Protect against reuse if stack_depot_put() retires the record mid-copy. */
+	/* Follow stackdepot's non-traceable RCU read-side convention while copying. */
 	rcu_read_lock_sched_notrace();
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)

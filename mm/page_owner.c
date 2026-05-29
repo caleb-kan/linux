@@ -885,7 +885,7 @@ static int stack_print(struct seq_file *m, void *v)
 	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
 	depot_stack_handle_t handle = stack->handle;
-	unsigned int nr_base_pages;
+	unsigned int nr_base_pages = 0;
 	unsigned int i, nr_entries;
 
 	if (!handle)

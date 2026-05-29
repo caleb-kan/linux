@@ -11,6 +11,9 @@
 static inline bool arch_stack_depot_frame_try_compress(unsigned long frame,
 						       u8 *prefix_id, u32 *low)
 {
+	if (!prefix_id || !low)
+		return false;
+
 	if ((frame & ~STACK_DEPOT_X86_64_FRAME_LOW_MASK) !=
 	    STACK_DEPOT_X86_64_FRAME_PREFIX)
 		return false;
@@ -23,6 +26,9 @@ static inline bool arch_stack_depot_frame_try_compress(unsigned long frame,
 static inline bool arch_stack_depot_frame_decompress(u8 prefix_id, u32 low,
 						     unsigned long *frame)
 {
+	if (!frame)
+		return false;
+
 	if (prefix_id)
 		return false;
 
