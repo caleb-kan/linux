@@ -7,6 +7,7 @@
 #include <linux/stacktrace.h>
 #include <linux/page_owner.h>
 #include <linux/jump_label.h>
+#include <linux/limits.h>
 #include <linux/migrate.h>
 #include <linux/stackdepot.h>
 #include <linux/seq_file.h>
@@ -43,7 +44,7 @@ struct stack {
 
 struct page_owner_stack_seq {
 	struct stack *stack;
-	unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];
+	unsigned long entries[PAGE_OWNER_STACK_DEPTH];
 };
 
 static struct stack dummy_stack;
@@ -878,7 +879,7 @@ static void *stack_next(struct seq_file *m, void *v, loff_t *ppos)
 	return stack;
 }
 
-static unsigned long page_owner_pages_threshold;
+static unsigned int page_owner_pages_threshold;
 
 static int stack_print(struct seq_file *m, void *v)
 {
@@ -891,12 +892,12 @@ static int stack_print(struct seq_file *m, void *v)
 	if (!handle)
 		return 0;
 
-	if (!__stack_depot_get_count(handle, &nr_base_pages) || !nr_base_pages)
+	if (!__stack_depot_get_count(handle, &nr_base_pages) || nr_base_pages <= 1)
 		return 0;
 	nr_base_pages--;
 
 	/* Drop the list marker before applying the page-count threshold. */
-	if (!nr_base_pages || nr_base_pages < page_owner_pages_threshold)
+	if (nr_base_pages < page_owner_pages_threshold)
 		return 0;
 
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
@@ -945,7 +946,10 @@ static int page_owner_threshold_get(void *data, u64 *val)
 
 static int page_owner_threshold_set(void *data, u64 val)
 {
-	WRITE_ONCE(page_owner_pages_threshold, val);
+	if (val > UINT_MAX)
+		return -ERANGE;
+
+	WRITE_ONCE(page_owner_pages_threshold, (unsigned int)val);
 	return 0;
 }
 
