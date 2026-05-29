@@ -187,7 +187,7 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to add
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than %INT_MAX - 1.
+ * @count must be greater than 0 and less than or equal to %INT_MAX - 1.
  *
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
@@ -196,6 +196,7 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * warning depends on the refcount configuration. If such an overflow happens,
  * later count get/decrement attempts treat the record as no longer counted and
  * fail closed.
+ * Callers must ensure @handle remains valid for the duration of this call.
  *
  * Return: true if this call switched the record from saturated to counted,
  * false otherwise.
@@ -209,7 +210,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to subtract
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than %INT_MAX - 1.
+ * @count must be greater than 0 and less than or equal to %INT_MAX - 1.
  *
  * Return: true if the resulting count is 0, false if the resulting count is
  * non-zero, @handle is invalid, the stack record is not in counted mode, or
@@ -372,6 +373,66 @@ unsigned int
 __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 			      unsigned int max_entries, unsigned long *scratch,
 			      unsigned int nr_scratch);
+
+/**
+ * __stack_depot_trie_child_array_size - Get storage size for child pointers
+ *
+ * @nr_children: Number of child pointers stored in the array
+ *
+ * This function is only for internal purposes.
+ *
+ * Return: Aligned child-array storage size, 0 on overflow.
+ */
+size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
+
+/**
+ * __stack_depot_trie_child_array_init - Initialize sorted child storage
+ *
+ * @storage: Child-array storage to initialize
+ * @storage_size: Size of @storage in bytes
+ * @children: Children sorted by first decoded frame
+ * @nr_children: Number of child pointers in @children
+ *
+ * This function is only for internal purposes. It does not publish @storage;
+ * callers remain responsible for lifetime and visibility. Callers must discard
+ * @storage unless this function returns 0.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int
+__stack_depot_trie_child_array_init(void *storage, size_t storage_size,
+				    const void * const *children,
+				    unsigned int nr_children);
+
+/**
+ * __stack_depot_trie_child_array_find - Find a child by first frame
+ *
+ * @storage: Child-array storage initialized by child_array_init/insert
+ * @frame: First decoded frame to search for
+ *
+ * This function is only for internal purposes.
+ *
+ * Return: Child pointer if found, NULL otherwise.
+ */
+const void *
+__stack_depot_trie_child_array_find(const void *storage, unsigned long frame);
+
+/**
+ * __stack_depot_trie_child_array_insert - Build replacement child storage
+ *
+ * @old_storage: Existing sorted child array, or NULL
+ * @child: Child node to insert
+ * @new_storage: Replacement child-array storage to initialize
+ * @new_storage_size: Size of @new_storage in bytes
+ *
+ * This function is only for internal purposes. It builds a new sorted child
+ * array and rejects duplicate first-frame keys and in-place updates.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int
+__stack_depot_trie_child_array_insert(const void *old_storage, const void *child,
+				      void *new_storage, size_t new_storage_size);
 
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot

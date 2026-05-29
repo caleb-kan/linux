@@ -102,6 +102,11 @@ struct stack_depot_trie_node {
 	unsigned char data[];
 };
 
+struct stack_depot_trie_child_array {
+	unsigned int nr_children;
+	const struct stack_depot_trie_node *children[];
+};
+
 /* Hash table of stored stack records. */
 static struct list_head *stack_table;
 /* Fixed order of the number of table buckets. Used when KASAN is enabled. */
@@ -803,8 +808,8 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count)
 
 	/* Negative saturated counts wrap above INT_MAX when converted to unsigned. */
 	raw = (unsigned int)refcount_read(&stack->count);
-	/* Saturated records are persistent but not in counted mode. */
-	if (raw > INT_MAX)
+	/* Saturated and zero records are not in counted mode. */
+	if (!raw || raw > INT_MAX)
 		return false;
 
 	*count = raw;
@@ -816,7 +821,7 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count)
 	struct stack_record *stack;
 
 	/* Reject values outside positive refcount space. */
-	if (!handle || !count || count >= INT_MAX)
+	if (!handle || !count || count >= (unsigned int)INT_MAX)
 		return;
 
 	stack = depot_fetch_stack(handle);
@@ -833,7 +838,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	int old = REFCOUNT_SATURATED;
 	bool was_saturated = false;
 
-	if (!handle || !count || count >= (unsigned int)INT_MAX - 1)
+	if (!handle || !count || count > (unsigned int)INT_MAX - 1)
 		return false;
 
 	stack = depot_fetch_stack(handle);
@@ -847,10 +852,10 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	 * page_owner count. The cmpxchg only performs that one-way transition;
 	 * normal counted records continue through refcount_add().
 	 */
-	if (atomic_try_cmpxchg_relaxed(&stack->count.refs, &old, new))
+	if (atomic_try_cmpxchg_release(&stack->count.refs, &old, new))
 		was_saturated = true;
 	else
-		/* Preserve refcount_add() overflow warning and saturation semantics. */
+		/* Existing counted records only need refcount_add()'s relaxed ordering. */
 		refcount_add((int)count, &stack->count);
 
 	return was_saturated;
@@ -863,7 +868,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	int new;
 	int old;
 
-	if (!handle || !count || count >= (unsigned int)INT_MAX - 1)
+	if (!handle || !count || count > (unsigned int)INT_MAX - 1)
 		return false;
 
 	stack = depot_fetch_stack(handle);
@@ -875,14 +880,22 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	 * saturate on underflow, but page_owner accounting must warn and leave
 	 * the existing count unchanged.
 	 */
+	/* A stale read is harmless: cmpxchg reloads @old before retry checks. */
 	old = refcount_read(&stack->count);
 	do {
-		/* Retry checks use the current count as the linearization point. */
+		bool underflow;
+
+		/*
+		 * Retry checks use the observed count as this operation's
+		 * linearization point. A racing increment not observed here is
+		 * ordered after this decrement.
+		 */
 		/* Saturated counts are negative and intentionally fail closed here. */
 		if (old <= 0)
 			return false;
-		if (WARN_RATELIMIT(count > (unsigned int)old,
-				   "stack depot count underflow\n"))
+
+		underflow = count > (unsigned int)old;
+		if (WARN_RATELIMIT(underflow, "stack depot count underflow\n"))
 			return false;
 
 		new = old - (int)count;
@@ -969,6 +982,7 @@ static int frame_run_init_lows(const unsigned long *entries,
 	if (lows && nr_entries > nr_lows)
 		return -EINVAL;
 
+	/* On success, only lows[0..run->nr_entries - 1] are initialized. */
 	/* Only prefix ids classify a run; low bits are scratch for the arch hook. */
 	compressed = frame_try_compress(entries[0], &first_prefix, &low);
 	if (compressed && lows)
@@ -1159,6 +1173,27 @@ size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run)
 	return ALIGN(size, sizeof(unsigned long));
 }
 
+static int
+stack_depot_trie_node_first_frame(const struct stack_depot_trie_node *node,
+				  unsigned long *frame)
+{
+	u32 low;
+
+	if (!node || !frame || stack_depot_frame_run_validate(&node->run))
+		return -EINVAL;
+
+	if (node->run.mode == STACK_DEPOT_FRAME_RAW) {
+		memcpy(frame, node->data, sizeof(*frame));
+		return 0;
+	}
+
+	memcpy(&low, node->data, sizeof(low));
+	if (!frame_decompress(node->run.prefix_id, low, frame))
+		return -EINVAL;
+
+	return 0;
+}
+
 int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 				 const void *parent, u32 leaf_id,
 				 const unsigned long *entries,
@@ -1232,6 +1267,7 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 		if (node->stack_len != pos || node->run.nr_entries > pos)
 			return 0;
 		pos -= node->run.nr_entries;
+		/* nr_scratch >= total, and pos tracks the remaining prefix length. */
 		/* Decode directly into the staged output; node->data is separate. */
 		if (node->run.mode == STACK_DEPOT_FRAME_COMPRESSED)
 			ret = frame_run_read_to_scratch(&node->run, node->data,
@@ -1248,6 +1284,156 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 
 	memcpy(entries, scratch, total * sizeof(*entries));
 	return total;
+}
+
+size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
+{
+	size_t size;
+	size_t bytes;
+
+	if (check_mul_overflow((size_t)nr_children,
+			       sizeof(struct stack_depot_trie_node *), &bytes))
+		return 0;
+	size = sizeof(struct stack_depot_trie_child_array);
+	if (check_add_overflow(size, bytes, &size))
+		return 0;
+
+	return ALIGN(size, sizeof(unsigned long));
+}
+
+int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
+					const void * const *children,
+					unsigned int nr_children)
+{
+	struct stack_depot_trie_child_array *array = storage;
+	const struct stack_depot_trie_node * const *nodes =
+		(const struct stack_depot_trie_node * const *)children;
+	unsigned long last = 0;
+	unsigned int i;
+
+	if (!array || storage_size < __stack_depot_trie_child_array_size(nr_children))
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)array, __alignof__(*array)))
+		return -EINVAL;
+	if (nr_children && !nodes)
+		return -EINVAL;
+
+	for (i = 0; i < nr_children; i++) {
+		unsigned long frame;
+
+		if (stack_depot_trie_node_first_frame(nodes[i], &frame))
+			return -EINVAL;
+		if (!frame || (i && frame <= last))
+			return -EINVAL;
+		last = frame;
+	}
+
+	array->nr_children = nr_children;
+	for (i = 0; i < nr_children; i++)
+		array->children[i] = nodes[i];
+
+	return 0;
+}
+
+static int
+stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
+				   unsigned long frame, unsigned int *pos, bool *found)
+{
+	unsigned int left = 0;
+	unsigned int right;
+
+	if (!array || !pos || !found)
+		return -EINVAL;
+
+	right = array->nr_children;
+	while (left < right) {
+		unsigned int mid = left + (right - left) / 2;
+		unsigned long mid_frame;
+
+		if (stack_depot_trie_node_first_frame(array->children[mid], &mid_frame))
+			return -EINVAL;
+		if (mid_frame < frame) {
+			left = mid + 1;
+		} else if (mid_frame > frame) {
+			right = mid;
+		} else {
+			*pos = mid;
+			*found = true;
+			return 0;
+		}
+	}
+
+	*pos = left;
+	*found = false;
+	return 0;
+}
+
+const void *
+__stack_depot_trie_child_array_find(const void *storage, unsigned long frame)
+{
+	const struct stack_depot_trie_child_array *array = storage;
+	unsigned int pos;
+	bool found;
+
+	if (!array)
+		return NULL;
+
+	if (stack_depot_trie_child_lower_bound(array, frame, &pos, &found) ||
+	    !found)
+		return NULL;
+
+	return array->children[pos];
+}
+
+int
+__stack_depot_trie_child_array_insert(const void *old_storage, const void *child,
+				      void *new_storage, size_t new_storage_size)
+{
+	const struct stack_depot_trie_child_array *old_array = old_storage;
+	struct stack_depot_trie_child_array *new_array = new_storage;
+	const struct stack_depot_trie_node *node = child;
+	unsigned int nr_old;
+	unsigned int pos;
+	unsigned int i;
+	unsigned long frame;
+	size_t old_size;
+	bool found;
+
+	if (!node || !new_array || stack_depot_trie_node_first_frame(node, &frame))
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)new_array, __alignof__(*new_array)))
+		return -EINVAL;
+	if (!frame)
+		return -EINVAL;
+	if (old_array == new_array)
+		return -EINVAL;
+
+	nr_old = old_array ? old_array->nr_children : 0;
+	if (new_storage_size < __stack_depot_trie_child_array_size(nr_old + 1))
+		return -EINVAL;
+	old_size = __stack_depot_trie_child_array_size(nr_old);
+	if (old_array && stack_depot_ranges_overlap(old_array, new_array, old_size))
+		return -EINVAL;
+
+	if (old_array) {
+		if (stack_depot_trie_child_lower_bound(old_array, frame, &pos,
+						       &found))
+			return -EINVAL;
+		if (found)
+			return -EINVAL;
+	} else {
+		/* NULL old array means the new child must be inserted at the start. */
+		pos = 0;
+	}
+
+	new_array->nr_children = nr_old + 1;
+	for (i = 0; i < pos; i++)
+		new_array->children[i] = old_array->children[i];
+	new_array->children[pos] = node;
+	for (i = pos; i < nr_old; i++)
+		new_array->children[i + 1] = old_array->children[i];
+
+	return 0;
 }
 
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,

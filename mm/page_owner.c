@@ -892,6 +892,7 @@ static int stack_print(struct seq_file *m, void *v)
 	if (!handle)
 		return 0;
 
+	/* Counts can race with page_owner updates; seq_file output is best effort. */
 	if (!__stack_depot_get_count(handle, &nr_base_pages) || nr_base_pages <= 1)
 		return 0;
 	nr_base_pages--;
