@@ -358,6 +358,23 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 				 unsigned int nr_scratch);
 
 /**
+ * __stack_depot_trie_node_match - Match entries against one trie node
+ *
+ * @node: Trie node to compare
+ * @entries: Stack frames to match from the start of @node
+ * @nr_entries: Number of frames available in @entries
+ *
+ * This function is only for internal purposes. It compares @entries against the
+ * decoded frame run stored in @node and does not walk parent or child links.
+ *
+ * Return: Number of matching frames, up to the smaller of the node run length
+ * and @nr_entries. Returns 0 on invalid input or a first-frame mismatch.
+ */
+unsigned int __stack_depot_trie_node_match(const void *node,
+					   const unsigned long *entries,
+					   unsigned int nr_entries);
+
+/**
  * __stack_depot_trie_fetch_into - Materialize a trie parent chain
  *
  * @leaf: Leaf node to materialize from

@@ -54,6 +54,12 @@ static unsigned int tfetch(const void *leaf, unsigned long *entries,
 					       nr_scratch);
 }
 
+static unsigned int tmatch(const void *node, const unsigned long *entries,
+			   unsigned int nr_entries)
+{
+	return __stack_depot_trie_node_match(node, entries, nr_entries);
+}
+
 static int child_array_init(void *storage, size_t storage_size,
 			    const void * const *children, unsigned int nr_children)
 {
@@ -581,6 +587,33 @@ static void stackdepot_trie_node_parent_chain(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
 
+static void stackdepot_trie_node_match_raw(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
+	unsigned long mismatch[] = { 0x1000UL, 0x2222UL, 0x3000UL };
+	unsigned long short_input[] = { 0x1000UL, 0x2000UL };
+	unsigned long long_input[] = {
+		0x1000UL, 0x2000UL, 0x3000UL, 0x4000UL,
+	};
+	unsigned long first_mismatch[] = { 0x9000UL, 0x2000UL };
+	unsigned int matched;
+	void *node;
+
+	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 7, &node);
+	KUNIT_EXPECT_EQ(test, tmatch(node, entries, ARRAY_SIZE(entries)),
+			(unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_EQ(test, tmatch(node, mismatch, ARRAY_SIZE(mismatch)), 1U);
+	KUNIT_EXPECT_EQ(test, tmatch(node, short_input, ARRAY_SIZE(short_input)),
+			(unsigned int)ARRAY_SIZE(short_input));
+	KUNIT_EXPECT_EQ(test, tmatch(node, long_input, ARRAY_SIZE(long_input)),
+			(unsigned int)ARRAY_SIZE(entries));
+	matched = tmatch(node, first_mismatch, ARRAY_SIZE(first_mismatch));
+	KUNIT_EXPECT_EQ(test, matched, 0U);
+	KUNIT_EXPECT_EQ(test, tmatch(NULL, entries, ARRAY_SIZE(entries)), 0U);
+	KUNIT_EXPECT_EQ(test, tmatch(node, NULL, ARRAY_SIZE(entries)), 0U);
+	KUNIT_EXPECT_EQ(test, tmatch(node, entries, 0), 0U);
+}
+
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 {
@@ -602,6 +635,33 @@ static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 	fetched = tfetch(node, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+}
+
+static void stackdepot_trie_node_match_compressed(struct kunit *test)
+{
+	unsigned long entries[] = {
+#ifdef CONFIG_ARM64
+		arch_stack_depot_frame_text_prefix() | 0x1000UL,
+		arch_stack_depot_frame_text_prefix() | 0x2000UL,
+#else
+		0xffffffff81001000UL,
+		0xffffffff81002000UL,
+#endif
+	};
+	unsigned long mismatch[] = {
+		entries[0],
+#ifdef CONFIG_ARM64
+		arch_stack_depot_frame_text_prefix() | 0x3000UL,
+#else
+		0xffffffff81003000UL,
+#endif
+	};
+	void *node;
+
+	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 11, &node);
+	KUNIT_EXPECT_EQ(test, tmatch(node, entries, ARRAY_SIZE(entries)),
+			(unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_EQ(test, tmatch(node, mismatch, ARRAY_SIZE(mismatch)), 1U);
 }
 
 static void stackdepot_trie_node_rejects_compressed_without_scratch(struct kunit *test)
@@ -839,8 +899,10 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_frame_run_invalid_inputs),
 	KUNIT_CASE(stackdepot_trie_node_raw_roundtrip),
 	KUNIT_CASE(stackdepot_trie_node_parent_chain),
+	KUNIT_CASE(stackdepot_trie_node_match_raw),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 	KUNIT_CASE(stackdepot_trie_node_compressed_roundtrip),
+	KUNIT_CASE(stackdepot_trie_node_match_compressed),
 	KUNIT_CASE(stackdepot_trie_node_rejects_compressed_without_scratch),
 #endif
 	KUNIT_CASE(stackdepot_trie_node_rejects_short_storage),

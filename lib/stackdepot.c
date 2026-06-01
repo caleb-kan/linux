@@ -1189,24 +1189,33 @@ size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run)
 }
 
 static int
-stack_depot_trie_node_first_frame(const struct stack_depot_trie_node *node,
-				  unsigned long *frame)
+stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
+			    unsigned int index, unsigned long *frame)
 {
 	u32 low;
 
-	if (!node || !frame || stack_depot_frame_run_validate(&node->run))
+	if (!node || !frame || stack_depot_frame_run_validate(&node->run) ||
+	    index >= node->run.nr_entries)
 		return -EINVAL;
 
 	if (node->run.mode == STACK_DEPOT_FRAME_RAW) {
-		memcpy(frame, node->data, sizeof(*frame));
+		memcpy(frame, node->data + index * sizeof(*frame),
+		       sizeof(*frame));
 		return 0;
 	}
 
-	memcpy(&low, node->data, sizeof(low));
+	memcpy(&low, node->data + index * sizeof(low), sizeof(low));
 	if (!frame_decompress(node->run.prefix_id, low, frame))
 		return -EINVAL;
 
 	return 0;
+}
+
+static int
+stack_depot_trie_node_first_frame(const struct stack_depot_trie_node *node,
+				  unsigned long *frame)
+{
+	return stack_depot_trie_node_frame(node, 0, frame);
 }
 
 int __stack_depot_trie_node_init(void *storage, size_t storage_size,
@@ -1258,6 +1267,31 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 	node->stack_len = stack_len;
 	node->run = run;
 	return 0;
+}
+
+unsigned int __stack_depot_trie_node_match(const void *node_ptr,
+					   const unsigned long *entries,
+					   unsigned int nr_entries)
+{
+	const struct stack_depot_trie_node *node = node_ptr;
+	unsigned int limit;
+	unsigned int i;
+
+	if (!node || !entries || !nr_entries ||
+	    stack_depot_frame_run_validate(&node->run))
+		return 0;
+
+	limit = min(node->run.nr_entries, nr_entries);
+	for (i = 0; i < limit; i++) {
+		unsigned long frame;
+
+		if (stack_depot_trie_node_frame(node, i, &frame))
+			return 0;
+		if (frame != entries[i])
+			break;
+	}
+
+	return i;
 }
 
 unsigned int
