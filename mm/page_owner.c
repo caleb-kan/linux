@@ -170,24 +170,34 @@ static noinline depot_stack_handle_t save_stack(gfp_t flags)
 	return handle;
 }
 
-static void add_stack_record_to_list(depot_stack_handle_t handle, gfp_t gfp_mask)
+static struct stack *alloc_stack_record(gfp_t gfp_mask)
 {
-	unsigned long flags;
 	struct stack *stack;
 
-	if (!handle)
-		return;
-
 	if (!gfpflags_allow_spinning(gfp_mask))
-		return;
+		return NULL;
 
 	set_current_in_page_owner();
 	stack = kmalloc(sizeof(*stack), gfp_nested_mask(gfp_mask));
-	if (!stack) {
-		unset_current_in_page_owner();
-		return;
-	}
 	unset_current_in_page_owner();
+
+	return stack;
+}
+
+static void free_stack_record(struct stack *stack)
+{
+	set_current_in_page_owner();
+	kfree(stack);
+	unset_current_in_page_owner();
+}
+
+static void add_stack_record_to_list(depot_stack_handle_t handle,
+				     struct stack *stack)
+{
+	unsigned long flags;
+
+	if (WARN_ON_ONCE(!stack))
+		return;
 
 	stack->handle = handle;
 	stack->next = NULL;
@@ -207,14 +217,30 @@ static void add_stack_record_to_list(depot_stack_handle_t handle, gfp_t gfp_mask
 static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 				   unsigned int nr_base_pages)
 {
+	struct stack *stack = NULL;
+	unsigned int count;
+
+	if (!handle)
+		return;
+
+	if (!__stack_depot_get_count(handle, &count)) {
+		stack = alloc_stack_record(gfp_mask);
+		/* Keep saturated accounting if the list marker cannot be tracked. */
+		if (!stack)
+			return;
+	}
+
 	/* The saturated-to-counted transition reserves the stack_list marker. */
 	if (__stack_depot_inc_count(handle, nr_base_pages))
-		add_stack_record_to_list(handle, gfp_mask);
+		add_stack_record_to_list(handle, stack);
+	else if (stack)
+		free_stack_record(stack);
 }
 
 static void dec_stack_record_count(depot_stack_handle_t handle,
 				   unsigned int nr_base_pages)
 {
+	/* Successful list insertion leaves a marker count after all pages free. */
 	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);
@@ -896,6 +922,7 @@ static int stack_print(struct seq_file *m, void *v)
 	/* A count of 1 is only the stack_list membership marker. */
 	if (!__stack_depot_get_count(handle, &nr_base_pages) || nr_base_pages <= 1)
 		return 0;
+	/* The <= 1 guard above makes removing the list marker safe. */
 	nr_base_pages--;
 
 	/* Drop the list marker before applying the page-count threshold. */
@@ -905,7 +932,7 @@ static int stack_print(struct seq_file *m, void *v)
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
 	nr_entries = stack_depot_fetch_into(handle, priv->entries,
 					    ARRAY_SIZE(priv->entries));
-	/* Buffer matches the stored-depth cap; failure means no stack is available. */
+	/* Buffer matches save_stack()'s stored-depth cap. */
 	if (!nr_entries)
 		return 0;
 

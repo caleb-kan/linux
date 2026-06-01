@@ -225,10 +225,12 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
  * For records already in counted mode, cumulative overflow is handled by the
- * underlying refcount_add() saturation semantics; whether that also emits a
- * warning depends on the refcount configuration. If such an overflow happens,
- * later count get/decrement attempts treat the record as no longer counted and
- * fail closed.
+ * underlying refcount_add_not_zero() saturation semantics; whether that also
+ * emits a warning depends on the refcount configuration. If such an overflow
+ * happens, later count get/decrement attempts treat the record as no longer
+ * counted and fail closed.
+ * If a racing decrement brings an already-counted diagnostic record to zero,
+ * this helper does not resurrect it.
  * Callers must ensure @handle remains valid for the duration of this call.
  *
  * Return: true if this call switched the record from saturated to counted,
@@ -318,7 +320,7 @@ int __stack_depot_frame_run_init(const unsigned long *entries,
  * This function is only for internal purposes. It does not write partial
  * compressed payloads: if any frame does not match @run, @dst is unchanged.
  * Compressed runs require @scratch to hold at least @run->nr_entries entries;
- * raw runs do not use @scratch. @dst must not overlap @entries.
+ * raw runs do not use @scratch. @dst and @scratch must not overlap @entries.
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */
@@ -452,7 +454,8 @@ __stack_depot_trie_append_chain(const void *parent, u32 leaf_id,
  * This function is only for internal purposes. It builds a replacement child
  * array containing @head and stores it in either @root or @parent. @head must
  * be the first node of an unpublished chain whose parent is @parent. Callers
- * remain responsible for lifetime and visibility.
+ * must serialize publishers for the same @root or @parent. Callers remain
+ * responsible for lifetime and visibility.
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */
@@ -472,7 +475,13 @@ __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
  *
  * This function is only for internal purposes. It reads one root or parent
  * child array and compares one child node against @entries. It does not publish,
- * allocate, or walk beyond the matching node.
+ * allocate, walk beyond the matching node, or validate parent-chain equivalence.
+ * Callers must keep the trie storage alive for the duration of the lookup, for
+ * example by holding the stackdepot RCU read-side critical section or the writer
+ * lock.
+ * A copy-on-write split may reparent descendants before a structural publish;
+ * callers that walk multiple steps must validate the returned node's parent
+ * chain against the prefix they already matched before accepting a result.
  *
  * Return: 0 on success, -EINVAL on invalid input or malformed storage.
  */
@@ -522,8 +531,9 @@ size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
  * @nr_children: Number of child pointers in @children
  *
  * This function is only for internal purposes. It does not publish @storage;
- * callers remain responsible for lifetime and visibility. Callers must discard
- * @storage unless this function returns 0.
+ * callers remain responsible for lifetime and visibility. @nr_children may be
+ * zero with @children set to NULL to initialize an empty array. Callers must
+ * discard @storage unless this function returns 0.
  *
  * Return: 0 on success, -EINVAL on invalid input.
  */

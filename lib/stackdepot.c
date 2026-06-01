@@ -64,15 +64,15 @@ union handle_parts {
 	depot_stack_handle_t handle;
 	struct {
 		u32 pool_index_plus_1	: DEPOT_POOL_INDEX_BITS;
-		u32 offset				: DEPOT_OFFSET_BITS;
-		u32 extra				: STACK_DEPOT_EXTRA_BITS;
+		u32 offset		: DEPOT_OFFSET_BITS;
+		u32 extra		: STACK_DEPOT_EXTRA_BITS;
 	};
 };
 
 struct stack_record {
 	struct list_head hash_list;	/* Links in the hash table */
-	u32 hash;					/* Hash in hash table */
-	u32 size;					/* Number of stored frames */
+	u32 hash;			/* Hash in hash table */
+	u32 size;			/* Number of stored frames */
 	union handle_parts handle;	/* Constant after initialization */
 	refcount_t count;
 	union {
@@ -855,9 +855,16 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	 */
 	if (atomic_try_cmpxchg(&stack->count.refs, &old, new))
 		was_saturated = true;
-	else if (old > 0)
+	else if (old > 0) {
 		/* Another caller won the transition; count this caller too. */
-		refcount_add((int)count, &stack->count);
+		if (!refcount_add_not_zero((int)count, &stack->count)) {
+			/* Do not resurrect a diagnostic count that already hit zero. */
+			return false;
+		}
+	} else {
+		/* A racing decrement reached zero, or the record is not counted. */
+		return false;
+	}
 
 	return was_saturated;
 }
@@ -896,8 +903,10 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 			return false;
 
 		underflow = count > (unsigned int)old;
-		if (WARN_RATELIMIT(underflow, "stack depot count underflow\n"))
+		if (underflow) {
+			WARN_RATELIMIT(1, "stack depot count underflow\n");
 			return false;
+		}
 
 		new = old - (int)count;
 	} while (!atomic_try_cmpxchg_release(&stack->count.refs, &old, new));
@@ -990,7 +999,7 @@ static int frame_run_init_lows(const unsigned long *entries,
 	if (lows && nr_entries > nr_lows)
 		return -EINVAL;
 
-	/* On success, only lows[0..run->nr_entries - 1] are initialized. */
+	/* On compressed success, only lows[0..run->nr_entries - 1] are initialized. */
 	/* Only prefix ids classify a run; low bits are scratch for the arch hook. */
 	compressed = frame_try_compress(entries[0], &first_prefix, &low);
 	if (compressed && lows)
@@ -1034,6 +1043,9 @@ stack_depot_frame_run_write_compressed(const struct stack_depot_frame_run *run,
 	if (!scratch || nr_scratch < run->nr_entries)
 		return -EINVAL;
 	if (stack_depot_ranges_overlap(dst, run->bytes, scratch, run->bytes))
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(scratch, run->bytes, entries,
+				       run->nr_entries * sizeof(*entries)))
 		return -EINVAL;
 
 	for (i = 0; i < run->nr_entries; i++) {
@@ -1643,8 +1655,13 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 	}
 
 	node = children->children[pos];
-	if (!node || node->parent != parent)
+	if (!node)
 		return -EINVAL;
+	/*
+	 * Do not validate node->parent here. COW splits may reparent descendants
+	 * to an equivalent replacement prefix before the structural publish; the
+	 * multi-step finder has enough prefix context to validate that equivalence.
+	 */
 
 	matched = __stack_depot_trie_node_match(node, entries, nr_entries);
 	if (!matched)
@@ -1856,11 +1873,15 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 	}
 
 	new_array->nr_children = nr_old + 1;
-	for (i = 0; i < pos; i++)
-		new_array->children[i] = old_array->children[i];
+	if (old_array) {
+		for (i = 0; i < pos; i++)
+			new_array->children[i] = old_array->children[i];
+	}
 	new_array->children[pos] = node;
-	for (i = pos; i < nr_old; i++)
-		new_array->children[i + 1] = old_array->children[i];
+	if (old_array) {
+		for (i = pos; i < nr_old; i++)
+			new_array->children[i + 1] = old_array->children[i];
+	}
 
 	return 0;
 }

@@ -32,7 +32,8 @@ static inline bool arch_stack_depot_frame_prefix(u8 prefix_id,
 
 	switch (prefix_id) {
 	case STACK_DEPOT_ARM64_PREV_PREFIX_ID:
-		if (text_prefix < SZ_4G)
+		/* Do not synthesize the zero prefix; such frames stay raw. */
+		if (text_prefix <= SZ_4G)
 			return false;
 		*prefix = text_prefix - SZ_4G;
 		return true;

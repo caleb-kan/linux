@@ -231,6 +231,11 @@ static void stackdepot_count_helpers(struct kunit *test)
 		0x1234567800320000UL,
 		0x1234567800330000UL,
 	};
+	unsigned long zeroed_entries[] = {
+		0x1234567800610000UL,
+		0x1234567800620000UL,
+		0x1234567800630000UL,
+	};
 	unsigned long seeded_entries[] = {
 		0x1234567800410000UL,
 		0x1234567800420000UL,
@@ -245,6 +250,8 @@ static void stackdepot_count_helpers(struct kunit *test)
 	depot_stack_handle_t second_handle;
 	depot_stack_handle_t seeded_handle;
 	depot_stack_handle_t max_handle;
+	depot_stack_handle_t zeroed_handle;
+	unsigned int zeroed_nr = ARRAY_SIZE(zeroed_entries);
 	unsigned int count;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
@@ -326,6 +333,11 @@ static void stackdepot_count_helpers(struct kunit *test)
 			   __stack_depot_dec_count_and_test(seeded_handle, 1));
 	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(seeded_handle, &count));
 	KUNIT_EXPECT_EQ(test, count, 2);
+
+	zeroed_handle = stack_depot_save(zeroed_entries, zeroed_nr, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, zeroed_handle, (depot_stack_handle_t)0);
+	__stack_depot_set_count(zeroed_handle, 3);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_dec_count_and_test(zeroed_handle, 3));
 }
 
 static void stackdepot_frame_raw_fallback(struct kunit *test)
@@ -400,7 +412,7 @@ static void stackdepot_frame_arm64(struct kunit *test)
 			  __stack_depot_frame_decompress(prefix_id, low, &out));
 	KUNIT_EXPECT_EQ(test, out, frame);
 
-	if (text_prefix >= SZ_4G) {
+	if (text_prefix > SZ_4G) {
 		frame = (text_prefix - SZ_4G) | 0x12345678UL;
 		KUNIT_EXPECT_TRUE(test,
 				  __stack_depot_frame_try_compress(frame, &prefix_id, &low));
@@ -1007,6 +1019,48 @@ static void stackdepot_trie_lookup_step_parent_promote(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void stackdepot_trie_lookup_step_accepts_reparented_child(struct kunit *test)
+{
+	unsigned long parent_entries[] = { 0x1000UL };
+	unsigned long child_entries[] = { 0x2000UL };
+	struct stack_depot_trie_child_array_slot child_array;
+	struct stack_depot_trie_node_slot child_slot;
+	struct stack_depot_trie_lookup lookup;
+	void *old_parent;
+	void *new_parent;
+	int ret;
+
+	trie_node_alloc(test, parent_entries, ARRAY_SIZE(parent_entries), NULL, 7,
+			&old_parent);
+	trie_node_alloc(test, parent_entries, ARRAY_SIZE(parent_entries), NULL, 8,
+			&new_parent);
+	trie_node_slot_alloc(test, &child_slot, child_entries,
+			     ARRAY_SIZE(child_entries));
+	KUNIT_ASSERT_EQ(test,
+			tnode_init(child_slot.node, child_slot.size, old_parent, 9,
+				   child_entries, ARRAY_SIZE(child_entries), NULL, 0),
+			0);
+	child_array.size = __stack_depot_trie_child_array_size(1);
+	child_array.array = kunit_kzalloc(test, child_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_array.array);
+	ret = publish_append(NULL, old_parent, child_slot.node, child_array.array,
+			     child_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			tnode_init(child_slot.node, child_slot.size, new_parent, 9,
+				   child_entries, ARRAY_SIZE(child_entries), NULL, 0),
+			0);
+
+	ret = lookup_step(NULL, old_parent, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.parent, old_parent);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, child_slot.node);
+	KUNIT_EXPECT_EQ(test, lookup.matched,
+			(unsigned int)ARRAY_SIZE(child_entries));
+}
+
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 {
@@ -1407,6 +1461,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_publish_append_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_lookup_step_root),
 	KUNIT_CASE(stackdepot_trie_lookup_step_parent_promote),
+	KUNIT_CASE(stackdepot_trie_lookup_step_accepts_reparented_child),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 	KUNIT_CASE(stackdepot_trie_node_compressed_roundtrip),
 	KUNIT_CASE(stackdepot_trie_node_match_compressed),
