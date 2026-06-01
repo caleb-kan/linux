@@ -73,6 +73,12 @@ struct stack_depot_trie_child_array_slot {
 	size_t size;
 };
 
+struct stack_depot_trie_child_array;
+
+struct stack_depot_trie_root {
+	const struct stack_depot_trie_child_array *children;
+};
+
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
  *
@@ -418,6 +424,27 @@ __stack_depot_trie_append_chain(const void *parent, u32 leaf_id,
 				unsigned int nr_child_slots, u32 *scratch,
 				unsigned int nr_scratch, const void **head,
 				const void **tail, unsigned int *nr_used);
+
+/**
+ * __stack_depot_trie_publish_append - Publish an appended chain
+ *
+ * @root: Root storage to publish into, or NULL for a parent publish
+ * @parent: Parent node to publish under, or NULL for a root publish
+ * @head: First node of an unpublished chain
+ * @new_storage: Replacement child-array storage
+ * @new_storage_size: Size of @new_storage in bytes
+ *
+ * This function is only for internal purposes. It builds a replacement child
+ * array containing @head and stores it in either @root or @parent. @head must
+ * be the first node of an unpublished chain whose parent is @parent. Callers
+ * remain responsible for lifetime and visibility.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int
+__stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
+				  void *parent, const void *head,
+				  void *new_storage, size_t new_storage_size);
 
 /**
  * __stack_depot_trie_fetch_into - Materialize a trie parent chain

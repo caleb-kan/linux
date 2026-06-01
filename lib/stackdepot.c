@@ -1325,6 +1325,47 @@ static bool trie_ancestor_overlaps(const struct stack_depot_trie_node *node,
 	return false;
 }
 
+static bool trie_chain_overlaps(const struct stack_depot_trie_node *node,
+				const void *ptr, size_t size)
+{
+	unsigned int depth = 0;
+
+	for (; node; depth++) {
+		const struct stack_depot_trie_child_array *children;
+		size_t child_size;
+		size_t node_size;
+
+		if (depth >= CONFIG_STACKDEPOT_MAX_FRAMES)
+			return true;
+		if (stack_depot_frame_run_validate(&node->run))
+			return true;
+
+		node_size = __stack_depot_trie_node_size(&node->run);
+		if (!node_size)
+			return true;
+		if (stack_depot_ranges_overlap(ptr, size, node, node_size))
+			return true;
+
+		children = node->children;
+		if (!children)
+			break;
+		if (children->nr_children != 1)
+			return true;
+		child_size = __stack_depot_trie_child_array_size(1);
+		if (!child_size)
+			return true;
+		if (stack_depot_ranges_overlap(ptr, size, children, child_size))
+			return true;
+		if (!children->children[0])
+			return true;
+		if (children->children[0]->parent != node)
+			return true;
+		node = children->children[0];
+	}
+
+	return false;
+}
+
 static bool
 trie_node_slot_overlaps(const struct stack_depot_trie_node_slot *slots,
 			unsigned int used, const void *ptr, size_t size)
@@ -1498,6 +1539,56 @@ __stack_depot_trie_append_chain(const void *parent_ptr, u32 leaf_id,
 	*head = node_slots[0].node;
 	*tail = node_slots[used - 1].node;
 	*nr_used = used;
+	return 0;
+}
+
+int
+__stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
+				  void *parent_ptr, const void *head_ptr,
+				  void *new_storage, size_t new_storage_size)
+{
+	const struct stack_depot_trie_child_array *old_array;
+	const struct stack_depot_trie_node *head = head_ptr;
+	const struct stack_depot_trie_child_array **slot;
+	struct stack_depot_trie_node *parent = parent_ptr;
+	struct stack_depot_trie_child_array *new_array = new_storage;
+	size_t storage_size = new_storage_size;
+	size_t new_size;
+	size_t old_size;
+
+	if ((root && parent) || (!root && !parent) || !head || !new_array)
+		return -EINVAL;
+	if (head->parent != parent)
+		return -EINVAL;
+
+	if (root) {
+		if (stack_depot_ranges_overlap(new_array, storage_size,
+					       &root->children, sizeof(root->children)))
+			return -EINVAL;
+		slot = &root->children;
+	} else {
+		if (trie_ancestor_overlaps(parent, new_array, storage_size))
+			return -EINVAL;
+		slot = &parent->children;
+	}
+
+	old_array = *slot;
+	old_size = old_array ?
+		__stack_depot_trie_child_array_size(old_array->nr_children) : 0;
+	new_size = old_array ? old_array->nr_children + 1 : 1;
+	new_size = __stack_depot_trie_child_array_size(new_size);
+	if (!new_size || storage_size < new_size)
+		return -EINVAL;
+	if (old_array &&
+	    stack_depot_ranges_overlap(old_array, old_size, new_array,
+				       storage_size))
+		return -EINVAL;
+	if (trie_chain_overlaps(head, new_array, storage_size))
+		return -EINVAL;
+	if (__stack_depot_trie_child_array_insert(old_array, head, new_array, storage_size))
+		return -EINVAL;
+
+	*slot = new_array;
 	return 0;
 }
 
