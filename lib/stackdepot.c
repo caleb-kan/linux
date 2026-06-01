@@ -1572,7 +1572,7 @@ __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
 		slot = &parent->children;
 	}
 
-	old_array = *slot;
+	old_array = READ_ONCE(*slot);
 	old_size = old_array ?
 		__stack_depot_trie_child_array_size(old_array->nr_children) : 0;
 	new_size = old_array ? old_array->nr_children + 1 : 1;
@@ -1588,7 +1588,8 @@ __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
 	if (__stack_depot_trie_child_array_insert(old_array, head, new_array, storage_size))
 		return -EINVAL;
 
-	*slot = new_array;
+	/* Publish the fully initialized replacement array last. */
+	smp_store_release(slot, new_array);
 	return 0;
 }
 
