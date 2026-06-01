@@ -855,8 +855,8 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	 */
 	if (atomic_try_cmpxchg(&stack->count.refs, &old, new))
 		was_saturated = true;
-	else
-		/* Another caller may have won the transition; count this caller too. */
+	else if (old > 0)
+		/* Another caller won the transition; count this caller too. */
 		refcount_add((int)count, &stack->count);
 
 	return was_saturated;
@@ -938,6 +938,10 @@ bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
 
 static bool stack_depot_ranges_overlap(const void *a, size_t a_size,
 				       const void *b, size_t b_size);
+static int
+stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
+				   unsigned long frame, unsigned int *pos,
+				   bool *found);
 
 static size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
 {
@@ -1590,6 +1594,74 @@ __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
 
 	/* Publish the fully initialized replacement array last. */
 	smp_store_release(slot, new_array);
+	return 0;
+}
+
+int
+__stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
+			       const void *parent_ptr, const unsigned long *entries,
+			       unsigned int nr_entries,
+			       struct stack_depot_trie_lookup *lookup)
+{
+	const struct stack_depot_trie_child_array *children;
+	const struct stack_depot_trie_node *parent = parent_ptr;
+	const struct stack_depot_trie_node *node;
+	struct stack_depot_trie_lookup tmp;
+	unsigned int matched;
+	unsigned int pos;
+	unsigned long key;
+	bool found;
+
+	if (!entries || !nr_entries || !lookup)
+		return -EINVAL;
+	if ((root && parent) || (!root && !parent))
+		return -EINVAL;
+
+	if (root) {
+		/* Pairs with append publication's smp_store_release(). */
+		children = smp_load_acquire(&root->children);
+	} else {
+		/* Pairs with append publication's smp_store_release(). */
+		children = smp_load_acquire(&parent->children);
+	}
+
+	tmp.status = STACK_DEPOT_TRIE_LOOKUP_APPEND;
+	tmp.parent = parent;
+	tmp.node = NULL;
+	tmp.matched = 0;
+	if (!children) {
+		*lookup = tmp;
+		return 0;
+	}
+
+	key = entries[0];
+	if (stack_depot_trie_child_lower_bound(children, key, &pos, &found))
+		return -EINVAL;
+	if (!found) {
+		*lookup = tmp;
+		return 0;
+	}
+
+	node = children->children[pos];
+	if (!node || node->parent != parent)
+		return -EINVAL;
+
+	matched = __stack_depot_trie_node_match(node, entries, nr_entries);
+	if (!matched)
+		return -EINVAL;
+
+	tmp.node = node;
+	tmp.matched = matched;
+	if (matched < node->run.nr_entries)
+		tmp.status = STACK_DEPOT_TRIE_LOOKUP_SPLIT;
+	else if (matched < nr_entries)
+		tmp.status = STACK_DEPOT_TRIE_LOOKUP_DESCEND;
+	else if (node->leaf_id)
+		tmp.status = STACK_DEPOT_TRIE_LOOKUP_FOUND;
+	else
+		tmp.status = STACK_DEPOT_TRIE_LOOKUP_PROMOTE;
+
+	*lookup = tmp;
 	return 0;
 }
 

@@ -81,6 +81,15 @@ static int publish_append(struct stack_depot_trie_root *root, void *parent,
 						  storage_size);
 }
 
+static int lookup_step(const struct stack_depot_trie_root *root,
+		       const void *parent, const unsigned long *entries,
+		       unsigned int nr_entries,
+		       struct stack_depot_trie_lookup *lookup)
+{
+	return __stack_depot_trie_lookup_step(root, parent, entries, nr_entries,
+					      lookup);
+}
+
 static void
 trie_node_slot_alloc(struct kunit *test,
 		     struct stack_depot_trie_node_slot *slot,
@@ -895,6 +904,109 @@ static void stackdepot_trie_publish_append_rejects_bad_inputs(struct kunit *test
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void stackdepot_trie_lookup_step_root(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL };
+	unsigned long longer[] = { 0x1000UL, 0x2000UL, 0x3000UL };
+	unsigned long partial[] = { 0x1000UL, 0x2222UL };
+	unsigned long missing[] = { 0x9000UL };
+	struct stack_depot_trie_child_array_slot child_array;
+	struct stack_depot_trie_node_slot node_slot;
+	struct stack_depot_trie_lookup lookup;
+	struct stack_depot_trie_root root = {};
+	const void *head = NULL;
+	const void *tail = NULL;
+	unsigned int used = 0;
+	int ret;
+
+	ret = lookup_step(&root, NULL, missing, ARRAY_SIZE(missing), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_APPEND);
+	KUNIT_EXPECT_NULL(test, lookup.node);
+	KUNIT_EXPECT_EQ(test, lookup.matched, 0U);
+
+	trie_node_slot_alloc(test, &node_slot, entries, ARRAY_SIZE(entries));
+	child_array.size = __stack_depot_trie_child_array_size(1);
+	child_array.array = kunit_kzalloc(test, child_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_array.array);
+	ret = append_chain(NULL, 24, entries, ARRAY_SIZE(entries), &node_slot, 1,
+			   NULL, 0, NULL, 0, &head, &tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = publish_append(&root, NULL, head, child_array.array,
+			     child_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = lookup_step(&root, NULL, entries, ARRAY_SIZE(entries), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.parent, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, head);
+	KUNIT_EXPECT_EQ(test, lookup.matched, (unsigned int)ARRAY_SIZE(entries));
+
+	ret = lookup_step(&root, NULL, longer, ARRAY_SIZE(longer), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_DESCEND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, head);
+	KUNIT_EXPECT_EQ(test, lookup.matched, (unsigned int)ARRAY_SIZE(entries));
+
+	ret = lookup_step(&root, NULL, partial, ARRAY_SIZE(partial), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_SPLIT);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, head);
+	KUNIT_EXPECT_EQ(test, lookup.matched, 1U);
+
+	ret = lookup_step(&root, NULL, missing, ARRAY_SIZE(missing), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_APPEND);
+	KUNIT_EXPECT_NULL(test, lookup.node);
+}
+
+static void stackdepot_trie_lookup_step_parent_promote(struct kunit *test)
+{
+	unsigned long parent_entries[] = { 0x1000UL };
+	unsigned long child_entries[] = { 0x2000UL };
+	struct stack_depot_trie_child_array_slot child_array;
+	struct stack_depot_trie_lookup lookup;
+	struct stack_depot_trie_root root = {};
+	void *child;
+	void *parent;
+	int ret;
+
+	trie_node_alloc(test, parent_entries, ARRAY_SIZE(parent_entries), NULL, 7,
+			&parent);
+	trie_node_alloc(test, child_entries, ARRAY_SIZE(child_entries), parent, 0,
+			&child);
+	child_array.size = __stack_depot_trie_child_array_size(1);
+	child_array.array = kunit_kzalloc(test, child_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_array.array);
+	ret = publish_append(NULL, parent, child, child_array.array,
+			     child_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = lookup_step(NULL, parent, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_PROMOTE);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.parent, parent);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, child);
+	KUNIT_EXPECT_EQ(test, lookup.matched,
+			(unsigned int)ARRAY_SIZE(child_entries));
+
+	ret = lookup_step(&root, parent, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = lookup_step(NULL, NULL, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = lookup_step(NULL, parent, NULL, ARRAY_SIZE(child_entries), &lookup);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = lookup_step(NULL, parent, child_entries, 0, &lookup);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = lookup_step(NULL, parent, child_entries, ARRAY_SIZE(child_entries),
+			  NULL);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 {
@@ -1293,6 +1405,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_publish_append_parent),
 	KUNIT_CASE(stackdepot_trie_publish_append_root_replaces_array),
 	KUNIT_CASE(stackdepot_trie_publish_append_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_trie_lookup_step_root),
+	KUNIT_CASE(stackdepot_trie_lookup_step_parent_promote),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 	KUNIT_CASE(stackdepot_trie_node_compressed_roundtrip),
 	KUNIT_CASE(stackdepot_trie_node_match_compressed),

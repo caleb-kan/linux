@@ -56,6 +56,14 @@ enum stack_depot_frame_mode {
 	STACK_DEPOT_FRAME_COMPRESSED,
 };
 
+enum stack_depot_trie_lookup_status {
+	STACK_DEPOT_TRIE_LOOKUP_APPEND,
+	STACK_DEPOT_TRIE_LOOKUP_DESCEND,
+	STACK_DEPOT_TRIE_LOOKUP_FOUND,
+	STACK_DEPOT_TRIE_LOOKUP_PROMOTE,
+	STACK_DEPOT_TRIE_LOOKUP_SPLIT,
+};
+
 struct stack_depot_frame_run {
 	enum stack_depot_frame_mode mode;
 	u8 prefix_id;
@@ -77,6 +85,13 @@ struct stack_depot_trie_child_array;
 
 struct stack_depot_trie_root {
 	const struct stack_depot_trie_child_array *children;
+};
+
+struct stack_depot_trie_lookup {
+	enum stack_depot_trie_lookup_status status;
+	const void *parent;
+	const void *node;
+	unsigned int matched;
 };
 
 /*
@@ -445,6 +460,27 @@ int
 __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
 				  void *parent, const void *head,
 				  void *new_storage, size_t new_storage_size);
+
+/**
+ * __stack_depot_trie_lookup_step - Classify one trie lookup step
+ *
+ * @root: Root to look up in, or NULL when looking under @parent
+ * @parent: Parent node to look up under, or NULL when looking in @root
+ * @entries: Remaining stack frames to classify
+ * @nr_entries: Number of frames in @entries
+ * @lookup: Storage for the lookup result
+ *
+ * This function is only for internal purposes. It reads one root or parent
+ * child array and compares one child node against @entries. It does not publish,
+ * allocate, or walk beyond the matching node.
+ *
+ * Return: 0 on success, -EINVAL on invalid input or malformed storage.
+ */
+int
+__stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
+			       const void *parent, const unsigned long *entries,
+			       unsigned int nr_entries,
+			       struct stack_depot_trie_lookup *lookup);
 
 /**
  * __stack_depot_trie_fetch_into - Materialize a trie parent chain
