@@ -96,6 +96,7 @@ struct stack_record {
 
 struct stack_depot_trie_node {
 	const struct stack_depot_trie_node *parent;
+	const struct stack_depot_trie_child_array *children;
 	u32 leaf_id;
 	u32 stack_len;
 	struct stack_depot_frame_run run;
@@ -1263,6 +1264,7 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 		memcpy(node->data, entries, run.bytes);
 
 	node->parent = parent_node;
+	node->children = NULL;
 	node->leaf_id = leaf_id;
 	node->stack_len = stack_len;
 	node->run = run;
@@ -1292,6 +1294,211 @@ unsigned int __stack_depot_trie_node_match(const void *node_ptr,
 	}
 
 	return i;
+}
+
+static bool trie_ancestor_overlaps(const struct stack_depot_trie_node *node,
+				   const void *ptr, size_t size)
+{
+	for (; node; node = node->parent) {
+		size_t child_size;
+		size_t node_size;
+
+		if (stack_depot_frame_run_validate(&node->run))
+			return true;
+
+		node_size = __stack_depot_trie_node_size(&node->run);
+		if (!node_size)
+			return true;
+		if (stack_depot_ranges_overlap(ptr, size, node, node_size))
+			return true;
+
+		if (!node->children)
+			continue;
+		child_size = __stack_depot_trie_child_array_size(node->children->nr_children);
+		if (!child_size)
+			return true;
+		if (stack_depot_ranges_overlap(ptr, size, node->children,
+					       child_size))
+			return true;
+	}
+
+	return false;
+}
+
+static bool
+trie_node_slot_overlaps(const struct stack_depot_trie_node_slot *slots,
+			unsigned int used, const void *ptr, size_t size)
+{
+	unsigned int i;
+
+	for (i = 0; i < used; i++) {
+		if (stack_depot_ranges_overlap(ptr, size, slots[i].node,
+					       slots[i].size))
+			return true;
+	}
+
+	return false;
+}
+
+static bool
+trie_child_slot_overlaps(const struct stack_depot_trie_child_array_slot *slots,
+			 unsigned int used, const void *ptr, size_t size)
+{
+	unsigned int i;
+
+	for (i = 0; i < used; i++) {
+		if (stack_depot_ranges_overlap(ptr, size, slots[i].array,
+					       slots[i].size))
+			return true;
+	}
+
+	return false;
+}
+
+static int trie_append_chain_validate(const struct stack_depot_trie_node *parent,
+				      const unsigned long *entries,
+				      unsigned int nr_entries,
+				      const struct stack_depot_trie_node_slot *node_slots,
+				      unsigned int nr_node_slots,
+				      const struct stack_depot_trie_child_array_slot *child_slots,
+				      unsigned int nr_child_slots, u32 *scratch,
+				      unsigned int nr_scratch, unsigned int *nr_runs)
+{
+	unsigned int child_slots_needed;
+	unsigned int pos = 0;
+	unsigned int used = 0;
+	u32 stack_len = parent ? parent->stack_len : 0;
+
+	if (!entries || !nr_entries || !node_slots || !nr_runs)
+		return -EINVAL;
+	if (parent && !parent->stack_len)
+		return -EINVAL;
+
+	while (pos < nr_entries) {
+		const struct stack_depot_trie_node_slot *slot;
+		struct stack_depot_frame_run run;
+		size_t size;
+
+		if (__stack_depot_frame_run_init(&entries[pos], nr_entries - pos,
+						 &run))
+			return -EINVAL;
+		if (used >= nr_node_slots)
+			return -EINVAL;
+		slot = &node_slots[used];
+		if (!slot->node)
+			return -EINVAL;
+		if (run.mode == STACK_DEPOT_FRAME_COMPRESSED &&
+		    (!scratch || nr_scratch < run.nr_entries))
+			return -EINVAL;
+		if (stack_len > U32_MAX - run.nr_entries)
+			return -EINVAL;
+
+		size = __stack_depot_trie_node_size(&run);
+		if (slot->size < size)
+			return -EINVAL;
+		if (!IS_ALIGNED((unsigned long)slot->node,
+				__alignof__(struct stack_depot_trie_node)))
+			return -EINVAL;
+		if (trie_ancestor_overlaps(parent, slot->node, slot->size))
+			return -EINVAL;
+		if (trie_node_slot_overlaps(node_slots, used, slot->node, slot->size))
+			return -EINVAL;
+
+		stack_len += run.nr_entries;
+		pos += run.nr_entries;
+		used++;
+	}
+
+	child_slots_needed = used > 1 ? used - 1 : 0;
+	if (child_slots_needed) {
+		unsigned int i;
+
+		if (!child_slots || nr_child_slots < child_slots_needed)
+			return -EINVAL;
+		for (i = 0; i < child_slots_needed; i++) {
+			unsigned long addr = (unsigned long)child_slots[i].array;
+
+			if (!child_slots[i].array || child_slots[i].size <
+			    __stack_depot_trie_child_array_size(1))
+				return -EINVAL;
+			if (!IS_ALIGNED(addr,
+					__alignof__(struct stack_depot_trie_child_array)))
+				return -EINVAL;
+			if (trie_ancestor_overlaps(parent, child_slots[i].array,
+						   child_slots[i].size))
+				return -EINVAL;
+			if (trie_node_slot_overlaps(node_slots, used,
+						    child_slots[i].array,
+						    child_slots[i].size))
+				return -EINVAL;
+			if (trie_child_slot_overlaps(child_slots, i,
+						     child_slots[i].array,
+						     child_slots[i].size))
+				return -EINVAL;
+		}
+	}
+
+	*nr_runs = used;
+	return 0;
+}
+
+int
+__stack_depot_trie_append_chain(const void *parent_ptr, u32 leaf_id,
+				const unsigned long *entries,
+				unsigned int nr_entries,
+				const struct stack_depot_trie_node_slot *node_slots,
+				unsigned int nr_node_slots,
+				const struct stack_depot_trie_child_array_slot *child_slots,
+				unsigned int nr_child_slots, u32 *scratch,
+				unsigned int nr_scratch, const void **head,
+				const void **tail, unsigned int *nr_used)
+{
+	const struct stack_depot_trie_node *parent = parent_ptr;
+	const struct stack_depot_trie_node *prev = parent;
+	unsigned int pos = 0;
+	unsigned int used;
+	unsigned int i;
+
+	if (!leaf_id || !head || !tail || !nr_used)
+		return -EINVAL;
+	if (trie_append_chain_validate(parent, entries, nr_entries, node_slots,
+				       nr_node_slots, child_slots, nr_child_slots,
+				       scratch, nr_scratch, &used))
+		return -EINVAL;
+
+	for (i = 0; i < used; i++) {
+		struct stack_depot_frame_run run;
+		struct stack_depot_trie_node *node = node_slots[i].node;
+		u32 id;
+
+		if (__stack_depot_frame_run_init(&entries[pos], nr_entries - pos,
+						 &run))
+			return -EINVAL;
+		id = pos + run.nr_entries == nr_entries ? leaf_id : 0;
+		if (__stack_depot_trie_node_init(node, node_slots[i].size, prev,
+						 id, &entries[pos], run.nr_entries,
+						 scratch, nr_scratch))
+			return -EINVAL;
+
+		prev = node;
+		pos += run.nr_entries;
+	}
+
+	for (i = 0; i + 1 < used; i++) {
+		const void *next = node_slots[i + 1].node;
+		struct stack_depot_trie_node *node = node_slots[i].node;
+		void *array = child_slots[i].array;
+		size_t size = child_slots[i].size;
+
+		if (__stack_depot_trie_child_array_insert(NULL, next, array, size))
+			return -EINVAL;
+		node->children = array;
+	}
+
+	*head = node_slots[0].node;
+	*tail = node_slots[used - 1].node;
+	*nr_used = used;
+	return 0;
 }
 
 unsigned int

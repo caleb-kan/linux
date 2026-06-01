@@ -63,6 +63,16 @@ struct stack_depot_frame_run {
 	size_t bytes;
 };
 
+struct stack_depot_trie_node_slot {
+	void *node;
+	size_t size;
+};
+
+struct stack_depot_trie_child_array_slot {
+	void *array;
+	size_t size;
+};
+
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
  *
@@ -373,6 +383,41 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 unsigned int __stack_depot_trie_node_match(const void *node,
 					   const unsigned long *entries,
 					   unsigned int nr_entries);
+
+/**
+ * __stack_depot_trie_append_chain - Build an unpublished node chain
+ *
+ * @parent: Parent node for the new chain, or NULL for a root chain
+ * @leaf_id: Non-zero id to store in the final node
+ * @entries: Stack frames to store in the chain
+ * @nr_entries: Number of frames in @entries
+ * @node_slots: Caller-owned storage slots for trie nodes
+ * @nr_node_slots: Number of entries in @node_slots
+ * @child_slots: Caller-owned storage slots for one-child arrays
+ * @nr_child_slots: Number of entries in @child_slots
+ * @scratch: Scratch buffer for compressed frame payloads
+ * @nr_scratch: Number of 32-bit entries that fit in @scratch
+ * @head: Storage for the first node in the chain
+ * @tail: Storage for the final node in the chain
+ * @nr_used: Storage for the number of node slots consumed
+ *
+ * This function is only for internal purposes. It builds nodes and one-child
+ * arrays in caller-owned unpublished storage, splitting the input at raw /
+ * compressed mode and compressed-prefix boundaries. Callers remain responsible
+ * for lifetime and visibility.
+ *
+ * Return: 0 on success, -EINVAL on invalid input.
+ */
+int
+__stack_depot_trie_append_chain(const void *parent, u32 leaf_id,
+				const unsigned long *entries,
+				unsigned int nr_entries,
+				const struct stack_depot_trie_node_slot *node_slots,
+				unsigned int nr_node_slots,
+				const struct stack_depot_trie_child_array_slot *child_slots,
+				unsigned int nr_child_slots, u32 *scratch,
+				unsigned int nr_scratch, const void **head,
+				const void **tail, unsigned int *nr_used);
 
 /**
  * __stack_depot_trie_fetch_into - Materialize a trie parent chain
