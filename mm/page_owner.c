@@ -130,6 +130,7 @@ static __init void init_page_owner(void)
 	dummy_stack.handle = dummy_handle;
 	failure_stack.handle = failure_handle;
 	/* These counts are the stack_list membership markers. */
+	/* No page_owner count updates can race before page_owner_inited flips. */
 	if (dummy_handle)
 		__stack_depot_set_count(dummy_handle, 1);
 	if (failure_handle)
@@ -214,33 +215,49 @@ static void add_stack_record_to_list(depot_stack_handle_t handle,
 	spin_unlock_irqrestore(&stack_list_lock, flags);
 }
 
-static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
+static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 				   unsigned int nr_base_pages)
 {
 	struct stack *stack = NULL;
+	bool new_count = false;
 	unsigned int count;
 
-	if (!handle)
-		return;
+	if (!handle || !nr_base_pages)
+		return false;
 
+	/* Snapshot only avoids allocation when the stack is already counted. */
+	/* If this races a final decrement to zero, inc_count() fails safely. */
 	if (!__stack_depot_get_count(handle, &count)) {
 		stack = alloc_stack_record(gfp_mask);
-		/* Leave saturated stacks retryable if no list marker can be tracked. */
+		/* Leave saturated stacks retryable for future tracked allocations. */
 		if (!stack)
-			return;
+			return false;
 	}
 
-	/* The saturated-to-counted transition reserves the stack_list marker. */
-	if (__stack_depot_inc_count(handle, nr_base_pages))
+	/* Racing transition losers free their unused list node below. */
+	if (!__stack_depot_inc_count(handle, nr_base_pages, &new_count)) {
+		if (stack)
+			free_stack_record(stack);
+		return false;
+	}
+	/* new_count is only possible after allocating the list node above. */
+	if (new_count) {
+		if (WARN_ON_ONCE(!stack)) {
+			__stack_depot_dec_count_and_test(handle, nr_base_pages + 1);
+			return false;
+		}
 		add_stack_record_to_list(handle, stack);
-	else if (stack)
+	} else if (stack) {
 		free_stack_record(stack);
+	}
+
+	return true;
 }
 
 static void dec_stack_record_count(depot_stack_handle_t handle,
 				   unsigned int nr_base_pages)
 {
-	/* Successful list insertion leaves a marker count; zero means corruption. */
+	/* Successful list insertion leaves a marker; zero means it was decremented. */
 	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);
@@ -326,7 +343,7 @@ void __reset_page_owner(struct page *page, unsigned short order)
 	__update_page_owner_free_handle(page, handle, order, current->pid,
 					current->tgid, free_ts_nsec);
 
-	if (alloc_handle != early_handle)
+	if (alloc_handle && alloc_handle != early_handle)
 		/*
 		 * early_handle is being set as a handle for all those
 		 * early allocated pages. See init_pages_in_zone().
@@ -342,12 +359,24 @@ noinline void __set_page_owner(struct page *page, unsigned short order,
 {
 	u64 ts_nsec = local_clock();
 	depot_stack_handle_t handle;
+	bool counted;
 
+	/* Any previous allocation handle for this page was decremented at free. */
 	handle = save_stack(gfp_mask);
+	counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
+	if (!counted && handle != failure_handle) {
+		/* Attribute to failure_handle only if it can be symmetrically counted. */
+		handle = failure_handle;
+		counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
+	}
+	/* Avoid storing a handle that would later decrement an unapplied count. */
+	if (!counted) {
+		pr_warn_ratelimited("failed to count page owner stack\n");
+		handle = 0;
+	}
 	__update_page_owner_handle(page, handle, order, gfp_mask, -1,
 				   ts_nsec, current->pid, current->tgid,
 				   current->comm);
-	inc_stack_record_count(handle, gfp_mask, 1 << order);
 }
 
 void __folio_set_owner_migrate_reason(struct folio *folio, int reason)
@@ -932,7 +961,7 @@ static int stack_print(struct seq_file *m, void *v)
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
 	nr_entries = stack_depot_fetch_into(handle, priv->entries,
 					    ARRAY_SIZE(priv->entries));
-	/* Buffer matches save_stack()'s stored-depth cap. */
+	/* Buffer matches save_stack()'s cap, so exact-or-nothing fetch should fit. */
 	if (!nr_entries)
 		return 0;
 

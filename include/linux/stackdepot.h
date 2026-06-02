@@ -51,49 +51,6 @@ typedef u32 depot_flags_t;
 #define STACK_DEPOT_FLAGS_NUM	2
 #define STACK_DEPOT_FLAGS_MASK	((depot_flags_t)((1 << STACK_DEPOT_FLAGS_NUM) - 1))
 
-enum stack_depot_frame_mode {
-	STACK_DEPOT_FRAME_RAW,
-	STACK_DEPOT_FRAME_COMPRESSED,
-};
-
-enum stack_depot_trie_lookup_status {
-	STACK_DEPOT_TRIE_LOOKUP_APPEND,
-	STACK_DEPOT_TRIE_LOOKUP_DESCEND,
-	STACK_DEPOT_TRIE_LOOKUP_FOUND,
-	STACK_DEPOT_TRIE_LOOKUP_PROMOTE,
-	STACK_DEPOT_TRIE_LOOKUP_SPLIT,
-};
-
-struct stack_depot_frame_run {
-	enum stack_depot_frame_mode mode;
-	u8 prefix_id;
-	unsigned int nr_entries;
-	size_t bytes;
-};
-
-struct stack_depot_trie_node_slot {
-	void *node;
-	size_t size;
-};
-
-struct stack_depot_trie_child_array_slot {
-	void *array;
-	size_t size;
-};
-
-struct stack_depot_trie_child_array;
-
-struct stack_depot_trie_root {
-	const struct stack_depot_trie_child_array *children;
-};
-
-struct stack_depot_trie_lookup {
-	enum stack_depot_trie_lookup_status status;
-	const void *parent;
-	const void *node;
-	unsigned int matched;
-};
-
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
  *
@@ -204,8 +161,8 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
  * @count: Count to set
  *
  * This function is only for internal purposes.
- * If @count is 0 or greater than %INT_MAX, this function is a
- * no-op.
+ * If @handle is invalid, @count is 0, or @count is greater than %INT_MAX,
+ * this function is a no-op.
  * Callers that use this to switch a saturated record to counted mode must
  * separately make the record discoverable by their own tracking structure.
  * Callers must have exclusive access to the stack record count.
@@ -217,26 +174,28 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  *
  * @handle: Stack depot handle
  * @count: Count to add
+ * @new_count: Optional storage for whether this call performed the first
+ * counted increment
  *
  * This function is only for internal purposes.
  * If @count is 0, this function is a no-op. Otherwise @count must be less
- * than or equal to %INT_MAX - 1.
+ * than or equal to %INT_MAX - 1 so the saturated-to-counted transition can
+ * store the stack_list marker plus @count without overflowing.
  *
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
  * this helper switches a saturated record to counted mode, it stores @count + 1.
- * For records already in counted mode, cumulative overflow is handled by the
- * underlying refcount_add_not_zero() saturation semantics; whether that also
- * emits a warning depends on the refcount configuration. If such an overflow
- * happens, later count get/decrement attempts treat the record as no longer
- * counted and fail closed.
+ * For records already in counted mode, cumulative overflow is rejected and
+ * leaves the count unchanged. If @new_count is non-NULL, it is set to true when
+ * this call switches the record from saturated to counted and false otherwise.
  * If a racing decrement brings an already-counted diagnostic record to zero,
  * this helper does not resurrect it.
  * Callers must ensure @handle remains valid for the duration of this call.
  *
- * Return: true if this call switched the record from saturated to counted,
- * false otherwise.
+ * Return: true if @count was applied, false otherwise.
  */
-bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
+bool __stack_depot_inc_count(depot_stack_handle_t handle,
+			     unsigned int count,
+			     bool *new_count);
 
 /**
  * __stack_depot_dec_count_and_test - Decrement a stack record count
@@ -245,7 +204,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  * @count: Count to subtract
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than or equal to %INT_MAX - 1.
+ * @count must be greater than 0 and less than or equal to %INT_MAX.
  *
  * Return: true if the resulting count is 0, false if the resulting count is
  * non-zero, @handle is invalid, the stack record is not in counted mode, or
@@ -255,362 +214,6 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count);
  */
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);
-
-/**
- * __stack_depot_frame_try_compress - Try to compress a stack frame
- *
- * @frame: Stack frame address
- * @prefix_id: Storage for the architecture prefix id
- * @low: Storage for the compressed low bits
- *
- * This function is only for internal purposes. The generic implementation is a
- * raw fallback and never compresses.
- * @prefix_id and @low must be non-NULL.
- *
- * Return: true if @frame was compressed, false otherwise.
- */
-bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
-				      u32 *low);
-
-/**
- * __stack_depot_frame_decompress - Decompress a stack frame
- *
- * @prefix_id: Architecture prefix id returned by compression
- * @low: Compressed low bits returned by compression
- * @frame: Storage for the decompressed frame
- *
- * This function is only for internal purposes. The generic raw fallback has no
- * compressed representation to decode.
- * @frame must be non-NULL.
- *
- * Return: true if @frame was decompressed, false otherwise.
- */
-bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
-				    unsigned long *frame);
-
-/**
- * __stack_depot_frame_run_init - Describe a homogeneous stack frame run
- *
- * @entries: Stack frames that start the run
- * @nr_entries: Number of frames available in @entries
- * @run: Storage for the resulting run description
- *
- * This function is only for internal purposes. It describes the longest prefix
- * of @entries that can be stored with one payload format: raw frames, or low
- * bits for frames that all share one architecture prefix id. It does not write
- * frame payload data; callers that need payload storage must call
- * __stack_depot_frame_run_write().
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int __stack_depot_frame_run_init(const unsigned long *entries,
-				 unsigned int nr_entries,
-				 struct stack_depot_frame_run *run);
-
-/**
- * __stack_depot_frame_run_write - Write a stack frame run payload
- *
- * @run: Run description returned by __stack_depot_frame_run_init()
- * @entries: Stack frames to encode
- * @dst: Payload buffer to write
- * @dst_size: Size of @dst in bytes
- * @scratch: Scratch buffer for compressed frame payloads
- * @nr_scratch: Number of 32-bit entries that fit in @scratch
- *
- * This function is only for internal purposes. It does not write partial
- * compressed payloads: if any frame does not match @run, @dst is unchanged.
- * Compressed runs require @scratch to hold at least @run->nr_entries entries;
- * raw runs do not use @scratch. @dst and @scratch must not overlap @entries.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
-				  const unsigned long *entries, void *dst,
-				  size_t dst_size, u32 *scratch,
-				  unsigned int nr_scratch);
-
-/**
- * __stack_depot_frame_run_read - Read a stack frame run payload
- *
- * @run: Run description for the payload
- * @src: Payload buffer to read
- * @src_size: Size of @src in bytes
- * @entries: Storage for decoded stack frames
- * @max_entries: Number of frames that fit in @entries
- * @scratch: Scratch buffer for decoded compressed frames
- * @nr_scratch: Number of frames that fit in @scratch
- *
- * This function is only for internal purposes. It does not write partial
- * compressed output: if any frame cannot be decoded, @entries is unchanged.
- * Compressed runs require @scratch to hold at least @run->nr_entries entries;
- * raw runs do not use @scratch. For compressed runs, @entries and @scratch
- * must not overlap.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
-				 const void *src, size_t src_size,
-				 unsigned long *entries, unsigned int max_entries,
-				 unsigned long *scratch,
-				 unsigned int nr_scratch);
-
-/**
- * __stack_depot_trie_node_size - Get storage size for a trie node
- *
- * @run: Frame run to store in the node
- *
- * This function is only for internal purposes.
- *
- * Return: Aligned node storage size, 0 on invalid input.
- */
-size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run);
-
-/**
- * __stack_depot_trie_node_init - Initialize a trie node in caller storage
- *
- * @storage: Node storage to initialize
- * @storage_size: Size of @storage in bytes
- * @parent: Parent node or NULL for a root node
- * @leaf_id: Non-zero id when this node terminates a stored stack
- * @entries: Homogeneous frame run to store in this node
- * @nr_entries: Number of frames in @entries
- * @scratch: Scratch buffer for compressed frame payloads
- * @nr_scratch: Number of 32-bit entries that fit in @scratch
- *
- * This function is only for internal purposes. It does not publish @storage;
- * all @entries must fit in one raw or same-prefix compressed frame run. Callers
- * remain responsible for lifetime and visibility. Callers must discard @storage
- * unless this function returns 0.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int __stack_depot_trie_node_init(void *storage, size_t storage_size,
-				 const void *parent, u32 leaf_id,
-				 const unsigned long *entries,
-				 unsigned int nr_entries, u32 *scratch,
-				 unsigned int nr_scratch);
-
-/**
- * __stack_depot_trie_node_match - Match entries against one trie node
- *
- * @node: Trie node to compare
- * @entries: Stack frames to match from the start of @node
- * @nr_entries: Number of frames available in @entries
- *
- * This function is only for internal purposes. It compares @entries against the
- * decoded frame run stored in @node and does not walk parent or child links.
- *
- * Return: Number of matching frames, up to the smaller of the node run length
- * and @nr_entries. Returns 0 on invalid input or a first-frame mismatch.
- */
-unsigned int __stack_depot_trie_node_match(const void *node,
-					   const unsigned long *entries,
-					   unsigned int nr_entries);
-
-/**
- * __stack_depot_trie_append_chain - Build an unpublished node chain
- *
- * @parent: Parent node for the new chain, or NULL for a root chain
- * @leaf_id: Non-zero id to store in the final node
- * @entries: Stack frames to store in the chain
- * @nr_entries: Number of frames in @entries
- * @node_slots: Caller-owned storage slots for trie nodes
- * @nr_node_slots: Number of entries in @node_slots
- * @child_slots: Caller-owned storage slots for one-child arrays
- * @nr_child_slots: Number of entries in @child_slots
- * @scratch: Scratch buffer for compressed frame payloads
- * @nr_scratch: Number of 32-bit entries that fit in @scratch
- * @head: Storage for the first node in the chain
- * @tail: Storage for the final node in the chain
- * @nr_used: Storage for the number of node slots consumed
- *
- * This function is only for internal purposes. It builds nodes and one-child
- * arrays in caller-owned unpublished storage, splitting the input at raw /
- * compressed mode and compressed-prefix boundaries. Callers remain responsible
- * for lifetime and visibility.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int
-__stack_depot_trie_append_chain(const void *parent, u32 leaf_id,
-				const unsigned long *entries,
-				unsigned int nr_entries,
-				const struct stack_depot_trie_node_slot *node_slots,
-				unsigned int nr_node_slots,
-				const struct stack_depot_trie_child_array_slot *child_slots,
-				unsigned int nr_child_slots, u32 *scratch,
-				unsigned int nr_scratch, const void **head,
-				const void **tail, unsigned int *nr_used);
-
-/**
- * __stack_depot_trie_publish_append - Publish an appended chain
- *
- * @root: Root storage to publish into, or NULL for a parent publish
- * @parent: Parent node to publish under, or NULL for a root publish
- * @head: First node of an unpublished chain
- * @new_storage: Replacement child-array storage
- * @new_storage_size: Size of @new_storage in bytes
- *
- * This function is only for internal purposes. It builds a replacement child
- * array containing @head and stores it in either @root or @parent. @head must
- * be the first node of an unpublished chain whose parent is @parent. Callers
- * must serialize publishers for the same @root or @parent. Callers remain
- * responsible for lifetime and visibility.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int
-__stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
-				  void *parent, const void *head,
-				  void *new_storage, size_t new_storage_size);
-
-/**
- * __stack_depot_trie_lookup_step - Classify one trie lookup step
- *
- * @root: Root to look up in, or NULL when looking under @parent
- * @parent: Parent node to look up under, or NULL when looking in @root
- * @entries: Remaining stack frames to classify
- * @nr_entries: Number of frames in @entries
- * @lookup: Storage for the lookup result
- *
- * This function is only for internal purposes. It reads one root or parent
- * child array and compares one child node against @entries. It does not publish,
- * allocate, walk beyond the matching node, or validate parent-chain equivalence.
- * Callers must keep the trie storage alive for the duration of the lookup, for
- * example by holding the stackdepot RCU read-side critical section or the writer
- * lock.
- * A copy-on-write split may reparent descendants before a structural publish;
- * callers that walk multiple steps must validate the returned node's parent
- * chain against the prefix they already matched before accepting a result.
- *
- * Return: 0 on success, -EINVAL on invalid input or malformed storage.
- */
-int
-__stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
-			       const void *parent, const unsigned long *entries,
-			       unsigned int nr_entries,
-			       struct stack_depot_trie_lookup *lookup);
-
-/**
- * __stack_depot_trie_insert_append - Insert a missing child by append
- *
- * @root: Root storage to insert into, or NULL when inserting under @parent
- * @parent: Parent node to insert under, or NULL when inserting into @root
- * @leaf_id: Non-zero id to store in the final appended node
- * @entries: Stack frames to append from the insertion point
- * @nr_entries: Number of frames in @entries
- * @node_slots: Caller-owned storage slots for trie nodes
- * @nr_node_slots: Number of entries in @node_slots
- * @child_slots: Caller-owned storage slots for one-child arrays
- * @nr_child_slots: Number of entries in @child_slots
- * @scratch: Scratch buffer for compressed frame payloads
- * @nr_scratch: Number of 32-bit entries that fit in @scratch
- * @new_storage: Replacement child-array storage to publish
- * @new_storage_size: Size of @new_storage in bytes
- * @tail: Storage for the final appended node
- * @nr_used: Storage for the number of node slots consumed
- *
- * This function is only for internal purposes. It descends through fully
- * matched child nodes until no existing child starts with the next input frame,
- * then builds an unpublished append chain in caller-owned storage and publishes
- * the replacement child array last. Split, promote, and found cases are rejected
- * for later insertion helpers. Callers must serialize publishers for the same
- * @root or @parent.
- *
- * Return: 0 on success, -EINVAL on invalid input or existing child.
- */
-int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
-				     void *parent, u32 leaf_id,
-				     const unsigned long *entries,
-				     unsigned int nr_entries,
-				     const struct stack_depot_trie_node_slot *node_slots,
-				     unsigned int nr_node_slots,
-				     const struct stack_depot_trie_child_array_slot *child_slots,
-				     unsigned int nr_child_slots, u32 *scratch,
-				     unsigned int nr_scratch, void *new_storage,
-				     size_t new_storage_size, const void **tail,
-				     unsigned int *nr_used);
-
-/**
- * __stack_depot_trie_fetch_into - Materialize a trie parent chain
- *
- * @leaf: Leaf node to materialize from
- * @entries: Caller-owned output buffer
- * @max_entries: Number of frames that fit in @entries
- * @scratch: Caller-owned scratch buffer for staged output
- * @nr_scratch: Number of frames that fit in @scratch
- *
- * This function is only for internal purposes. It stages the full stack into
- * @scratch first, so failures do not partially write @entries. @scratch is
- * caller-owned temporary storage and may be modified on failure.
- *
- * Return: Number of frames copied, 0 on invalid input or too-small buffers.
- */
-unsigned int
-__stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
-			      unsigned int max_entries, unsigned long *scratch,
-			      unsigned int nr_scratch);
-
-/**
- * __stack_depot_trie_child_array_size - Get storage size for child pointers
- *
- * @nr_children: Number of child pointers stored in the array
- *
- * This function is only for internal purposes.
- *
- * Return: Aligned child-array storage size, 0 on overflow.
- */
-size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
-
-/**
- * __stack_depot_trie_child_array_init - Initialize sorted child storage
- *
- * @storage: Child-array storage to initialize
- * @storage_size: Size of @storage in bytes
- * @children: Children sorted by first decoded frame
- * @nr_children: Number of child pointers in @children
- *
- * This function is only for internal purposes. It does not publish @storage;
- * callers remain responsible for lifetime and visibility. @nr_children may be
- * zero with @children set to NULL to initialize an empty array. Callers must
- * discard @storage unless this function returns 0.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int
-__stack_depot_trie_child_array_init(void *storage, size_t storage_size,
-				    const void * const *children,
-				    unsigned int nr_children);
-
-/**
- * __stack_depot_trie_child_array_find - Find a child by first frame
- *
- * @storage: Child-array storage initialized by child_array_init/insert
- * @frame: First decoded frame to search for
- *
- * This function is only for internal purposes.
- *
- * Return: Child pointer if found, NULL otherwise.
- */
-const void *
-__stack_depot_trie_child_array_find(const void *storage, unsigned long frame);
-
-/**
- * __stack_depot_trie_child_array_insert - Build replacement child storage
- *
- * @old_storage: Existing sorted child array, or NULL
- * @child: Child node to insert
- * @new_storage: Replacement child-array storage to initialize
- * @new_storage_size: Size of @new_storage in bytes
- *
- * This function is only for internal purposes. It builds a new sorted child
- * array and rejects duplicate first-frame keys and in-place updates.
- *
- * Return: 0 on success, -EINVAL on invalid input.
- */
-int
-__stack_depot_trie_child_array_insert(const void *old_storage, const void *child,
-				      void *new_storage, size_t new_storage_size);
 
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot

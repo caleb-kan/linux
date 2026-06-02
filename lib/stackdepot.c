@@ -41,6 +41,8 @@
 
 #include <asm/stackdepot.h>
 
+#include "stackdepot_internal.h"
+
 /*
  * The pool_index is offset by 1 so the first record does not have a 0 handle.
  */
@@ -148,7 +150,7 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_PERSIST_BYTES]	= "persistent_bytes",
 };
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
-/* Count helpers rely on saturated refcounts failing positive-count checks. */
+/* Count helpers rely on saturated refcounts looking negative. */
 static_assert(REFCOUNT_SATURATED < 0);
 
 static int __init disable_stack_depot(char *str)
@@ -834,13 +836,17 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count)
 	refcount_set(&stack->count, (int)count);
 }
 
-bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
+bool __stack_depot_inc_count(depot_stack_handle_t handle,
+			     unsigned int count,
+			     bool *new_count)
 {
 	struct stack_record *stack;
 	int new;
 	int old = REFCOUNT_SATURATED;
 	bool was_saturated = false;
 
+	if (new_count)
+		*new_count = false;
 	if (!handle || !count || count > (unsigned int)INT_MAX - 1)
 		return false;
 
@@ -852,23 +858,26 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle, unsigned int count)
 	/*
 	 * Intentional refcount_t internals use: no helper conditionally
 	 * converts the persistent REFCOUNT_SATURATED sentinel to a positive
-	 * page_owner count. The cmpxchg only performs that one-way transition;
-	 * normal counted records continue through refcount_add().
+	 * page_owner count. The first cmpxchg only performs that one-way
+	 * transition; normal counted records continue through a checked cmpxchg
+	 * loop so overflow cannot recreate the saturated sentinel.
 	 */
-	if (atomic_try_cmpxchg(&stack->count.refs, &old, new))
+	if (atomic_try_cmpxchg(&stack->count.refs, &old, new)) {
 		was_saturated = true;
-	else if (old > 0) {
-		/* Another caller won the transition; count this caller too. */
-		if (!refcount_add_not_zero((int)count, &stack->count)) {
-			/* Do not resurrect a diagnostic count that already hit zero. */
-			return false;
-		}
 	} else {
-		/* A racing decrement reached zero, or the record is not counted. */
-		return false;
+		/* cmpxchg reloads @old before each retry check. */
+		do {
+			if (old <= 0)
+				return false;
+			if (count > (unsigned int)INT_MAX - (unsigned int)old)
+				return false;
+			new = old + (int)count;
+		} while (!atomic_try_cmpxchg(&stack->count.refs, &old, new));
 	}
 
-	return was_saturated;
+	if (new_count)
+		*new_count = was_saturated;
+	return true;
 }
 
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
@@ -878,7 +887,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 	int new;
 	int old;
 
-	if (!handle || !count || count > (unsigned int)INT_MAX - 1)
+	if (!handle || !count || count > (unsigned int)INT_MAX)
 		return false;
 
 	stack = depot_fetch_stack(handle);
@@ -913,6 +922,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 		new = old - (int)count;
 	} while (!atomic_try_cmpxchg_release(&stack->count.refs, &old, new));
 
+	/* Non-zero results are diagnostic counts; callers consume no ordered data. */
 	if (!new)
 		smp_acquire__after_ctrl_dep();
 
@@ -1179,9 +1189,12 @@ static int frame_run_read(const struct stack_depot_frame_run *run,
 				       run->nr_entries * sizeof(*entries), scratch,
 				       run->nr_entries * sizeof(*scratch)))
 		return -EINVAL;
+	if (stack_depot_ranges_overlap(src, run->bytes, scratch,
+				       run->nr_entries * sizeof(*scratch)))
+		return -EINVAL;
 
 	return stack_depot_frame_run_read_compressed(run, src, entries, scratch,
-						      nr_scratch);
+					      nr_scratch);
 }
 
 int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
@@ -1267,7 +1280,9 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 		return -EINVAL;
 	if (parent_node) {
 		if (!parent_node->stack_len ||
-		    parent_node->stack_len > U32_MAX - run.nr_entries)
+		    parent_node->stack_len > U32_MAX - run.nr_entries ||
+		    parent_node->stack_len >
+		    CONFIG_STACKDEPOT_MAX_FRAMES - run.nr_entries)
 			return -EINVAL;
 		stack_len = parent_node->stack_len + run.nr_entries;
 	} else {
@@ -1302,6 +1317,10 @@ unsigned int __stack_depot_trie_node_match(const void *node_ptr,
 		return 0;
 
 	limit = min(node->run.nr_entries, nr_entries);
+	if (node->run.mode == STACK_DEPOT_FRAME_RAW &&
+	    !memcmp(node->data, entries, limit * sizeof(*entries)))
+		return limit;
+
 	for (i = 0; i < limit; i++) {
 		unsigned long frame;
 
@@ -1717,7 +1736,8 @@ static int trie_append_chain_validate(const struct stack_depot_trie_node *parent
 		if (run.mode == STACK_DEPOT_FRAME_COMPRESSED &&
 		    (!scratch || nr_scratch < run.nr_entries))
 			return -EINVAL;
-		if (stack_len > U32_MAX - run.nr_entries)
+		if (stack_len > U32_MAX - run.nr_entries ||
+		    stack_len > CONFIG_STACKDEPOT_MAX_FRAMES - run.nr_entries)
 			return -EINVAL;
 
 		size = __stack_depot_trie_node_size(&run);
@@ -2040,6 +2060,8 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 
 	pos = total;
 	for (node = leaf; node; node = node->parent) {
+		if (stack_depot_frame_run_validate(&node->run))
+			return 0;
 		if (node->stack_len != pos || node->run.nr_entries > pos)
 			return 0;
 		pos -= node->run.nr_entries;
@@ -2096,9 +2118,16 @@ int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 
 	for (i = 0; i < nr_children; i++) {
 		unsigned long frame;
+		size_t size;
 
 		if (stack_depot_trie_node_first_frame(nodes[i], &frame))
 			return -EINVAL;
+		size = __stack_depot_trie_node_size(&nodes[i]->run);
+		if (!size)
+			return -EINVAL;
+		if (stack_depot_ranges_overlap(array, storage_size, nodes[i], size))
+			return -EINVAL;
+		/* Child key zero is reserved so NULL lookup remains unambiguous. */
 		if (!frame || (i && frame <= last))
 			return -EINVAL;
 		last = frame;
@@ -2173,11 +2202,17 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 	unsigned int pos;
 	unsigned int i;
 	unsigned long frame;
+	size_t node_size;
 	size_t old_size;
 	bool overlaps;
 	bool found;
 
 	if (!node || !new_array || stack_depot_trie_node_first_frame(node, &frame))
+		return -EINVAL;
+	node_size = __stack_depot_trie_node_size(&node->run);
+	if (!node_size)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(new_array, new_storage_size, node, node_size))
 		return -EINVAL;
 	if (!IS_ALIGNED((unsigned long)new_array, __alignof__(*new_array)))
 		return -EINVAL;
@@ -2261,7 +2296,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	if (!handle || !entries || !max_entries)
 		return 0;
 
-	/* Defer stack record reuse while copying from stackdepot-owned storage. */
+	/* Extend the lookup RCU section so the fetched record cannot be reused. */
 	rcu_read_lock_sched_notrace();
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)

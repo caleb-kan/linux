@@ -24624,6 +24624,7 @@ F:	arch/*/include/asm/stackdepot.h
 F:	include/asm-generic/stackdepot.h
 F:	include/linux/stackdepot.h
 F:	lib/stackdepot.c
+F:	lib/stackdepot_internal.h
 F:	lib/tests/stackdepot*
 
 STATIC BRANCH/CALL

@@ -33,12 +33,15 @@ static inline bool arch_stack_depot_frame_prefix(u8 prefix_id,
 
 	switch (prefix_id) {
 	case STACK_DEPOT_ARM64_PREV_PREFIX_ID:
-		/* Avoid underflow and the zero prefix; such frames stay raw. */
+		/* Reject < SZ_4G for underflow and == SZ_4G for prefix value 0. */
 		if (text_prefix <= SZ_4G)
 			return false;
 		*prefix = text_prefix - SZ_4G;
 		return true;
 	case STACK_DEPOT_ARM64_TEXT_PREFIX_ID:
+		/* Prefix zero is reserved for the raw fallback. */
+		if (!text_prefix)
+			return false;
 		*prefix = text_prefix;
 		return true;
 	case STACK_DEPOT_ARM64_NEXT_PREFIX_ID:
