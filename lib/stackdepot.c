@@ -1412,6 +1412,93 @@ trie_child_slot_overlaps(const struct stack_depot_trie_child_array_slot *slots,
 	return false;
 }
 
+static const struct stack_depot_trie_child_array **
+trie_publish_slot(struct stack_depot_trie_root *root,
+		  struct stack_depot_trie_node *parent)
+{
+	if ((root && parent) || (!root && !parent))
+		return NULL;
+	if (root)
+		return &root->children;
+	return &parent->children;
+}
+
+static int trie_insert_append_precheck(struct stack_depot_trie_root *root,
+				       struct stack_depot_trie_node *parent,
+				       const unsigned long *entries,
+				       unsigned int nr_entries,
+				       const struct stack_depot_trie_node_slot *node_slots,
+				       unsigned int nr_node_slots,
+				       const struct stack_depot_trie_child_array_slot *child_slots,
+				       unsigned int nr_child_slots, void *new_storage,
+				       size_t new_storage_size)
+{
+	const struct stack_depot_trie_child_array **slot;
+	const struct stack_depot_trie_child_array *children;
+	size_t size;
+	unsigned int pos;
+	bool found;
+
+	if (!entries || !nr_entries || !new_storage)
+		return -EINVAL;
+	if (!entries[0])
+		return -EINVAL;
+	if ((nr_node_slots && !node_slots) || (nr_child_slots && !child_slots))
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)new_storage,
+			__alignof__(struct stack_depot_trie_child_array)))
+		return -EINVAL;
+
+	slot = trie_publish_slot(root, parent);
+	if (!slot)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(new_storage, new_storage_size, slot,
+				       sizeof(*slot)))
+		return -EINVAL;
+	if (root) {
+		if (trie_node_slot_overlaps(node_slots, nr_node_slots, slot,
+					    sizeof(*slot)))
+			return -EINVAL;
+		if (trie_child_slot_overlaps(child_slots, nr_child_slots, slot,
+					     sizeof(*slot)))
+			return -EINVAL;
+	}
+	if (parent && trie_ancestor_overlaps(parent, new_storage, new_storage_size))
+		return -EINVAL;
+	if (trie_node_slot_overlaps(node_slots, nr_node_slots, new_storage,
+				    new_storage_size) ||
+	    trie_child_slot_overlaps(child_slots, nr_child_slots, new_storage,
+				     new_storage_size))
+		return -EINVAL;
+
+	/* Pairs with append publication's smp_store_release(). */
+	children = smp_load_acquire(slot);
+	size = __stack_depot_trie_child_array_size(children ?
+						       children->nr_children + 1 : 1);
+	if (!size || new_storage_size < size)
+		return -EINVAL;
+	if (children) {
+		size = __stack_depot_trie_child_array_size(children->nr_children);
+		if (!size)
+			return -EINVAL;
+		if (stack_depot_ranges_overlap(children, size, new_storage,
+					       new_storage_size))
+			return -EINVAL;
+		if (trie_node_slot_overlaps(node_slots, nr_node_slots, children,
+					    size) ||
+		    trie_child_slot_overlaps(child_slots, nr_child_slots, children,
+					     size))
+			return -EINVAL;
+		if (stack_depot_trie_child_lower_bound(children, entries[0], &pos,
+						       &found))
+			return -EINVAL;
+		if (found)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int trie_append_chain_validate(const struct stack_depot_trie_node *parent,
 				      const unsigned long *entries,
 				      unsigned int nr_entries,
@@ -1679,6 +1766,48 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 		tmp.status = STACK_DEPOT_TRIE_LOOKUP_PROMOTE;
 
 	*lookup = tmp;
+	return 0;
+}
+
+int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
+				     void *parent_ptr, u32 leaf_id,
+				     const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, void *new_storage,
+				     size_t new_storage_size, const void **tail,
+				     unsigned int *nr_used)
+{
+	const void *head;
+	const void *last;
+	unsigned int used;
+	struct stack_depot_trie_node *parent = parent_ptr;
+	int ret;
+
+	if (!leaf_id || !tail || !nr_used)
+		return -EINVAL;
+	ret = trie_insert_append_precheck(root, parent, entries, nr_entries,
+					  node_slots, nr_node_slots, child_slots,
+					  nr_child_slots, new_storage,
+					  new_storage_size);
+	if (ret)
+		return ret;
+	ret = __stack_depot_trie_append_chain(parent, leaf_id, entries, nr_entries,
+					      node_slots, nr_node_slots, child_slots,
+					      nr_child_slots, scratch, nr_scratch,
+					      &head, &last, &used);
+	if (ret)
+		return ret;
+	ret = __stack_depot_trie_publish_append(root, parent, head, new_storage,
+						new_storage_size);
+	if (ret)
+		return ret;
+
+	*tail = last;
+	*nr_used = used;
 	return 0;
 }
 

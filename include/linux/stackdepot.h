@@ -492,6 +492,44 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 			       struct stack_depot_trie_lookup *lookup);
 
 /**
+ * __stack_depot_trie_insert_append - Insert a missing child by append
+ *
+ * @root: Root storage to insert into, or NULL when inserting under @parent
+ * @parent: Parent node to insert under, or NULL when inserting into @root
+ * @leaf_id: Non-zero id to store in the final appended node
+ * @entries: Stack frames to append from the insertion point
+ * @nr_entries: Number of frames in @entries
+ * @node_slots: Caller-owned storage slots for trie nodes
+ * @nr_node_slots: Number of entries in @node_slots
+ * @child_slots: Caller-owned storage slots for one-child arrays
+ * @nr_child_slots: Number of entries in @child_slots
+ * @scratch: Scratch buffer for compressed frame payloads
+ * @nr_scratch: Number of 32-bit entries that fit in @scratch
+ * @new_storage: Replacement child-array storage to publish
+ * @new_storage_size: Size of @new_storage in bytes
+ * @tail: Storage for the final appended node
+ * @nr_used: Storage for the number of node slots consumed
+ *
+ * This function is only for internal purposes. It handles only the append case
+ * where no existing child starts with @entries[0]. It builds an unpublished
+ * append chain in caller-owned storage, then publishes the replacement child
+ * array last. Callers must serialize publishers for the same @root or @parent.
+ *
+ * Return: 0 on success, -EINVAL on invalid input or existing child.
+ */
+int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
+				     void *parent, u32 leaf_id,
+				     const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, void *new_storage,
+				     size_t new_storage_size, const void **tail,
+				     unsigned int *nr_used);
+
+/**
  * __stack_depot_trie_fetch_into - Materialize a trie parent chain
  *
  * @leaf: Leaf node to materialize from
