@@ -635,6 +635,9 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * is returned. If more frames are stored than @max_entries, the copy is skipped
  * entirely and 0 is returned.
  *
+ * A non-zero invalid or post-put @handle is treated like stack_depot_fetch(): it
+ * returns 0 and may WARN because such handles indicate a corrupt caller state.
+ *
  * Callers must ensure @handle remains valid for the duration of this call.
  * Persistent handles saved without %STACK_DEPOT_FLAG_GET require no extra
  * reference; handles saved with %STACK_DEPOT_FLAG_GET require a held reference.
@@ -644,8 +647,6 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * Return: Number of frames copied, 0 if @entries is NULL, @max_entries is 0,
  * @handle is 0 or invalid, stack depot is disabled, or @max_entries is less
  * than the number of stored frames.
- * An invalid or post-put @handle may also trigger a warning from the underlying
- * stack_depot_fetch() call.
  */
 unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 				    unsigned long *entries,

@@ -225,7 +225,7 @@ static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 
 	if (!__stack_depot_get_count(handle, &count)) {
 		stack = alloc_stack_record(gfp_mask);
-		/* Keep saturated accounting if the list marker cannot be tracked. */
+		/* Leave saturated stacks retryable if no list marker can be tracked. */
 		if (!stack)
 			return;
 	}
@@ -240,7 +240,7 @@ static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 static void dec_stack_record_count(depot_stack_handle_t handle,
 				   unsigned int nr_base_pages)
 {
-	/* Successful list insertion leaves a marker count after all pages free. */
+	/* Successful list insertion leaves a marker count; zero means corruption. */
 	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);

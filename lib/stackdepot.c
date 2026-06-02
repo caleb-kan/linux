@@ -148,6 +148,8 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_PERSIST_BYTES]	= "persistent_bytes",
 };
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
+/* Count helpers rely on saturated refcounts failing positive-count checks. */
+static_assert(REFCOUNT_SATURATED < 0);
 
 static int __init disable_stack_depot(char *str)
 {
@@ -1985,6 +1987,7 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 						   new_storage_size);
 		if (ret)
 			return ret;
+		/* Insert callers serialize writers and may publish below this node. */
 		parent = (struct stack_depot_trie_node *)lookup.node;
 		root = NULL;
 		entries += lookup.matched;

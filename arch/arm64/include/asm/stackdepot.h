@@ -11,10 +11,11 @@
 #define STACK_DEPOT_ARM64_FRAME_PREFIX_MASK	(~STACK_DEPOT_ARM64_FRAME_LOW_MASK)
 
 /*
- * The kernel image is KASLR-relocated on arm64, and modules are allocated
- * inside a 2 GB relocation window that contains the image. Store the runtime
- * text prefix and the two adjacent 4 GB prefixes so both sides of any window
- * boundary can round-trip.
+ * Modules are allocated inside a 2 GB relocation window containing the
+ * kernel image, but stackdepot compression stores only the low 32 bits of
+ * each frame. If that window crosses a 4 GB high-bit boundary, module text
+ * may have the previous or next prefix even though it is still within
+ * relocation range of _text.
  */
 #define STACK_DEPOT_ARM64_PREV_PREFIX_ID	0
 #define STACK_DEPOT_ARM64_TEXT_PREFIX_ID	1
@@ -32,7 +33,7 @@ static inline bool arch_stack_depot_frame_prefix(u8 prefix_id,
 
 	switch (prefix_id) {
 	case STACK_DEPOT_ARM64_PREV_PREFIX_ID:
-		/* Do not synthesize the zero prefix; such frames stay raw. */
+		/* Avoid underflow and the zero prefix; such frames stay raw. */
 		if (text_prefix <= SZ_4G)
 			return false;
 		*prefix = text_prefix - SZ_4G;
