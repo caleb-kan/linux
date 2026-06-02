@@ -510,10 +510,12 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
  * @tail: Storage for the final appended node
  * @nr_used: Storage for the number of node slots consumed
  *
- * This function is only for internal purposes. It handles only the append case
- * where no existing child starts with @entries[0]. It builds an unpublished
- * append chain in caller-owned storage, then publishes the replacement child
- * array last. Callers must serialize publishers for the same @root or @parent.
+ * This function is only for internal purposes. It descends through fully
+ * matched child nodes until no existing child starts with the next input frame,
+ * then builds an unpublished append chain in caller-owned storage and publishes
+ * the replacement child array last. Split, promote, and found cases are rejected
+ * for later insertion helpers. Callers must serialize publishers for the same
+ * @root or @parent.
  *
  * Return: 0 on success, -EINVAL on invalid input or existing child.
  */
