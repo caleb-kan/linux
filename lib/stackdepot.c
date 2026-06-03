@@ -2491,6 +2491,107 @@ int __stack_depot_trie_split_tail_plan(const unsigned long *entries,
 	return 0;
 }
 
+int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
+				      const void *parent_ptr,
+				      const struct stack_depot_trie_node_slot *node_slots,
+				      unsigned int nr_node_slots,
+				      const struct stack_depot_trie_child_array_slot *child_slots,
+				      unsigned int nr_child_slots,
+				      void *new_storage, size_t new_storage_size)
+{
+	struct stack_depot_trie_node *parent = (void *)parent_ptr;
+	const struct stack_depot_trie_child_array **slot;
+	const struct stack_depot_trie_child_array *children;
+	unsigned int i;
+	size_t size;
+
+	if (!new_storage || !new_storage_size ||
+	    (nr_node_slots && !node_slots) || (nr_child_slots && !child_slots))
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)new_storage,
+			__alignof__(struct stack_depot_trie_child_array)))
+		return -EINVAL;
+
+	for (i = 0; i < nr_node_slots; i++) {
+		const struct stack_depot_trie_node_slot *node_slot = &node_slots[i];
+
+		if (!node_slot->node || !node_slot->size)
+			return -EINVAL;
+		if (!IS_ALIGNED((unsigned long)node_slot->node,
+				__alignof__(struct stack_depot_trie_node)))
+			return -EINVAL;
+		if (parent &&
+		    trie_ancestor_overlaps(parent, node_slot->node, node_slot->size))
+			return -EINVAL;
+		if (trie_node_slot_overlaps(node_slots, i, node_slot->node, node_slot->size))
+			return -EINVAL;
+	}
+
+	for (i = 0; i < nr_child_slots; i++) {
+		const struct stack_depot_trie_child_array_slot *child_slot =
+			&child_slots[i];
+		void *array = child_slot->array;
+		size_t slot_size = child_slot->size;
+
+		if (!array || !slot_size)
+			return -EINVAL;
+		if (!IS_ALIGNED((unsigned long)array,
+				__alignof__(struct stack_depot_trie_child_array)))
+			return -EINVAL;
+		if (parent &&
+		    trie_ancestor_overlaps(parent, array, slot_size))
+			return -EINVAL;
+		if (trie_child_slot_overlaps(child_slots, i, array, slot_size))
+			return -EINVAL;
+	}
+
+	for (i = 0; i < nr_node_slots; i++) {
+		if (trie_child_slot_overlaps(child_slots, nr_child_slots,
+					     node_slots[i].node, node_slots[i].size))
+			return -EINVAL;
+	}
+	if (trie_node_slot_overlaps(node_slots, nr_node_slots, new_storage,
+				    new_storage_size) ||
+	    trie_child_slot_overlaps(child_slots, nr_child_slots, new_storage,
+				     new_storage_size))
+		return -EINVAL;
+
+	slot = trie_publish_slot(root, parent);
+	if (!slot)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(new_storage, new_storage_size, slot,
+				       sizeof(*slot)))
+		return -EINVAL;
+	if (trie_node_slot_overlaps(node_slots, nr_node_slots, slot, sizeof(*slot)) ||
+	    trie_child_slot_overlaps(child_slots, nr_child_slots, slot, sizeof(*slot)))
+		return -EINVAL;
+	if (parent && trie_ancestor_overlaps(parent, new_storage, new_storage_size))
+		return -EINVAL;
+
+	/* Pairs with append, promote, and future split publication. */
+	children = smp_load_acquire(slot);
+	if (!children)
+		return -EINVAL;
+	size = __stack_depot_trie_child_array_size(children->nr_children);
+	if (!size)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(children, size, new_storage,
+				       new_storage_size))
+		return -EINVAL;
+	if (trie_node_slot_overlaps(node_slots, nr_node_slots, children, size) ||
+	    trie_child_slot_overlaps(child_slots, nr_child_slots, children, size))
+		return -EINVAL;
+	if (trie_node_slots_subtree_overlap(children, parent, node_slots, nr_node_slots))
+		return -EINVAL;
+	if (trie_child_slots_subtree_overlap(children, parent, child_slots, nr_child_slots))
+		return -EINVAL;
+	if (trie_child_array_subtree_overlaps(children, parent, new_storage,
+					      new_storage_size))
+		return -EINVAL;
+
+	return 0;
+}
+
 static int
 stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
 				   unsigned long frame, unsigned int *pos, bool *found)

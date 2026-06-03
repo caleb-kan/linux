@@ -157,6 +157,18 @@ static int split_tail_plan(const unsigned long *entries, unsigned int nr_entries
 					       nr_child_slots, nr_runs);
 }
 
+static int split_precheck(struct stack_depot_trie_root *root, const void *parent,
+			  const struct stack_depot_trie_node_slot *node_slots,
+			  unsigned int nr_node_slots,
+			  const struct stack_depot_trie_child_array_slot *child_slots,
+			  unsigned int nr_child_slots, void *new_storage,
+			  size_t new_storage_size)
+{
+	return __stack_depot_trie_split_precheck(root, parent, node_slots,
+			nr_node_slots, child_slots, nr_child_slots,
+			new_storage, new_storage_size);
+}
+
 static int child_array_insert(const void *old_storage, const void *child,
 			      void *new_storage, size_t new_storage_size)
 {
@@ -2744,6 +2756,83 @@ static void stackdepot_trie_split_tail_plan_rejects_bad_inputs(struct kunit *tes
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void stackdepot_trie_split_precheck(struct kunit *test)
+{
+	unsigned long old_entries[] = { 0x1000UL };
+	unsigned long new_entries[] = { 0x2000UL };
+	struct stack_depot_trie_child_array_slot child_slot;
+	struct stack_depot_trie_child_array_slot old_array;
+	struct stack_depot_trie_child_array_slot new_array;
+	struct stack_depot_trie_node_slot node_slot;
+	struct stack_depot_trie_root root = {};
+	const void *children[1];
+	void *old_child;
+	int ret;
+
+	trie_node_alloc(test, old_entries, ARRAY_SIZE(old_entries), NULL, 1,
+			&old_child);
+	trie_node_slot_alloc(test, &node_slot, new_entries, ARRAY_SIZE(new_entries));
+	children[0] = old_child;
+	old_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(children));
+	old_array.array = kunit_kzalloc(test, old_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, old_array.array);
+	ret = child_array_init(old_array.array, old_array.size, children,
+			       ARRAY_SIZE(children));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	root.children = old_array.array;
+	child_slot.size = __stack_depot_trie_child_array_size(1);
+	child_slot.array = kunit_kzalloc(test, child_slot.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_slot.array);
+	new_array.size = __stack_depot_trie_child_array_size(1);
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+
+	ret = split_precheck(&root, NULL, &node_slot, 1, &child_slot, 1,
+			     new_array.array, new_array.size);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+}
+
+static void stackdepot_trie_split_precheck_rejects_aliases(struct kunit *test)
+{
+	unsigned long old_entries[] = { 0x1000UL };
+	unsigned long new_entries[] = { 0x2000UL };
+	struct stack_depot_trie_child_array_slot child_slot;
+	struct stack_depot_trie_child_array_slot old_array;
+	struct stack_depot_trie_child_array_slot new_array;
+	struct stack_depot_trie_node_slot node_slot;
+	struct stack_depot_trie_root root = {};
+	const void *children[1];
+	void *old_child;
+	int ret;
+
+	trie_node_alloc(test, old_entries, ARRAY_SIZE(old_entries), NULL, 1,
+			&old_child);
+	trie_node_slot_alloc(test, &node_slot, new_entries, ARRAY_SIZE(new_entries));
+	children[0] = old_child;
+	old_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(children));
+	old_array.array = kunit_kzalloc(test, old_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, old_array.array);
+	ret = child_array_init(old_array.array, old_array.size, children,
+			       ARRAY_SIZE(children));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	root.children = old_array.array;
+	child_slot.size = __stack_depot_trie_child_array_size(1);
+	child_slot.array = kunit_kzalloc(test, child_slot.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_slot.array);
+	new_array.size = __stack_depot_trie_child_array_size(1);
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+
+	ret = split_precheck(&root, NULL, &node_slot, 1, &child_slot, 1,
+			     old_array.array, old_array.size);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	node_slot.node = old_array.array;
+	node_slot.size = old_array.size;
+	ret = split_precheck(&root, NULL, &node_slot, 1, &child_slot, 1,
+			     new_array.array, new_array.size);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 static void stackdepot_trie_child_array_insert_empty(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL };
@@ -2850,6 +2939,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_split_tail_plan_mixed_runs),
 #endif
 	KUNIT_CASE(stackdepot_trie_split_tail_plan_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_trie_split_precheck),
+	KUNIT_CASE(stackdepot_trie_split_precheck_rejects_aliases),
 	KUNIT_CASE(stackdepot_trie_child_array_insert_empty),
 	{}
 };

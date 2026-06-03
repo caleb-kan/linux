@@ -123,6 +123,13 @@ int __stack_depot_trie_split_tail_plan(const unsigned long *entries,
 				       const struct stack_depot_trie_child_array_slot *child_slots,
 				       unsigned int nr_child_slots,
 				       unsigned int *nr_runs);
+int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
+				      const void *parent,
+				      const struct stack_depot_trie_node_slot *node_slots,
+				      unsigned int nr_node_slots,
+				      const struct stack_depot_trie_child_array_slot *child_slots,
+				      unsigned int nr_child_slots,
+				      void *new_storage, size_t new_storage_size);
 const void *__stack_depot_trie_child_array_find(const void *storage,
 						unsigned long frame);
 int __stack_depot_trie_child_array_insert(const void *old_storage,
