@@ -1407,10 +1407,14 @@ unsigned int __stack_depot_trie_node_match(const void *node_ptr,
 static bool trie_ancestor_overlaps(const struct stack_depot_trie_node *node,
 				   const void *ptr, size_t size)
 {
-	for (; node; node = node->parent) {
+	unsigned int depth = 0;
+
+	for (; node; node = node->parent, depth++) {
 		size_t child_size;
 		size_t node_size;
 
+		if (depth >= CONFIG_STACKDEPOT_MAX_FRAMES)
+			return true;
 		if (stack_depot_frame_run_validate(&node->run))
 			return true;
 
@@ -2219,6 +2223,20 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 	return 0;
 }
 
+static int trie_split_child(struct stack_depot_trie_root *root,
+			    struct stack_depot_trie_node *parent,
+			    const struct stack_depot_trie_node *child,
+			    unsigned int matched, u32 leaf_id,
+			    const unsigned long *entries,
+			    unsigned int nr_entries,
+			    const struct stack_depot_trie_node_slot *node_slots,
+			    unsigned int nr_node_slots,
+			    const struct stack_depot_trie_child_array_slot *child_slots,
+			    unsigned int nr_child_slots, u32 *scratch,
+			    unsigned int nr_scratch, void *new_storage,
+			    size_t new_storage_size, const void **tail,
+			    unsigned int *nr_used);
+
 int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 				     void *parent_ptr, u32 leaf_id,
 				     const unsigned long *entries,
@@ -2262,6 +2280,12 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 
 	if (!entries || !nr_entries)
 		return -EINVAL;
+	if (lookup.status == STACK_DEPOT_TRIE_LOOKUP_SPLIT)
+		return trie_split_child(root, parent, lookup.node, lookup.matched,
+					leaf_id, entries, nr_entries, node_slots,
+					nr_node_slots, child_slots, nr_child_slots,
+					scratch, nr_scratch, new_storage,
+					new_storage_size, tail, nr_used);
 	if (lookup.status == STACK_DEPOT_TRIE_LOOKUP_PROMOTE) {
 		if (!node_slots || !nr_node_slots)
 			return -EINVAL;
@@ -2783,6 +2807,63 @@ int __stack_depot_trie_split_subtree(const void *child_ptr, unsigned int matched
 	*prefix = pref;
 	*tail = has_new_tail ? new_tail : pref;
 	*nr_used = 2 + chain_used;
+	return 0;
+}
+
+static int trie_split_child(struct stack_depot_trie_root *root,
+			    struct stack_depot_trie_node *parent,
+			    const struct stack_depot_trie_node *child,
+			    unsigned int matched, u32 leaf_id,
+			    const unsigned long *entries,
+			    unsigned int nr_entries,
+			    const struct stack_depot_trie_node_slot *node_slots,
+			    unsigned int nr_node_slots,
+			    const struct stack_depot_trie_child_array_slot *child_slots,
+			    unsigned int nr_child_slots, u32 *scratch,
+			    unsigned int nr_scratch, void *new_storage,
+			    size_t new_storage_size, const void **tail,
+			    unsigned int *nr_used)
+{
+	const struct stack_depot_trie_child_array **publish_slot;
+	const struct stack_depot_trie_child_array *old_array;
+	const void *prefix;
+	unsigned int pos;
+	unsigned int used;
+	int ret;
+
+	if (!child || !tail || !nr_used)
+		return -EINVAL;
+	if (child->parent != parent)
+		return -EINVAL;
+
+	ret = __stack_depot_trie_split_precheck(root, parent, node_slots,
+						nr_node_slots, child_slots,
+						nr_child_slots, new_storage,
+						new_storage_size);
+	if (ret)
+		return ret;
+	publish_slot = trie_publish_slot(root, parent);
+	if (!publish_slot)
+		return -EINVAL;
+
+	/* Pairs with append, promote, and split publication. */
+	old_array = smp_load_acquire(publish_slot);
+	ret = trie_child_array_replace_precheck(old_array, child, new_storage,
+						new_storage_size, &pos);
+	if (ret)
+		return ret;
+
+	ret = __stack_depot_trie_split_subtree(child, matched, leaf_id, entries,
+					       nr_entries, node_slots, nr_node_slots,
+					       child_slots, nr_child_slots, scratch,
+					       nr_scratch, &prefix, tail, &used);
+	if (ret)
+		return ret;
+
+	trie_child_array_replace_at(old_array, prefix, new_storage, pos);
+	/* Publish the fully initialized replacement array last. */
+	smp_store_release(publish_slot, new_storage);
+	*nr_used = used;
 	return 0;
 }
 
