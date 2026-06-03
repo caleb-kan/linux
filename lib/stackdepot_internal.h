@@ -130,6 +130,15 @@ int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
 				      const struct stack_depot_trie_child_array_slot *child_slots,
 				      unsigned int nr_child_slots,
 				      void *new_storage, size_t new_storage_size);
+int __stack_depot_trie_split_subtree(const void *child, unsigned int matched,
+				     u32 leaf_id, const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, const void **prefix,
+				     const void **tail, unsigned int *nr_used);
 const void *__stack_depot_trie_child_array_find(const void *storage,
 						unsigned long frame);
 int __stack_depot_trie_child_array_insert(const void *old_storage,

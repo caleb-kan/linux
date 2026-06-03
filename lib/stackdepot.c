@@ -2592,6 +2592,200 @@ int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
 	return 0;
 }
 
+static bool
+trie_split_subtree_overlaps(const struct stack_depot_trie_node *child,
+			    const void *ptr, size_t size)
+{
+	if (trie_ancestor_overlaps(child, ptr, size))
+		return true;
+	return trie_child_array_subtree_overlaps(child->children, child, ptr,
+						 size);
+}
+
+static bool
+trie_split_slots_overlap(const struct stack_depot_trie_node *child,
+			 const struct stack_depot_trie_node_slot *node_slots,
+			 unsigned int nr_node_slots,
+			 const struct stack_depot_trie_child_array_slot *child_slots,
+			 unsigned int nr_child_slots)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr_node_slots; i++) {
+		const struct stack_depot_trie_node_slot *slot = &node_slots[i];
+
+		if (trie_split_subtree_overlaps(child, slot->node, slot->size))
+			return true;
+		if (trie_node_slot_overlaps(node_slots, i, slot->node,
+					    slot->size))
+			return true;
+		if (trie_child_slot_overlaps(child_slots, nr_child_slots,
+					     slot->node, slot->size))
+			return true;
+	}
+
+	for (i = 0; i < nr_child_slots; i++) {
+		const struct stack_depot_trie_child_array_slot *slot =
+			&child_slots[i];
+
+		if (trie_split_subtree_overlaps(child, slot->array, slot->size))
+			return true;
+		if (trie_child_slot_overlaps(child_slots, i, slot->array,
+					     slot->size))
+			return true;
+	}
+
+	return false;
+}
+
+static int
+trie_split_subtree_precheck(const struct stack_depot_trie_node *child,
+			    unsigned int matched, u32 leaf_id,
+			    const unsigned long *entries, unsigned int nr_entries,
+			    const struct stack_depot_trie_node_slot *node_slots,
+			    unsigned int nr_node_slots,
+			    const struct stack_depot_trie_child_array_slot *child_slots,
+			    unsigned int nr_child_slots, unsigned int *new_runs)
+{
+	struct stack_depot_frame_run old_tail_run;
+	struct stack_depot_frame_run prefix_run;
+	const unsigned long *tail_entries;
+	unsigned int child_slots_needed;
+	unsigned int slots_needed;
+	unsigned int tail_child_slots;
+	unsigned int tail_node_slots;
+	unsigned int tail_len;
+	bool has_new_tail;
+	size_t size;
+	int ret;
+
+	if (!child || !leaf_id || !entries || !nr_entries || !node_slots ||
+	    !child_slots || !new_runs)
+		return -EINVAL;
+	if (!matched || matched >= child->run.nr_entries ||
+	    matched > nr_entries)
+		return -EINVAL;
+	if (!child->leaf_id && !child->children)
+		return -EINVAL;
+	if (stack_depot_frame_run_slice(&child->run, 0, matched, &prefix_run))
+		return -EINVAL;
+	tail_len = child->run.nr_entries - matched;
+	if (stack_depot_frame_run_slice(&child->run, matched, tail_len, &old_tail_run))
+		return -EINVAL;
+
+	has_new_tail = matched < nr_entries;
+	*new_runs = 0;
+	if (has_new_tail) {
+		tail_entries = &entries[matched];
+		tail_len = nr_entries - matched;
+		tail_node_slots = nr_node_slots > 2 ? nr_node_slots - 2 : 0;
+		tail_child_slots = nr_child_slots > 1 ? nr_child_slots - 1 : 0;
+		ret = __stack_depot_trie_split_tail_plan(tail_entries, tail_len,
+							 &node_slots[2], tail_node_slots,
+							 tail_child_slots ? &child_slots[1] : NULL,
+							 tail_child_slots, new_runs);
+		if (ret)
+			return ret;
+	}
+
+	slots_needed = 2 + *new_runs;
+	child_slots_needed = 1 + (*new_runs ? *new_runs - 1 : 0);
+	if (nr_node_slots < slots_needed || nr_child_slots < child_slots_needed)
+		return -EINVAL;
+
+	size = __stack_depot_trie_node_size(&prefix_run);
+	if (!node_slots[0].node || node_slots[0].size < size)
+		return -EINVAL;
+	size = __stack_depot_trie_node_size(&old_tail_run);
+	if (!node_slots[1].node || node_slots[1].size < size)
+		return -EINVAL;
+	size = __stack_depot_trie_child_array_size(has_new_tail ? 2 : 1);
+	if (!child_slots[0].array || child_slots[0].size < size)
+		return -EINVAL;
+	if (trie_split_slots_overlap(child, node_slots, slots_needed,
+				     child_slots, child_slots_needed))
+		return -EINVAL;
+
+	return 0;
+}
+
+int __stack_depot_trie_split_subtree(const void *child_ptr, unsigned int matched,
+				     u32 leaf_id, const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, const void **prefix,
+				     const void **tail, unsigned int *nr_used)
+{
+	const struct stack_depot_trie_node *child = child_ptr;
+	const unsigned long *tail_entries;
+	const void *new_head = NULL;
+	const void *new_tail = NULL;
+	struct stack_depot_trie_node *old_tail;
+	struct stack_depot_trie_node *pref;
+	unsigned int chain_used = 0;
+	u32 prefix_leaf_id;
+	void *split_array;
+	size_t split_array_size;
+	unsigned int new_runs;
+	unsigned int tail_len;
+	bool has_new_tail;
+	int ret;
+
+	if (!prefix || !tail || !nr_used)
+		return -EINVAL;
+	ret = trie_split_subtree_precheck(child, matched, leaf_id, entries,
+					  nr_entries, node_slots, nr_node_slots,
+					  child_slots, nr_child_slots,
+					  &new_runs);
+	if (ret)
+		return ret;
+
+	pref = node_slots[0].node;
+	old_tail = node_slots[1].node;
+	has_new_tail = matched < nr_entries;
+	prefix_leaf_id = has_new_tail ? 0 : leaf_id;
+	ret = __stack_depot_trie_node_init_slice(pref, node_slots[0].size,
+						 child->parent, prefix_leaf_id,
+						 child, 0, matched);
+	if (ret)
+		return ret;
+	tail_len = child->run.nr_entries - matched;
+	ret = __stack_depot_trie_node_init_slice(old_tail, node_slots[1].size,
+						 pref, child->leaf_id, child,
+						 matched, tail_len);
+	if (ret)
+		return ret;
+
+	if (has_new_tail) {
+		tail_entries = &entries[matched];
+		tail_len = nr_entries - matched;
+		ret = __stack_depot_trie_append_chain(pref, leaf_id, tail_entries,
+						      tail_len, &node_slots[2], nr_node_slots - 2,
+						      &child_slots[1], nr_child_slots - 1,
+						      scratch, nr_scratch, &new_head, &new_tail,
+						      &chain_used);
+		if (ret)
+			return ret;
+	}
+	split_array = child_slots[0].array;
+	split_array_size = child_slots[0].size;
+	ret = __stack_depot_trie_split_child_array_init(split_array, split_array_size,
+							old_tail, new_head);
+	if (ret)
+		return ret;
+
+	old_tail->children = child->children;
+	pref->children = child_slots[0].array;
+	trie_reparent_children(old_tail);
+	*prefix = pref;
+	*tail = has_new_tail ? new_tail : pref;
+	*nr_used = 2 + chain_used;
+	return 0;
+}
+
 static int
 stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
 				   unsigned long frame, unsigned int *pos, bool *found)
