@@ -1766,7 +1766,7 @@ trie_clone_promoted_node(const struct stack_depot_trie_node *old_node,
 
 	if (!old_node || !leaf_id || !slot || !slot->node)
 		return -EINVAL;
-	if (old_node->children || old_node->leaf_id || !old_node->stack_len)
+	if (old_node->leaf_id || !old_node->stack_len)
 		return -EINVAL;
 	if (stack_depot_frame_run_validate(&old_node->run))
 		return -EINVAL;
@@ -1786,6 +1786,22 @@ trie_clone_promoted_node(const struct stack_depot_trie_node *old_node,
 	return 0;
 }
 
+static void trie_reparent_children(struct stack_depot_trie_node *parent)
+{
+	const struct stack_depot_trie_child_array *children = parent->children;
+	unsigned int i;
+
+	if (!children)
+		return;
+	for (i = 0; i < children->nr_children; i++) {
+		struct stack_depot_trie_node *child;
+
+		/* Child arrays are const for readers; writers serialize reparenting. */
+		child = (struct stack_depot_trie_node *)children->children[i];
+		WRITE_ONCE(child->parent, parent);
+	}
+}
+
 static int
 trie_promote_precheck(struct stack_depot_trie_root *root,
 		      struct stack_depot_trie_node *parent,
@@ -1802,7 +1818,7 @@ trie_promote_precheck(struct stack_depot_trie_root *root,
 
 	if (!child || !slot || !slot->node || !new_storage || !old_array || !pos)
 		return -EINVAL;
-	if (child->parent != parent || child->children || child->leaf_id)
+	if (child->parent != parent || child->leaf_id)
 		return -EINVAL;
 
 	publish_slot = trie_publish_slot(root, parent);
@@ -1861,6 +1877,7 @@ trie_promote_child(struct stack_depot_trie_root *root,
 	if (ret)
 		return ret;
 	trie_child_array_replace_at(old_array, slot->node, new_storage, pos);
+	trie_reparent_children(slot->node);
 
 	publish_slot = trie_publish_slot(root, parent);
 	/* Publish the fully initialized replacement array last. */
@@ -2239,7 +2256,7 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 		return 0;
 
 	pos = total;
-	for (node = leaf; node; node = node->parent) {
+	for (node = leaf; node; node = READ_ONCE(node->parent)) {
 		if (stack_depot_frame_run_validate(&node->run))
 			return 0;
 		if (node->stack_len != pos || node->run.nr_entries > pos)
