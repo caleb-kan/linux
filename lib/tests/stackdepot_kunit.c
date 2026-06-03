@@ -1499,6 +1499,174 @@ static void stackdepot_trie_insert_append_descend_rejects_sibling_overlap(struct
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, sibling);
 }
 
+static void stackdepot_trie_insert_append_promotes_internal(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL };
+	struct stack_depot_trie_child_array_slot old_array;
+	struct stack_depot_trie_child_array_slot new_array;
+	struct stack_depot_trie_node_slot promote_slot;
+	struct stack_depot_trie_lookup lookup;
+	struct stack_depot_trie_root root = {};
+	unsigned long scratch[ARRAY_SIZE(entries)];
+	unsigned long out[ARRAY_SIZE(entries)] = {};
+	const void *children[1];
+	const void *tail = (const void *)1;
+	unsigned int fetched;
+	unsigned int used = 99;
+	void *old_child;
+	int ret;
+
+	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 0, &old_child);
+	children[0] = old_child;
+	old_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(children));
+	old_array.array = kunit_kzalloc(test, old_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, old_array.array);
+	ret = child_array_init(old_array.array, old_array.size, children,
+			       ARRAY_SIZE(children));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	root.children = old_array.array;
+	trie_node_slot_alloc(test, &promote_slot, entries, ARRAY_SIZE(entries));
+	new_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(children));
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+
+	ret = insert_append(&root, NULL, 58, entries, ARRAY_SIZE(entries),
+			    &promote_slot, 1, NULL, 0, NULL, 0, new_array.array,
+			    new_array.size, &tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, root.children, new_array.array);
+	KUNIT_EXPECT_PTR_EQ(test, child_array_find(root.children, entries[0]), tail);
+	KUNIT_EXPECT_PTR_EQ(test, tail, promote_slot.node);
+	KUNIT_EXPECT_EQ(test, used, 1U);
+	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+	ret = lookup_step(&root, NULL, entries, ARRAY_SIZE(entries), &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, tail);
+}
+
+static void stackdepot_trie_insert_append_descends_to_promote(struct kunit *test)
+{
+	unsigned long prefix_entries[] = { 0x1000UL };
+	unsigned long child_entries[] = { 0x2000UL };
+	unsigned long stack_entries[] = { 0x1000UL, 0x2000UL };
+	struct stack_depot_trie_child_array_slot root_array;
+	struct stack_depot_trie_child_array_slot child_array;
+	struct stack_depot_trie_child_array_slot new_array;
+	struct stack_depot_trie_node_slot promote_slot;
+	struct stack_depot_trie_lookup lookup;
+	struct stack_depot_trie_root root = {};
+	unsigned long scratch[ARRAY_SIZE(stack_entries)];
+	unsigned long out[ARRAY_SIZE(stack_entries)] = {};
+	const void *root_children[1];
+	const void *tail = (const void *)1;
+	unsigned int fetched;
+	unsigned int used = 99;
+	void *child;
+	void *prefix;
+	int ret;
+
+	trie_node_alloc(test, prefix_entries, ARRAY_SIZE(prefix_entries), NULL, 0,
+			&prefix);
+	trie_node_alloc(test, child_entries, ARRAY_SIZE(child_entries), prefix, 0,
+			&child);
+	root_children[0] = prefix;
+	root_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(root_children));
+	root_array.array = kunit_kzalloc(test, root_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, root_array.array);
+	ret = child_array_init(root_array.array, root_array.size, root_children,
+			       ARRAY_SIZE(root_children));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	root.children = root_array.array;
+	child_array.size = __stack_depot_trie_child_array_size(1);
+	child_array.array = kunit_kzalloc(test, child_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_array.array);
+	ret = publish_append(NULL, prefix, child, child_array.array,
+			     child_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	trie_node_slot_alloc(test, &promote_slot, child_entries,
+			     ARRAY_SIZE(child_entries));
+	new_array.size = __stack_depot_trie_child_array_size(1);
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+
+	ret = insert_append(&root, NULL, 61, stack_entries, ARRAY_SIZE(stack_entries),
+			    &promote_slot, 1, NULL, 0, NULL, 0, new_array.array,
+			    new_array.size, &tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, root.children, root_array.array);
+	ret = lookup_step(NULL, prefix, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, tail);
+	KUNIT_EXPECT_EQ(test, used, 1U);
+	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(stack_entries));
+	KUNIT_EXPECT_MEMEQ(test, out, stack_entries, sizeof(stack_entries));
+}
+
+static void stackdepot_trie_insert_append_rejects_promote_with_children(struct kunit *test)
+{
+	unsigned long parent_entries[] = { 0x1000UL };
+	unsigned long child_entries[] = { 0x2000UL };
+	struct stack_depot_trie_child_array_slot root_array;
+	struct stack_depot_trie_child_array_slot new_array;
+	struct stack_depot_trie_node_slot promote_slot;
+	struct stack_depot_trie_lookup lookup;
+	struct stack_depot_trie_root root = {};
+	unsigned char *old_slot;
+	const void *root_children[1];
+	const void *tail = (const void *)1;
+	unsigned int used = 99;
+	void *child;
+	void *parent;
+	int ret;
+
+	trie_node_alloc(test, parent_entries, ARRAY_SIZE(parent_entries), NULL, 0,
+			&parent);
+	trie_node_alloc(test, child_entries, ARRAY_SIZE(child_entries), parent, 59,
+			&child);
+	root_children[0] = parent;
+	root_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(root_children));
+	root_array.array = kunit_kzalloc(test, root_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, root_array.array);
+	ret = child_array_init(root_array.array, root_array.size, root_children,
+			       ARRAY_SIZE(root_children));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	root.children = root_array.array;
+	new_array.size = __stack_depot_trie_child_array_size(ARRAY_SIZE(root_children));
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+	ret = publish_append(NULL, parent, child, new_array.array, new_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	trie_node_slot_alloc(test, &promote_slot, parent_entries,
+			     ARRAY_SIZE(parent_entries));
+	old_slot = kunit_kzalloc(test, promote_slot.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, old_slot);
+	memcpy(old_slot, promote_slot.node, promote_slot.size);
+	new_array.array = kunit_kzalloc(test, new_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, new_array.array);
+
+	ret = insert_append(&root, NULL, 60, parent_entries,
+			    ARRAY_SIZE(parent_entries), &promote_slot, 1, NULL, 0,
+			    NULL, 0, new_array.array, new_array.size, &tail, &used);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, root.children, root_array.array);
+	KUNIT_EXPECT_PTR_EQ(test, child_array_find(root.children, parent_entries[0]),
+			    parent);
+	ret = lookup_step(NULL, parent, child_entries, ARRAY_SIZE(child_entries),
+			  &lookup);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
+	KUNIT_EXPECT_PTR_EQ(test, lookup.node, child);
+	KUNIT_EXPECT_MEMEQ(test, promote_slot.node, old_slot, promote_slot.size);
+	KUNIT_EXPECT_PTR_EQ(test, tail, (const void *)1);
+	KUNIT_EXPECT_EQ(test, used, 99U);
+}
+
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 static void stackdepot_trie_insert_append_splits_frame_runs(struct kunit *test)
 {
@@ -2314,6 +2482,9 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_insert_append_descends_one_level),
 	KUNIT_CASE(stackdepot_trie_insert_append_descends_multiple_levels),
 	KUNIT_CASE(stackdepot_trie_insert_append_descend_rejects_sibling_overlap),
+	KUNIT_CASE(stackdepot_trie_insert_append_promotes_internal),
+	KUNIT_CASE(stackdepot_trie_insert_append_descends_to_promote),
+	KUNIT_CASE(stackdepot_trie_insert_append_rejects_promote_with_children),
 #if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
 	KUNIT_CASE(stackdepot_trie_insert_append_splits_frame_runs),
 #endif

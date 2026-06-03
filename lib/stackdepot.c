@@ -1317,9 +1317,17 @@ unsigned int __stack_depot_trie_node_match(const void *node_ptr,
 		return 0;
 
 	limit = min(node->run.nr_entries, nr_entries);
-	if (node->run.mode == STACK_DEPOT_FRAME_RAW &&
-	    !memcmp(node->data, entries, limit * sizeof(*entries)))
-		return limit;
+	if (node->run.mode == STACK_DEPOT_FRAME_RAW) {
+		for (i = 0; i < limit; i++) {
+			unsigned long frame;
+
+			memcpy(&frame, node->data + i * sizeof(frame), sizeof(frame));
+			if (frame != entries[i])
+				break;
+		}
+
+		return i;
+	}
 
 	for (i = 0; i < limit; i++) {
 		unsigned long frame;
@@ -1701,6 +1709,165 @@ static int trie_insert_descend_precheck(struct stack_depot_trie_root *root,
 	return 0;
 }
 
+static int
+trie_child_array_replace_precheck(const struct stack_depot_trie_child_array *old_array,
+				  const struct stack_depot_trie_node *old_child,
+				  void *new_storage, size_t new_storage_size,
+				  unsigned int *pos)
+{
+	struct stack_depot_trie_child_array *new_array = new_storage;
+	unsigned long frame;
+	bool found;
+	size_t size;
+
+	if (!old_array || !old_child || !new_array || !pos)
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)new_array,
+			__alignof__(struct stack_depot_trie_child_array)))
+		return -EINVAL;
+	if (old_array == new_array)
+		return -EINVAL;
+
+	size = __stack_depot_trie_child_array_size(old_array->nr_children);
+	if (!size || new_storage_size < size)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(old_array, size, new_array, new_storage_size))
+		return -EINVAL;
+	if (stack_depot_trie_node_first_frame(old_child, &frame))
+		return -EINVAL;
+	if (stack_depot_trie_child_lower_bound(old_array, frame, pos, &found) ||
+	    !found || old_array->children[*pos] != old_child)
+		return -EINVAL;
+
+	return 0;
+}
+
+static void
+trie_child_array_replace_at(const struct stack_depot_trie_child_array *old_array,
+			    const struct stack_depot_trie_node *new_child,
+			    void *new_storage, unsigned int pos)
+{
+	struct stack_depot_trie_child_array *new_array = new_storage;
+	unsigned int i;
+
+	new_array->nr_children = old_array->nr_children;
+	for (i = 0; i < old_array->nr_children; i++)
+		new_array->children[i] = old_array->children[i];
+	new_array->children[pos] = new_child;
+}
+
+static int
+trie_clone_promoted_node(const struct stack_depot_trie_node *old_node,
+			 u32 leaf_id,
+			 const struct stack_depot_trie_node_slot *slot)
+{
+	struct stack_depot_trie_node *new_node;
+	size_t size;
+
+	if (!old_node || !leaf_id || !slot || !slot->node)
+		return -EINVAL;
+	if (old_node->children || old_node->leaf_id || !old_node->stack_len)
+		return -EINVAL;
+	if (stack_depot_frame_run_validate(&old_node->run))
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)slot->node,
+			__alignof__(struct stack_depot_trie_node)))
+		return -EINVAL;
+
+	size = __stack_depot_trie_node_size(&old_node->run);
+	if (!size || slot->size < size)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(slot->node, slot->size, old_node, size))
+		return -EINVAL;
+
+	new_node = slot->node;
+	memcpy(new_node, old_node, size);
+	new_node->leaf_id = leaf_id;
+	return 0;
+}
+
+static int
+trie_promote_precheck(struct stack_depot_trie_root *root,
+		      struct stack_depot_trie_node *parent,
+		      const struct stack_depot_trie_node *child,
+		      const struct stack_depot_trie_node_slot *slot,
+		      void *new_storage, size_t new_storage_size,
+		      const struct stack_depot_trie_child_array **old_array,
+		      unsigned int *pos)
+{
+	const struct stack_depot_trie_child_array **publish_slot;
+	const struct stack_depot_trie_child_array *array;
+	const struct stack_depot_trie_node *new_child;
+	size_t new_child_size;
+
+	if (!child || !slot || !slot->node || !new_storage || !old_array || !pos)
+		return -EINVAL;
+	if (child->parent != parent || child->children || child->leaf_id)
+		return -EINVAL;
+
+	publish_slot = trie_publish_slot(root, parent);
+	if (!publish_slot)
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(slot->node, slot->size, publish_slot,
+				       sizeof(*publish_slot)))
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(new_storage, new_storage_size, publish_slot,
+				       sizeof(*publish_slot)))
+		return -EINVAL;
+	if (parent && (trie_ancestor_overlaps(parent, slot->node, slot->size) ||
+		       trie_ancestor_overlaps(parent, new_storage, new_storage_size)))
+		return -EINVAL;
+	if (stack_depot_ranges_overlap(slot->node, slot->size, new_storage,
+				       new_storage_size))
+		return -EINVAL;
+
+	/* Pairs with append and promote publication's smp_store_release(). */
+	*old_array = smp_load_acquire(publish_slot);
+	if (!*old_array)
+		return -EINVAL;
+	array = *old_array;
+	new_child = slot->node;
+	new_child_size = __stack_depot_trie_node_size(&child->run);
+	if (!new_child_size || slot->size < new_child_size)
+		return -EINVAL;
+	if (trie_child_array_subtree_overlaps(array, parent, new_child, new_child_size))
+		return -EINVAL;
+	if (trie_child_array_subtree_overlaps(array, parent, new_storage, new_storage_size))
+		return -EINVAL;
+
+	return trie_child_array_replace_precheck(array, child, new_storage,
+						new_storage_size, pos);
+}
+
+static int
+trie_promote_child(struct stack_depot_trie_root *root,
+		   struct stack_depot_trie_node *parent,
+		   const struct stack_depot_trie_node *child, u32 leaf_id,
+		   const struct stack_depot_trie_node_slot *slot,
+		   void *new_storage, size_t new_storage_size)
+{
+	const struct stack_depot_trie_child_array **publish_slot;
+	const struct stack_depot_trie_child_array *old_array;
+	unsigned int pos;
+	int ret;
+
+	if (!leaf_id)
+		return -EINVAL;
+	ret = trie_promote_precheck(root, parent, child, slot, new_storage,
+				    new_storage_size, &old_array, &pos);
+	if (ret)
+		return ret;
+	ret = trie_clone_promoted_node(child, leaf_id, slot);
+	if (ret)
+		return ret;
+	trie_child_array_replace_at(old_array, slot->node, new_storage, pos);
+
+	publish_slot = trie_publish_slot(root, parent);
+	/* Publish the fully initialized replacement array last. */
+	smp_store_release(publish_slot, new_storage);
+	return 0;
+}
+
 static int trie_append_chain_validate(const struct stack_depot_trie_node *parent,
 				      const unsigned long *entries,
 				      unsigned int nr_entries,
@@ -1988,14 +2155,13 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 	const void *last;
 	unsigned int used;
 	struct stack_depot_trie_node *parent = parent_ptr;
+	struct stack_depot_trie_lookup lookup;
 	int ret;
 
 	if (!leaf_id || !tail || !nr_used)
 		return -EINVAL;
 
 	for (;;) {
-		struct stack_depot_trie_lookup lookup;
-
 		ret = __stack_depot_trie_lookup_step(root, parent, entries, nr_entries, &lookup);
 		if (ret)
 			return ret;
@@ -2016,6 +2182,20 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 
 	if (!entries || !nr_entries)
 		return -EINVAL;
+	if (lookup.status == STACK_DEPOT_TRIE_LOOKUP_PROMOTE) {
+		if (!node_slots || !nr_node_slots)
+			return -EINVAL;
+		ret = trie_promote_child(root, parent, lookup.node, leaf_id,
+					 &node_slots[0], new_storage, new_storage_size);
+		if (ret)
+			return ret;
+		*tail = node_slots[0].node;
+		*nr_used = 1;
+		return 0;
+	}
+	if (lookup.status != STACK_DEPOT_TRIE_LOOKUP_APPEND)
+		return -EINVAL;
+
 	ret = trie_insert_append_precheck(root, parent, entries, nr_entries,
 					  node_slots, nr_node_slots, child_slots,
 					  nr_child_slots, new_storage,
