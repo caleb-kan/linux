@@ -70,6 +70,10 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 				 const unsigned long *entries,
 				 unsigned int nr_entries, u32 *scratch,
 				 unsigned int nr_scratch);
+int __stack_depot_trie_node_init_slice(void *storage, size_t storage_size,
+				       const void *parent, u32 leaf_id,
+				       const void *src_node, unsigned int start,
+				       unsigned int nr_entries);
 unsigned int __stack_depot_trie_node_match(const void *node,
 					   const unsigned long *entries,
 					   unsigned int nr_entries);

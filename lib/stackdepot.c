@@ -1220,6 +1220,21 @@ size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run)
 	return ALIGN(size, sizeof(unsigned long));
 }
 
+static int stack_depot_frame_run_slice(const struct stack_depot_frame_run *src,
+				       unsigned int start, unsigned int nr_entries,
+				       struct stack_depot_frame_run *run)
+{
+	if (stack_depot_frame_run_validate(src) || !nr_entries || !run)
+		return -EINVAL;
+	if (start >= src->nr_entries || nr_entries > src->nr_entries - start)
+		return -EINVAL;
+
+	*run = *src;
+	run->nr_entries = nr_entries;
+	run->bytes = nr_entries * stack_depot_frame_run_entry_bytes(run->mode);
+	return 0;
+}
+
 static int
 stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
 			    unsigned int index, unsigned long *frame)
@@ -1296,6 +1311,54 @@ int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 	else
 		memcpy(node->data, entries, run.bytes);
 
+	node->parent = parent_node;
+	node->children = NULL;
+	node->leaf_id = leaf_id;
+	node->stack_len = stack_len;
+	node->run = run;
+	return 0;
+}
+
+int __stack_depot_trie_node_init_slice(void *storage, size_t storage_size,
+				       const void *parent, u32 leaf_id,
+				       const void *src_node, unsigned int start,
+				       unsigned int nr_entries)
+{
+	const struct stack_depot_trie_node *parent_node = parent;
+	const struct stack_depot_trie_node *src = src_node;
+	struct stack_depot_trie_node *node = storage;
+	struct stack_depot_frame_run run;
+	size_t entry_bytes;
+	size_t src_size;
+	u32 stack_len;
+	int ret;
+
+	if (!node || !src || !src->stack_len)
+		return -EINVAL;
+	if (!IS_ALIGNED((unsigned long)node, __alignof__(*node)))
+		return -EINVAL;
+
+	ret = stack_depot_frame_run_slice(&src->run, start, nr_entries, &run);
+	if (ret)
+		return ret;
+	if (storage_size < __stack_depot_trie_node_size(&run))
+		return -EINVAL;
+	src_size = __stack_depot_trie_node_size(&src->run);
+	if (!src_size || stack_depot_ranges_overlap(node, storage_size, src, src_size))
+		return -EINVAL;
+	if (parent_node) {
+		if (!parent_node->stack_len ||
+		    parent_node->stack_len > U32_MAX - run.nr_entries ||
+		    parent_node->stack_len >
+		    CONFIG_STACKDEPOT_MAX_FRAMES - run.nr_entries)
+			return -EINVAL;
+		stack_len = parent_node->stack_len + run.nr_entries;
+	} else {
+		stack_len = run.nr_entries;
+	}
+
+	entry_bytes = stack_depot_frame_run_entry_bytes(src->run.mode);
+	memcpy(node->data, src->data + start * entry_bytes, run.bytes);
 	node->parent = parent_node;
 	node->children = NULL;
 	node->leaf_id = leaf_id;
