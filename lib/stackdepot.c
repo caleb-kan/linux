@@ -2573,7 +2573,7 @@ int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
 	if (!children)
 		return -EINVAL;
 	size = __stack_depot_trie_child_array_size(children->nr_children);
-	if (!size)
+	if (!size || new_storage_size < size)
 		return -EINVAL;
 	if (stack_depot_ranges_overlap(children, size, new_storage,
 				       new_storage_size))
