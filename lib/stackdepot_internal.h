@@ -113,6 +113,9 @@ size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,
 					unsigned int nr_children);
+int __stack_depot_trie_split_child_array_init(void *storage, size_t storage_size,
+					      const void *old_tail,
+					      const void *new_head);
 const void *__stack_depot_trie_child_array_find(const void *storage,
 						unsigned long frame);
 int __stack_depot_trie_child_array_insert(const void *old_storage,

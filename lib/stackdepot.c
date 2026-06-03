@@ -2400,6 +2400,37 @@ int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 	return 0;
 }
 
+int __stack_depot_trie_split_child_array_init(void *storage, size_t storage_size,
+					      const void *old_tail,
+					      const void *new_head)
+{
+	const void *children[2];
+	unsigned long new_frame;
+	unsigned long old_frame;
+
+	if (!old_tail)
+		return -EINVAL;
+	if (!new_head) {
+		children[0] = old_tail;
+		return __stack_depot_trie_child_array_init(storage, storage_size,
+						       children, 1);
+	}
+
+	if (stack_depot_trie_node_first_frame(old_tail, &old_frame) ||
+	    stack_depot_trie_node_first_frame(new_head, &new_frame) ||
+	    old_frame == new_frame)
+		return -EINVAL;
+	if (old_frame < new_frame) {
+		children[0] = old_tail;
+		children[1] = new_head;
+	} else {
+		children[0] = new_head;
+		children[1] = old_tail;
+	}
+
+	return __stack_depot_trie_child_array_init(storage, storage_size, children, 2);
+}
+
 static int
 stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
 				   unsigned long frame, unsigned int *pos, bool *found)
