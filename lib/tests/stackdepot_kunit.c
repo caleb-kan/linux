@@ -146,6 +146,17 @@ static int split_child_array_init(void *storage, size_t storage_size,
 						     old_tail, new_head);
 }
 
+static int split_tail_plan(const unsigned long *entries, unsigned int nr_entries,
+			   const struct stack_depot_trie_node_slot *node_slots,
+			   unsigned int nr_node_slots,
+			   const struct stack_depot_trie_child_array_slot *child_slots,
+			   unsigned int nr_child_slots, unsigned int *nr_runs)
+{
+	return __stack_depot_trie_split_tail_plan(entries, nr_entries, node_slots,
+					       nr_node_slots, child_slots,
+					       nr_child_slots, nr_runs);
+}
+
 static int child_array_insert(const void *old_storage, const void *child,
 			      void *new_storage, size_t new_storage_size)
 {
@@ -2648,6 +2659,91 @@ static void stackdepot_trie_split_child_array_rejects_bad_inputs(struct kunit *t
 	KUNIT_EXPECT_MEMEQ(test, array, old, size);
 }
 
+static void stackdepot_trie_split_tail_plan_raw(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL };
+	struct stack_depot_trie_node_slot node_slot;
+	unsigned int nr_runs = 0;
+	int ret;
+
+	trie_node_slot_alloc(test, &node_slot, entries, ARRAY_SIZE(entries));
+	ret = split_tail_plan(entries, ARRAY_SIZE(entries), &node_slot, 1, NULL, 0,
+			      &nr_runs);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, nr_runs, 1U);
+}
+
+#if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
+static void stackdepot_trie_split_tail_plan_mixed_runs(struct kunit *test)
+{
+	unsigned long entries[] = {
+#ifdef CONFIG_ARM64
+		arch_stack_depot_frame_text_prefix() | 0x1000UL,
+		0x1000UL,
+		arch_stack_depot_frame_text_prefix() | 0x2000UL,
+#else
+		0xffffffff81001000UL,
+		0xffff888000001000UL,
+		0xffffffff81002000UL,
+#endif
+	};
+	struct stack_depot_trie_child_array_slot child_slots[2];
+	struct stack_depot_trie_node_slot node_slots[3];
+	unsigned int nr_runs = 0;
+	unsigned int i;
+	int ret;
+
+	trie_node_slot_alloc(test, &node_slots[0], entries, 1);
+	trie_node_slot_alloc(test, &node_slots[1], &entries[1], 1);
+	trie_node_slot_alloc(test, &node_slots[2], &entries[2], 1);
+	for (i = 0; i < ARRAY_SIZE(child_slots); i++) {
+		size_t size;
+
+		child_slots[i].size = __stack_depot_trie_child_array_size(1);
+		size = child_slots[i].size;
+		child_slots[i].array = kunit_kzalloc(test, size, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, child_slots[i].array);
+	}
+
+	ret = split_tail_plan(entries, ARRAY_SIZE(entries), node_slots,
+			      ARRAY_SIZE(node_slots), child_slots,
+			      ARRAY_SIZE(child_slots), &nr_runs);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, nr_runs, 3U);
+}
+#endif
+
+static void stackdepot_trie_split_tail_plan_rejects_bad_inputs(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL };
+	struct stack_depot_trie_node_slot node_slot;
+	struct stack_depot_trie_node_slot short_slot;
+	struct stack_depot_frame_run run;
+	unsigned int nr_runs = 99;
+	int ret;
+
+	trie_node_slot_alloc(test, &node_slot, entries, ARRAY_SIZE(entries));
+	ret = frame_run_init(entries, ARRAY_SIZE(entries), &run);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	short_slot = node_slot;
+	short_slot.size = __stack_depot_trie_node_size(&run) - 1;
+
+	ret = split_tail_plan(NULL, ARRAY_SIZE(entries), &node_slot, 1, NULL, 0,
+			      &nr_runs);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = split_tail_plan(entries, 0, &node_slot, 1, NULL, 0, &nr_runs);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = split_tail_plan(entries, ARRAY_SIZE(entries), NULL, 1, NULL, 0,
+			      &nr_runs);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = split_tail_plan(entries, ARRAY_SIZE(entries), &node_slot, 1, NULL, 0,
+			      NULL);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	ret = split_tail_plan(entries, ARRAY_SIZE(entries), &short_slot, 1, NULL, 0,
+			      &nr_runs);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 static void stackdepot_trie_child_array_insert_empty(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL };
@@ -2749,6 +2845,11 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_split_child_array_init_one_child),
 	KUNIT_CASE(stackdepot_trie_split_child_array_init_orders_children),
 	KUNIT_CASE(stackdepot_trie_split_child_array_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_trie_split_tail_plan_raw),
+#if defined(CONFIG_ARM64) || defined(CONFIG_X86_64)
+	KUNIT_CASE(stackdepot_trie_split_tail_plan_mixed_runs),
+#endif
+	KUNIT_CASE(stackdepot_trie_split_tail_plan_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_child_array_insert_empty),
 	{}
 };

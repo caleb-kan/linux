@@ -116,6 +116,13 @@ int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 int __stack_depot_trie_split_child_array_init(void *storage, size_t storage_size,
 					      const void *old_tail,
 					      const void *new_head);
+int __stack_depot_trie_split_tail_plan(const unsigned long *entries,
+				       unsigned int nr_entries,
+				       const struct stack_depot_trie_node_slot *node_slots,
+				       unsigned int nr_node_slots,
+				       const struct stack_depot_trie_child_array_slot *child_slots,
+				       unsigned int nr_child_slots,
+				       unsigned int *nr_runs);
 const void *__stack_depot_trie_child_array_find(const void *storage,
 						unsigned long frame);
 int __stack_depot_trie_child_array_insert(const void *old_storage,

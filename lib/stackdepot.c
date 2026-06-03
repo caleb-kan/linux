@@ -2431,6 +2431,66 @@ int __stack_depot_trie_split_child_array_init(void *storage, size_t storage_size
 	return __stack_depot_trie_child_array_init(storage, storage_size, children, 2);
 }
 
+int __stack_depot_trie_split_tail_plan(const unsigned long *entries,
+				       unsigned int nr_entries,
+				       const struct stack_depot_trie_node_slot *node_slots,
+				       unsigned int nr_node_slots,
+				       const struct stack_depot_trie_child_array_slot *child_slots,
+				       unsigned int nr_child_slots,
+				       unsigned int *nr_runs)
+{
+	unsigned int pos = 0;
+	unsigned int runs = 0;
+	unsigned int child_slots_needed;
+	unsigned int i;
+
+	if (!entries || !nr_entries || nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES ||
+	    !node_slots || !nr_runs)
+		return -EINVAL;
+
+	while (pos < nr_entries) {
+		const struct stack_depot_trie_node_slot *slot;
+		struct stack_depot_frame_run run;
+		size_t size;
+
+		if (__stack_depot_frame_run_init(&entries[pos], nr_entries - pos,
+						 &run))
+			return -EINVAL;
+		if (runs >= nr_node_slots)
+			return -EINVAL;
+		slot = &node_slots[runs];
+		if (!slot->node)
+			return -EINVAL;
+		size = __stack_depot_trie_node_size(&run);
+		if (!size || slot->size < size)
+			return -EINVAL;
+		if (!IS_ALIGNED((unsigned long)slot->node,
+				__alignof__(struct stack_depot_trie_node)))
+			return -EINVAL;
+
+		pos += run.nr_entries;
+		runs++;
+	}
+
+	child_slots_needed = runs > 1 ? runs - 1 : 0;
+	if (child_slots_needed) {
+		if (!child_slots || nr_child_slots < child_slots_needed)
+			return -EINVAL;
+		for (i = 0; i < child_slots_needed; i++) {
+			size_t size = __stack_depot_trie_child_array_size(1);
+
+			if (!child_slots[i].array || child_slots[i].size < size)
+				return -EINVAL;
+			if (!IS_ALIGNED((unsigned long)child_slots[i].array,
+					__alignof__(struct stack_depot_trie_child_array)))
+				return -EINVAL;
+		}
+	}
+
+	*nr_runs = runs;
+	return 0;
+}
+
 static int
 stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
 				   unsigned long frame, unsigned int *pos, bool *found)
