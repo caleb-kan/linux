@@ -1927,10 +1927,12 @@ trie_promote_child(struct stack_depot_trie_root *root,
 		   struct stack_depot_trie_node *parent,
 		   const struct stack_depot_trie_node *child, u32 leaf_id,
 		   const struct stack_depot_trie_node_slot *slot,
-		   void *new_storage, size_t new_storage_size)
+		   void *new_storage, size_t new_storage_size,
+		   const struct stack_depot_trie_publish_prepare *prepare)
 {
 	const struct stack_depot_trie_child_array **publish_slot;
 	const struct stack_depot_trie_child_array *old_array;
+	struct stack_depot_trie_leaf_update update;
 	unsigned int pos;
 	int ret;
 
@@ -1944,6 +1946,15 @@ trie_promote_child(struct stack_depot_trie_root *root,
 	if (ret)
 		return ret;
 	trie_child_array_replace_at(old_array, slot->node, new_storage, pos);
+	if (prepare) {
+		if (!prepare->fn)
+			return -EINVAL;
+		update.leaf_id = leaf_id;
+		update.leaf = slot->node;
+		ret = prepare->fn(&update, 1, prepare->ctx);
+		if (ret)
+			return ret;
+	}
 	trie_reparent_children(slot->node);
 
 	publish_slot = trie_publish_slot(root, parent);
@@ -2099,10 +2110,12 @@ __stack_depot_trie_append_chain(const void *parent_ptr, u32 leaf_id,
 	return 0;
 }
 
-int
-__stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
-				  void *parent_ptr, const void *head_ptr,
-				  void *new_storage, size_t new_storage_size)
+static int trie_publish_append_prepare(struct stack_depot_trie_root *root,
+				       void *parent_ptr, const void *head_ptr,
+				       void *new_storage, size_t new_storage_size,
+				       const struct stack_depot_trie_publish_prepare *prepare,
+				       u32 leaf_id,
+				       const void *leaf)
 {
 	const struct stack_depot_trie_child_array *old_array;
 	const struct stack_depot_trie_node *head = head_ptr;
@@ -2144,10 +2157,34 @@ __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
 		return -EINVAL;
 	if (__stack_depot_trie_child_array_insert(old_array, head, new_array, storage_size))
 		return -EINVAL;
+	if (prepare) {
+		struct stack_depot_trie_leaf_update update = {
+			.leaf_id = leaf_id,
+			.leaf = leaf,
+		};
+		int ret;
+
+		if (!prepare->fn)
+			return -EINVAL;
+		if (!leaf_id || !leaf)
+			return -EINVAL;
+		ret = prepare->fn(&update, 1, prepare->ctx);
+		if (ret)
+			return ret;
+	}
 
 	/* Publish the fully initialized replacement array last. */
 	smp_store_release(slot, new_array);
 	return 0;
+}
+
+int
+__stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
+				  void *parent_ptr, const void *head_ptr,
+				  void *new_storage, size_t new_storage_size)
+{
+	return trie_publish_append_prepare(root, parent_ptr, head_ptr, new_storage,
+					   new_storage_size, NULL, 0, NULL);
 }
 
 int
@@ -2280,20 +2317,26 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 			    const struct stack_depot_trie_child_array_slot *child_slots,
 			    unsigned int nr_child_slots, u32 *scratch,
 			    unsigned int nr_scratch, void *new_storage,
-			    size_t new_storage_size, const void **tail,
+			    size_t new_storage_size,
+			    const struct stack_depot_trie_publish_prepare *prepare,
+			    const void **tail,
 			    unsigned int *nr_used);
 
-int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
-				     void *parent_ptr, u32 leaf_id,
-				     const unsigned long *entries,
-				     unsigned int nr_entries,
-				     const struct stack_depot_trie_node_slot *node_slots,
-				     unsigned int nr_node_slots,
-				     const struct stack_depot_trie_child_array_slot *child_slots,
-				     unsigned int nr_child_slots, u32 *scratch,
-				     unsigned int nr_scratch, void *new_storage,
-				     size_t new_storage_size, const void **tail,
-				     unsigned int *nr_used)
+int
+__stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
+					 void *parent_ptr, u32 leaf_id,
+					 const unsigned long *entries,
+					 unsigned int nr_entries,
+					 const struct stack_depot_trie_node_slot *node_slots,
+					 unsigned int nr_node_slots,
+					 const struct stack_depot_trie_child_array_slot
+					 *child_slots,
+					 unsigned int nr_child_slots, u32 *scratch,
+					 unsigned int nr_scratch, void *new_storage,
+					 size_t new_storage_size,
+					 const struct stack_depot_trie_publish_prepare *prepare,
+					 const void **tail,
+					 unsigned int *nr_used)
 {
 	const void *head;
 	const void *last;
@@ -2331,12 +2374,14 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 					leaf_id, entries, nr_entries, node_slots,
 					nr_node_slots, child_slots, nr_child_slots,
 					scratch, nr_scratch, new_storage,
-					new_storage_size, tail, nr_used);
+					new_storage_size, prepare, tail,
+					nr_used);
 	if (lookup.status == STACK_DEPOT_TRIE_LOOKUP_PROMOTE) {
 		if (!node_slots || !nr_node_slots)
 			return -EINVAL;
 		ret = trie_promote_child(root, parent, lookup.node, leaf_id,
-					 &node_slots[0], new_storage, new_storage_size);
+					 &node_slots[0], new_storage, new_storage_size,
+					 prepare);
 		if (ret)
 			return ret;
 		*tail = node_slots[0].node;
@@ -2358,14 +2403,35 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 					      &head, &last, &used);
 	if (ret)
 		return ret;
-	ret = __stack_depot_trie_publish_append(root, parent, head, new_storage,
-						new_storage_size);
+	ret = trie_publish_append_prepare(root, parent, head, new_storage,
+					  new_storage_size, prepare, leaf_id, last);
 	if (ret)
 		return ret;
 
 	*tail = last;
 	*nr_used = used;
 	return 0;
+}
+
+int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
+				     void *parent, u32 leaf_id,
+				     const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, void *new_storage,
+				     size_t new_storage_size, const void **tail,
+				     unsigned int *nr_used)
+{
+	return __stack_depot_trie_insert_append_prepare(root, parent, leaf_id,
+						       entries, nr_entries, node_slots,
+						       nr_node_slots, child_slots,
+						       nr_child_slots, scratch,
+						       nr_scratch, new_storage,
+						       new_storage_size, NULL, tail,
+						       nr_used);
 }
 
 unsigned int
@@ -2779,23 +2845,27 @@ trie_split_subtree_precheck(const struct stack_depot_trie_node *child,
 	return 0;
 }
 
-int __stack_depot_trie_split_subtree(const void *child_ptr, unsigned int matched,
-				     u32 leaf_id, const unsigned long *entries,
-				     unsigned int nr_entries,
-				     const struct stack_depot_trie_node_slot *node_slots,
-				     unsigned int nr_node_slots,
-				     const struct stack_depot_trie_child_array_slot *child_slots,
-				     unsigned int nr_child_slots, u32 *scratch,
-				     unsigned int nr_scratch, const void **prefix,
-				     const void **tail, unsigned int *nr_used)
+static int trie_split_subtree_prepare(const void *child_ptr, unsigned int matched,
+				      u32 leaf_id, const unsigned long *entries,
+				      unsigned int nr_entries,
+				      const struct stack_depot_trie_node_slot *node_slots,
+				      unsigned int nr_node_slots,
+				      const struct stack_depot_trie_child_array_slot *child_slots,
+				      unsigned int nr_child_slots, u32 *scratch,
+				      unsigned int nr_scratch,
+				      const struct stack_depot_trie_publish_prepare *prepare,
+				      const void **prefix,
+				      const void **tail, unsigned int *nr_used)
 {
 	const struct stack_depot_trie_node *child = child_ptr;
 	const unsigned long *tail_entries;
 	const void *new_head = NULL;
 	const void *new_tail = NULL;
+	struct stack_depot_trie_leaf_update updates[2];
 	struct stack_depot_trie_node *old_tail;
 	struct stack_depot_trie_node *pref;
 	unsigned int chain_used = 0;
+	unsigned int nr_updates = 0;
 	u32 prefix_leaf_id;
 	void *split_array;
 	size_t split_array_size;
@@ -2846,6 +2916,21 @@ int __stack_depot_trie_split_subtree(const void *child_ptr, unsigned int matched
 							old_tail, new_head);
 	if (ret)
 		return ret;
+	if (child->leaf_id) {
+		updates[nr_updates].leaf_id = child->leaf_id;
+		updates[nr_updates].leaf = old_tail;
+		nr_updates++;
+	}
+	updates[nr_updates].leaf_id = leaf_id;
+	updates[nr_updates].leaf = has_new_tail ? new_tail : pref;
+	nr_updates++;
+	if (prepare) {
+		if (!prepare->fn)
+			return -EINVAL;
+		ret = prepare->fn(updates, nr_updates, prepare->ctx);
+		if (ret)
+			return ret;
+	}
 
 	old_tail->children = child->children;
 	pref->children = child_slots[0].array;
@@ -2854,6 +2939,23 @@ int __stack_depot_trie_split_subtree(const void *child_ptr, unsigned int matched
 	*tail = has_new_tail ? new_tail : pref;
 	*nr_used = 2 + chain_used;
 	return 0;
+}
+
+int __stack_depot_trie_split_subtree(const void *child, unsigned int matched,
+				     u32 leaf_id, const unsigned long *entries,
+				     unsigned int nr_entries,
+				     const struct stack_depot_trie_node_slot *node_slots,
+				     unsigned int nr_node_slots,
+				     const struct stack_depot_trie_child_array_slot *child_slots,
+				     unsigned int nr_child_slots, u32 *scratch,
+				     unsigned int nr_scratch, const void **prefix,
+				     const void **tail, unsigned int *nr_used)
+{
+	return trie_split_subtree_prepare(child, matched, leaf_id, entries,
+					  nr_entries, node_slots, nr_node_slots,
+					  child_slots, nr_child_slots, scratch,
+					  nr_scratch, NULL, prefix, tail,
+					  nr_used);
 }
 
 static int trie_split_child(struct stack_depot_trie_root *root,
@@ -2867,7 +2969,9 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 			    const struct stack_depot_trie_child_array_slot *child_slots,
 			    unsigned int nr_child_slots, u32 *scratch,
 			    unsigned int nr_scratch, void *new_storage,
-			    size_t new_storage_size, const void **tail,
+			    size_t new_storage_size,
+			    const struct stack_depot_trie_publish_prepare *prepare,
+			    const void **tail,
 			    unsigned int *nr_used)
 {
 	const struct stack_depot_trie_child_array **publish_slot;
@@ -2899,10 +3003,11 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 	if (ret)
 		return ret;
 
-	ret = __stack_depot_trie_split_subtree(child, matched, leaf_id, entries,
-					       nr_entries, node_slots, nr_node_slots,
-					       child_slots, nr_child_slots, scratch,
-					       nr_scratch, &prefix, tail, &used);
+	ret = trie_split_subtree_prepare(child, matched, leaf_id, entries,
+					 nr_entries, node_slots, nr_node_slots,
+					 child_slots, nr_child_slots, scratch,
+					 nr_scratch, prepare, &prefix,
+					 tail, &used);
 	if (ret)
 		return ret;
 

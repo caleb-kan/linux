@@ -48,6 +48,17 @@ struct stack_depot_trie_lookup {
 	unsigned int matched;
 };
 
+struct stack_depot_trie_leaf_update {
+	u32 leaf_id;
+	const void *leaf;
+};
+
+struct stack_depot_trie_publish_prepare {
+	int (*fn)(const struct stack_depot_trie_leaf_update *updates,
+		  unsigned int nr_updates, void *ctx);
+	void *ctx;
+};
+
 bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
 				      u32 *low);
 bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
@@ -107,6 +118,20 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 				     unsigned int nr_scratch, void *new_storage,
 				     size_t new_storage_size, const void **tail,
 				     unsigned int *nr_used);
+int
+__stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
+					 void *parent, u32 leaf_id,
+					 const unsigned long *entries,
+					 unsigned int nr_entries,
+					 const struct stack_depot_trie_node_slot *node_slots,
+					 unsigned int nr_node_slots,
+					 const struct stack_depot_trie_child_array_slot
+					 *child_slots,
+					 unsigned int nr_child_slots, u32 *scratch,
+					 unsigned int nr_scratch, void *new_storage,
+					 size_t new_storage_size,
+					 const struct stack_depot_trie_publish_prepare *prepare,
+					 const void **tail, unsigned int *nr_used);
 unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned long *entries,
 					   unsigned int max_entries,
