@@ -132,6 +132,15 @@ __stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
 					 size_t new_storage_size,
 					 const struct stack_depot_trie_publish_prepare *prepare,
 					 const void **tail, unsigned int *nr_used);
+int
+__stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
+			       const void *parent, const unsigned long *entries,
+			       unsigned int nr_entries,
+			       struct stack_depot_trie_node_slot *node_slots,
+			       unsigned int nr_node_slots,
+			       struct stack_depot_trie_child_array_slot *child_slots,
+			       unsigned int nr_child_slots, size_t *new_storage_size,
+			       unsigned int *nr_used, unsigned int *nr_child_used);
 unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned long *entries,
 					   unsigned int max_entries,

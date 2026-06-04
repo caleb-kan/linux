@@ -2434,6 +2434,254 @@ int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 						       nr_used);
 }
 
+static int trie_plan_append_chain(unsigned int base_stack_len,
+				  const unsigned long *entries,
+				  unsigned int nr_entries,
+				  struct stack_depot_trie_node_slot *node_slots,
+				  unsigned int nr_node_slots,
+				  struct stack_depot_trie_child_array_slot *child_slots,
+				  unsigned int nr_child_slots,
+				  unsigned int *nr_used,
+				  unsigned int *nr_child_used)
+{
+	unsigned int pos = 0;
+	unsigned int stack_len = base_stack_len;
+	unsigned int used = 0;
+
+	if (!entries || !nr_entries || !node_slots || !nr_used || !nr_child_used)
+		return -EINVAL;
+
+	while (pos < nr_entries) {
+		struct stack_depot_frame_run run;
+
+		if (used >= nr_node_slots)
+			return -EINVAL;
+		if (__stack_depot_frame_run_init(&entries[pos], nr_entries - pos,
+						 &run))
+			return -EINVAL;
+		if (stack_len > U32_MAX - run.nr_entries ||
+		    stack_len > CONFIG_STACKDEPOT_MAX_FRAMES - run.nr_entries)
+			return -EINVAL;
+
+		node_slots[used].node = NULL;
+		node_slots[used].size = __stack_depot_trie_node_size(&run);
+		if (!node_slots[used].size)
+			return -EINVAL;
+		stack_len += run.nr_entries;
+		pos += run.nr_entries;
+		used++;
+	}
+
+	if (used > 1) {
+		unsigned int i;
+
+		if (!child_slots || nr_child_slots < used - 1)
+			return -EINVAL;
+		for (i = 0; i < used - 1; i++) {
+			child_slots[i].array = NULL;
+			child_slots[i].size = __stack_depot_trie_child_array_size(1);
+			if (!child_slots[i].size)
+				return -EINVAL;
+		}
+	}
+
+	*nr_used = used;
+	*nr_child_used = used > 1 ? used - 1 : 0;
+	return 0;
+}
+
+static bool trie_node_depth_invalid(const struct stack_depot_trie_node *parent,
+				    const struct stack_depot_trie_node *node)
+{
+	u32 base = parent ? parent->stack_len : 0;
+
+	if (!node || node->parent != parent || !node->stack_len)
+		return true;
+	if (parent && !parent->stack_len)
+		return true;
+	if (stack_depot_frame_run_validate(&node->run))
+		return true;
+	if (node->run.nr_entries > U32_MAX - base ||
+	    base > CONFIG_STACKDEPOT_MAX_FRAMES - node->run.nr_entries)
+		return true;
+
+	return node->stack_len != base + node->run.nr_entries;
+}
+
+static bool trie_node_chain_depth_invalid(const struct stack_depot_trie_node *node)
+{
+	unsigned int depth = 0;
+
+	for (; node; node = node->parent, depth++) {
+		if (depth >= CONFIG_STACKDEPOT_MAX_FRAMES)
+			return true;
+		if (trie_node_depth_invalid(node->parent, node))
+			return true;
+	}
+
+	return false;
+}
+
+static int trie_plan_split(const struct stack_depot_trie_child_array *children,
+			   const struct stack_depot_trie_node *child,
+			   unsigned int matched, const unsigned long *entries,
+			   unsigned int nr_entries,
+			   struct stack_depot_trie_node_slot *node_slots,
+			   unsigned int nr_node_slots,
+			   struct stack_depot_trie_child_array_slot *child_slots,
+			   unsigned int nr_child_slots, size_t *new_storage_size,
+			   unsigned int *nr_used, unsigned int *nr_child_used)
+{
+	struct stack_depot_frame_run old_tail_run;
+	struct stack_depot_frame_run prefix_run;
+	unsigned int new_child_used = 0;
+	unsigned int new_used = 0;
+	unsigned int prefix_stack_len;
+	bool has_new_tail;
+
+	if (!children || !child || !entries || !node_slots || !child_slots ||
+	    !new_storage_size || !nr_used || !nr_child_used)
+		return -EINVAL;
+	if (!matched || matched >= child->run.nr_entries || matched > nr_entries)
+		return -EINVAL;
+	if (trie_node_depth_invalid(child->parent, child))
+		return -EINVAL;
+	if (!child->leaf_id && !child->children)
+		return -EINVAL;
+	if (nr_node_slots < 2 || nr_child_slots < 1)
+		return -EINVAL;
+	if (stack_depot_frame_run_slice(&child->run, 0, matched, &prefix_run) ||
+	    stack_depot_frame_run_slice(&child->run, matched,
+					child->run.nr_entries - matched,
+					&old_tail_run))
+		return -EINVAL;
+
+	has_new_tail = matched < nr_entries;
+	prefix_stack_len = child->parent ? child->parent->stack_len : 0;
+	if (prefix_stack_len > CONFIG_STACKDEPOT_MAX_FRAMES - matched)
+		return -EINVAL;
+	prefix_stack_len += matched;
+
+	node_slots[0].node = NULL;
+	node_slots[0].size = __stack_depot_trie_node_size(&prefix_run);
+	node_slots[1].node = NULL;
+	node_slots[1].size = __stack_depot_trie_node_size(&old_tail_run);
+	if (!node_slots[0].size || !node_slots[1].size)
+		return -EINVAL;
+
+	if (has_new_tail &&
+	    trie_plan_append_chain(prefix_stack_len, &entries[matched],
+				   nr_entries - matched, &node_slots[2],
+				   nr_node_slots - 2, &child_slots[1],
+				   nr_child_slots - 1, &new_used,
+				   &new_child_used))
+		return -EINVAL;
+
+	child_slots[0].array = NULL;
+	child_slots[0].size =
+		__stack_depot_trie_child_array_size(has_new_tail ? 2 : 1);
+	*new_storage_size =
+		__stack_depot_trie_child_array_size(children->nr_children);
+	if (!child_slots[0].size || !*new_storage_size)
+		return -EINVAL;
+	*nr_used = 2 + new_used;
+	*nr_child_used = 1 + new_child_used;
+	return 0;
+}
+
+int
+__stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
+			       const void *parent_ptr, const unsigned long *entries,
+			       unsigned int nr_entries,
+			       struct stack_depot_trie_node_slot *node_slots,
+			       unsigned int nr_node_slots,
+			       struct stack_depot_trie_child_array_slot *child_slots,
+			       unsigned int nr_child_slots, size_t *new_storage_size,
+			       unsigned int *nr_used, unsigned int *nr_child_used)
+{
+	const struct stack_depot_trie_node *parent = parent_ptr;
+	const struct stack_depot_trie_child_array *children;
+	const struct stack_depot_trie_node *child;
+	unsigned int matched;
+	unsigned int pos;
+	bool found;
+
+	if (!entries || !nr_entries || !node_slots || !new_storage_size ||
+	    !nr_used || !nr_child_used)
+		return -EINVAL;
+	if ((root && parent) || (!root && !parent))
+		return -EINVAL;
+
+	for (;;) {
+		if (parent && trie_node_chain_depth_invalid(parent))
+			return -EINVAL;
+		if (root) {
+			/* Pairs with append, promote, and split publication. */
+			children = smp_load_acquire(&root->children);
+		} else {
+			/* Pairs with append, promote, and split publication. */
+			children = smp_load_acquire(&parent->children);
+		}
+		if (!children) {
+			if (trie_plan_append_chain(parent ? parent->stack_len : 0,
+						   entries, nr_entries, node_slots,
+						   nr_node_slots, child_slots,
+						   nr_child_slots, nr_used,
+						   nr_child_used))
+				return -EINVAL;
+			*new_storage_size = __stack_depot_trie_child_array_size(1);
+			return *new_storage_size ? 0 : -EINVAL;
+		}
+		if (stack_depot_trie_child_lower_bound(children, entries[0], &pos,
+						       &found))
+			return -EINVAL;
+		if (!found) {
+			if (trie_plan_append_chain(parent ? parent->stack_len : 0,
+						   entries, nr_entries, node_slots,
+						   nr_node_slots, child_slots,
+						   nr_child_slots, nr_used,
+						   nr_child_used))
+				return -EINVAL;
+			*new_storage_size =
+				__stack_depot_trie_child_array_size(children->nr_children + 1);
+			return *new_storage_size ? 0 : -EINVAL;
+		}
+
+		child = children->children[pos];
+		if (trie_node_depth_invalid(parent, child))
+			return -EINVAL;
+		matched = __stack_depot_trie_node_match(child, entries, nr_entries);
+		if (!matched || (matched == nr_entries &&
+				 child->run.nr_entries == nr_entries &&
+				 child->leaf_id))
+			return -EINVAL;
+		if (matched < child->run.nr_entries)
+			return trie_plan_split(children, child, matched, entries,
+					       nr_entries, node_slots, nr_node_slots,
+					       child_slots, nr_child_slots,
+					       new_storage_size, nr_used,
+					       nr_child_used);
+		if (matched == nr_entries) {
+			if (child->leaf_id || !nr_node_slots)
+				return -EINVAL;
+			node_slots[0].node = NULL;
+			node_slots[0].size = __stack_depot_trie_node_size(&child->run);
+			*new_storage_size =
+				__stack_depot_trie_child_array_size(children->nr_children);
+			if (!node_slots[0].size || !*new_storage_size)
+				return -EINVAL;
+			*nr_used = 1;
+			*nr_child_used = 0;
+			return 0;
+		}
+
+		root = NULL;
+		parent = child;
+		entries += matched;
+		nr_entries -= matched;
+	}
+}
+
 unsigned int
 __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 			      unsigned int max_entries, unsigned long *scratch,
