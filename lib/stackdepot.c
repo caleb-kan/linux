@@ -153,6 +153,75 @@ static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
 /* Count helpers rely on saturated refcounts looking negative. */
 static_assert(REFCOUNT_SATURATED < 0);
 
+static u32 stack_depot_pool_index_mask(void)
+{
+	return (1U << DEPOT_POOL_INDEX_BITS) - 1;
+}
+
+static u32 stack_depot_offset_mask(void)
+{
+	return (1U << DEPOT_OFFSET_BITS) - 1;
+}
+
+static bool stack_depot_trie_namespace_available(void)
+{
+	/* Reserve the all-ones pool index as an invalid trie namespace sentinel. */
+	return stack_max_pools < stack_depot_pool_index_mask() - 1;
+}
+
+u32 __stack_depot_trie_max_leaf_id(void)
+{
+	if (!stack_depot_trie_namespace_available())
+		return 0;
+
+	return (stack_depot_pool_index_mask() - stack_max_pools - 1) <<
+		DEPOT_OFFSET_BITS;
+}
+
+depot_stack_handle_t __stack_depot_trie_handle(u32 leaf_id)
+{
+	union handle_parts parts = {};
+	u64 pool_index_plus_1;
+	u32 pool_delta;
+	u32 index;
+
+	if (!leaf_id || !stack_depot_trie_namespace_available())
+		return 0;
+	if (leaf_id > __stack_depot_trie_max_leaf_id())
+		return 0;
+
+	index = leaf_id - 1;
+	pool_delta = index >> DEPOT_OFFSET_BITS;
+	pool_index_plus_1 = (u64)stack_max_pools + 1 + pool_delta;
+	if (pool_index_plus_1 >= stack_depot_pool_index_mask())
+		return 0;
+
+	parts.pool_index_plus_1 = pool_index_plus_1;
+	parts.offset = index & stack_depot_offset_mask();
+	return parts.handle;
+}
+
+u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
+{
+	union handle_parts parts = { .handle = handle };
+	u64 leaf_id;
+	u32 pool_delta;
+
+	if (!stack_depot_trie_namespace_available())
+		return 0;
+
+	parts.extra = 0;
+	if (parts.pool_index_plus_1 <= stack_max_pools)
+		return 0;
+
+	pool_delta = parts.pool_index_plus_1 - stack_max_pools - 1;
+	if ((u64)pool_delta + stack_max_pools + 1 >= stack_depot_pool_index_mask())
+		return 0;
+
+	leaf_id = ((u64)pool_delta << DEPOT_OFFSET_BITS) + parts.offset + 1;
+	return leaf_id > U32_MAX ? 0 : leaf_id;
+}
+
 static int __init disable_stack_depot(char *str)
 {
 	return kstrtobool(str, &stack_depot_disabled);

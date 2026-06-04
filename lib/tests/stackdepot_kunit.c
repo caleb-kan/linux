@@ -528,6 +528,52 @@ static void stackdepot_count_helpers(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(zeroed_handle, 1));
 }
 
+static void stackdepot_trie_handle_namespace(struct kunit *test)
+{
+	unsigned long entries[] = {
+		0x1234567800710000UL,
+		0x1234567800720000UL,
+		0x1234567800730000UL,
+	};
+	depot_stack_handle_t boundary_handle;
+	depot_stack_handle_t hash_handle;
+	depot_stack_handle_t tagged;
+	depot_stack_handle_t trie;
+	u32 boundary_id;
+	u32 max_id;
+
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+
+	trie = __stack_depot_trie_handle(1);
+	hash_handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_EXPECT_NE(test, hash_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(hash_handle), 0U);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_handle(0), (depot_stack_handle_t)0);
+
+	if (!trie) {
+		KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(0), 0U);
+		return;
+	}
+
+	boundary_id = (1U << DEPOT_OFFSET_BITS) + 2;
+	max_id = __stack_depot_trie_max_leaf_id();
+	boundary_handle = __stack_depot_trie_handle(boundary_id);
+	tagged = stack_depot_set_extra_bits(trie, 7);
+
+	KUNIT_EXPECT_NE(test, boundary_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(trie), 1U);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(tagged), 1U);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(boundary_handle),
+			boundary_id);
+	KUNIT_EXPECT_NE(test, max_id, 0U);
+	KUNIT_EXPECT_NE(test, __stack_depot_trie_handle(max_id),
+			(depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_handle(max_id + 1),
+			(depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_handle(U32_MAX),
+			(depot_stack_handle_t)0);
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -3948,6 +3994,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_count_helpers),
+	KUNIT_CASE(stackdepot_trie_handle_namespace),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

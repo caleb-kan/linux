@@ -59,6 +59,9 @@ struct stack_depot_trie_publish_prepare {
 	void *ctx;
 };
 
+depot_stack_handle_t __stack_depot_trie_handle(u32 leaf_id);
+u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle);
+u32 __stack_depot_trie_max_leaf_id(void);
 bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
 				      u32 *low);
 bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
