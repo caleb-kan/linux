@@ -93,6 +93,9 @@ int __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 				   const void *parent, const unsigned long *entries,
 				   unsigned int nr_entries,
 				   struct stack_depot_trie_lookup *lookup);
+const void *
+__stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
+			     const unsigned long *entries, unsigned int nr_entries);
 int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
 				     void *parent, u32 leaf_id,
 				     const unsigned long *entries,

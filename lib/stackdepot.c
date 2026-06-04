@@ -2223,6 +2223,52 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 	return 0;
 }
 
+const void *
+__stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
+			     const unsigned long *entries, unsigned int nr_entries)
+{
+	const struct stack_depot_trie_root *lookup_root = root;
+	const struct stack_depot_trie_node *parent = NULL;
+	unsigned int pos = 0;
+
+	if (!root || !entries || !nr_entries)
+		return NULL;
+
+	while (pos < nr_entries) {
+		const struct stack_depot_trie_node *node;
+		struct stack_depot_trie_lookup lookup;
+
+		if (__stack_depot_trie_lookup_step(lookup_root, parent,
+						   &entries[pos], nr_entries - pos,
+						   &lookup))
+			return NULL;
+		node = lookup.node;
+		if (node && (node->parent != parent ||
+			     node->stack_len != pos + lookup.matched))
+			return NULL;
+
+		switch (lookup.status) {
+		case STACK_DEPOT_TRIE_LOOKUP_FOUND:
+			if (pos + lookup.matched == nr_entries)
+				return node;
+			return NULL;
+		case STACK_DEPOT_TRIE_LOOKUP_DESCEND:
+			if (!node || !lookup.matched)
+				return NULL;
+			pos += lookup.matched;
+			parent = node;
+			lookup_root = NULL;
+			break;
+		case STACK_DEPOT_TRIE_LOOKUP_APPEND:
+		case STACK_DEPOT_TRIE_LOOKUP_PROMOTE:
+		case STACK_DEPOT_TRIE_LOOKUP_SPLIT:
+			return NULL;
+		}
+	}
+
+	return NULL;
+}
+
 static int trie_split_child(struct stack_depot_trie_root *root,
 			    struct stack_depot_trie_node *parent,
 			    const struct stack_depot_trie_node *child,
