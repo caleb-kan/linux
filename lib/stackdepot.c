@@ -1032,6 +1032,10 @@ static int
 stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *array,
 				   unsigned long frame, unsigned int *pos,
 				   bool *found);
+static bool
+trie_parent_chain_matches_prefix(const struct stack_depot_trie_node *node,
+				 const unsigned long *entries,
+				 unsigned int nr_entries);
 
 static size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
 {
@@ -2349,9 +2353,17 @@ __stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
 						   &lookup))
 			return NULL;
 		node = lookup.node;
-		if (node && (node->parent != parent ||
-			     node->stack_len != pos + lookup.matched))
-			return NULL;
+		if (node) {
+			const struct stack_depot_trie_node *node_parent;
+
+			node_parent = READ_ONCE(node->parent);
+			if (node->stack_len != pos + lookup.matched)
+				return NULL;
+			if (node_parent != parent &&
+			    !trie_parent_chain_matches_prefix(node_parent, entries,
+							      pos))
+				return NULL;
+		}
 
 		switch (lookup.status) {
 		case STACK_DEPOT_TRIE_LOOKUP_FOUND:
@@ -2589,6 +2601,57 @@ static bool trie_node_chain_depth_invalid(const struct stack_depot_trie_node *no
 	}
 
 	return false;
+}
+
+static bool
+trie_parent_chain_matches_prefix(const struct stack_depot_trie_node *node,
+				 const unsigned long *entries,
+				 unsigned int nr_entries)
+{
+	const struct stack_depot_trie_node *cur;
+	unsigned int depth = 0;
+	unsigned int i;
+
+	if (!node)
+		return nr_entries == 0;
+	if (!entries || node->stack_len != nr_entries)
+		return false;
+
+	cur = node;
+	while (cur) {
+		const struct stack_depot_trie_node *parent;
+		unsigned int start;
+
+		if (depth++ >= CONFIG_STACKDEPOT_MAX_FRAMES)
+			return false;
+		parent = READ_ONCE(cur->parent);
+		if (stack_depot_frame_run_validate(&cur->run))
+			return false;
+		if (!cur->stack_len || cur->run.nr_entries > cur->stack_len)
+			return false;
+		if (parent) {
+			if (!parent->stack_len ||
+			    parent->stack_len > U32_MAX - cur->run.nr_entries)
+				return false;
+			if (cur->stack_len != parent->stack_len + cur->run.nr_entries)
+				return false;
+		} else if (cur->stack_len != cur->run.nr_entries) {
+			return false;
+		}
+
+		start = cur->stack_len - cur->run.nr_entries;
+		for (i = 0; i < cur->run.nr_entries; i++) {
+			unsigned long frame;
+
+			if (stack_depot_trie_node_frame(cur, i, &frame) ||
+			    frame != entries[start + i])
+				return false;
+		}
+
+		cur = parent;
+	}
+
+	return true;
 }
 
 static int trie_plan_split(const struct stack_depot_trie_child_array *children,

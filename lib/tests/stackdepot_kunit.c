@@ -1630,6 +1630,65 @@ static void stackdepot_trie_find_leaf_descends(struct kunit *test)
 					    ARRAY_SIZE(full_entries)), child);
 }
 
+static void stackdepot_trie_find_leaf_accepts_reparented_child(struct kunit *test)
+{
+	unsigned long child_entries[] = { 0x1000UL, 0x2000UL };
+	unsigned long desc_entries[] = { 0x4000UL };
+	unsigned long new_entries[] = { 0x1000UL, 0x3000UL };
+	unsigned long old_stack[] = { 0x1000UL, 0x2000UL, 0x4000UL };
+	struct stack_depot_trie_child_array_slot root_array;
+	struct stack_depot_trie_child_array_slot child_array;
+	struct stack_depot_trie_child_array_slot split_array;
+	struct stack_depot_trie_node_slot desc_slot;
+	struct stack_depot_trie_node_slot node_slots[3];
+	struct stack_depot_trie_root root = {};
+	const void *desc_head = NULL;
+	const void *desc_tail = NULL;
+	const void *new_tail = NULL;
+	const void *prefix = NULL;
+	unsigned int used = 0;
+	void *child;
+	int ret;
+
+	trie_node_alloc(test, child_entries, ARRAY_SIZE(child_entries), NULL, 0,
+			&child);
+	root_array.size = __stack_depot_trie_child_array_size(1);
+	root_array.array = kunit_kzalloc(test, root_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, root_array.array);
+	ret = publish_append(&root, NULL, child, root_array.array,
+			     root_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	trie_node_slot_alloc(test, &desc_slot, desc_entries,
+			     ARRAY_SIZE(desc_entries));
+	child_array.size = __stack_depot_trie_child_array_size(1);
+	child_array.array = kunit_kzalloc(test, child_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child_array.array);
+	ret = append_chain(child, 3, desc_entries, ARRAY_SIZE(desc_entries),
+			   &desc_slot, 1, NULL, 0, NULL, 0, &desc_head,
+			   &desc_tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = publish_append(NULL, child, desc_head, child_array.array,
+			     child_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	trie_node_slot_alloc(test, &node_slots[0], child_entries, 1);
+	trie_node_slot_alloc(test, &node_slots[1], &child_entries[1], 1);
+	trie_node_slot_alloc(test, &node_slots[2], &new_entries[1], 1);
+	split_array.size = __stack_depot_trie_child_array_size(2);
+	split_array.array = kunit_kzalloc(test, split_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, split_array.array);
+	ret = split_subtree(child, 1, 4, new_entries, ARRAY_SIZE(new_entries),
+			    node_slots, ARRAY_SIZE(node_slots), &split_array, 1,
+			    NULL, 0, &prefix, &new_tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, old_stack, ARRAY_SIZE(old_stack)),
+			    desc_tail);
+	KUNIT_EXPECT_PTR_EQ(test, new_tail, node_slots[2].node);
+	KUNIT_EXPECT_PTR_EQ(test, prefix, node_slots[0].node);
+}
+
 static void stackdepot_trie_find_leaf_misses(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
@@ -1666,6 +1725,7 @@ static void stackdepot_trie_find_leaf_misses(struct kunit *test)
 static void stackdepot_trie_find_leaf_rejects_bad_parent(struct kunit *test)
 {
 	unsigned long parent_entries[] = { 0x1000UL };
+	unsigned long wrong_parent_entries[] = { 0x1111UL };
 	unsigned long full_entries[] = { 0x1000UL, 0x2000UL };
 	struct stack_depot_trie_child_array_slot root_array;
 	struct stack_depot_trie_child_array_slot child_array;
@@ -1681,8 +1741,8 @@ static void stackdepot_trie_find_leaf_rejects_bad_parent(struct kunit *test)
 	trie_node_slot_alloc(test, &parent_slot, parent_entries,
 			     ARRAY_SIZE(parent_entries));
 	trie_node_slot_alloc(test, &child_slot, &full_entries[1], 1);
-	trie_node_alloc(test, parent_entries, ARRAY_SIZE(parent_entries), NULL, 66,
-			&wrong_parent);
+	trie_node_alloc(test, wrong_parent_entries, ARRAY_SIZE(wrong_parent_entries),
+			NULL, 66, &wrong_parent);
 	root_array.size = __stack_depot_trie_child_array_size(1);
 	root_array.array = kunit_kzalloc(test, root_array.size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, root_array.array);
@@ -1922,6 +1982,78 @@ static void stackdepot_trie_insert_append_prepare_split(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx.calls, 1U);
 	KUNIT_EXPECT_PTR_EQ(test, root.children, replace_array.array);
 	KUNIT_EXPECT_PTR_EQ(test, new_tail, node_slots[2].node);
+}
+
+static void stackdepot_trie_insert_append_prepare_split_failure(struct kunit *test)
+{
+	unsigned long old_entries[] = { 0x1000UL, 0x2000UL };
+	unsigned long new_entries[] = { 0x1000UL, 0x3000UL };
+	struct stack_depot_trie_child_array_slot old_array;
+	struct stack_depot_trie_child_array_slot split_array;
+	struct stack_depot_trie_child_array_slot replace_array;
+	struct stack_depot_trie_node_slot old_slot;
+	struct stack_depot_trie_node_slot node_slots[3];
+	struct stack_depot_trie_root root = {};
+	const void *found;
+	struct stackdepot_trie_prepare_ctx ctx = {
+		.test = test,
+		.visible = &root.children,
+		.expected_leaf_id = { 75, 76 },
+		.nr_expected = 2,
+		.ret = -EAGAIN,
+	};
+	struct stack_depot_trie_publish_prepare prepare = {
+		.fn = stackdepot_trie_prepare,
+		.ctx = &ctx,
+	};
+	const void *old_head = NULL;
+	const void *old_tail = NULL;
+	const void *new_tail = (const void *)1;
+	unsigned int used = 99;
+	int ret;
+
+	trie_node_slot_alloc(test, &old_slot, old_entries, ARRAY_SIZE(old_entries));
+	old_array.size = __stack_depot_trie_child_array_size(1);
+	old_array.array = kunit_kzalloc(test, old_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, old_array.array);
+	ret = append_chain(NULL, 75, old_entries, ARRAY_SIZE(old_entries),
+			   &old_slot, 1, NULL, 0, NULL, 0, &old_head,
+			   &old_tail, &used);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = publish_append(&root, NULL, old_head, old_array.array,
+			     old_array.size);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ctx.expected_visible = old_array.array;
+
+	trie_node_slot_alloc(test, &node_slots[0], old_entries, 1);
+	trie_node_slot_alloc(test, &node_slots[1], &old_entries[1], 1);
+	trie_node_slot_alloc(test, &node_slots[2], &new_entries[1], 1);
+	ctx.expected_leaf[0] = node_slots[1].node;
+	ctx.expected_leaf[1] = node_slots[2].node;
+	split_array.size = __stack_depot_trie_child_array_size(2);
+	split_array.array = kunit_kzalloc(test, split_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, split_array.array);
+	replace_array.size = __stack_depot_trie_child_array_size(1);
+	replace_array.array = kunit_kzalloc(test, replace_array.size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, replace_array.array);
+	new_tail = (const void *)1;
+	used = 99;
+
+	ret = insert_append_prepare(&root, NULL, 76, new_entries,
+				    ARRAY_SIZE(new_entries), node_slots,
+				    ARRAY_SIZE(node_slots), &split_array, 1,
+				    NULL, 0, replace_array.array,
+				    replace_array.size, &prepare, &new_tail,
+				    &used);
+	KUNIT_EXPECT_EQ(test, ret, -EAGAIN);
+	KUNIT_EXPECT_EQ(test, ctx.calls, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, root.children, old_array.array);
+	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, old_entries,
+					    ARRAY_SIZE(old_entries)), old_tail);
+	found = find_leaf(&root, new_entries, ARRAY_SIZE(new_entries));
+	KUNIT_EXPECT_NULL(test, found);
+	KUNIT_EXPECT_PTR_EQ(test, new_tail, (const void *)1);
+	KUNIT_EXPECT_EQ(test, used, 99U);
 }
 
 static void stackdepot_trie_insert_append_parent(struct kunit *test)
@@ -4037,6 +4169,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_lookup_step_accepts_reparented_child),
 	KUNIT_CASE(stackdepot_trie_find_leaf_root),
 	KUNIT_CASE(stackdepot_trie_find_leaf_descends),
+	KUNIT_CASE(stackdepot_trie_find_leaf_accepts_reparented_child),
 	KUNIT_CASE(stackdepot_trie_find_leaf_misses),
 	KUNIT_CASE(stackdepot_trie_find_leaf_rejects_bad_parent),
 	KUNIT_CASE(stackdepot_trie_insert_append_root),
@@ -4044,6 +4177,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_insert_append_prepare_failure),
 	KUNIT_CASE(stackdepot_trie_insert_append_prepare_promote_failure),
 	KUNIT_CASE(stackdepot_trie_insert_append_prepare_split),
+	KUNIT_CASE(stackdepot_trie_insert_append_prepare_split_failure),
 	KUNIT_CASE(stackdepot_trie_insert_append_parent),
 	KUNIT_CASE(stackdepot_trie_insert_append_descends_one_level),
 	KUNIT_CASE(stackdepot_trie_insert_append_descends_multiple_levels),
