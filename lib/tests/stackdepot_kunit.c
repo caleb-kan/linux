@@ -574,6 +574,185 @@ static void stackdepot_trie_handle_namespace(struct kunit *test)
 			(depot_stack_handle_t)0);
 }
 
+static void stackdepot_trie_side_table_destroy_action(void *data)
+{
+	__stack_depot_trie_side_table_destroy();
+}
+
+static void stackdepot_trie_side_table_init_or_skip(struct kunit *test)
+{
+	int ret;
+
+	ret = __stack_depot_trie_side_table_init(GFP_KERNEL);
+	if (ret == -EINVAL && !__stack_depot_trie_max_leaf_id())
+		kunit_skip(test, "trie handle namespace unavailable");
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = kunit_add_action_or_reset(test, stackdepot_trie_side_table_destroy_action, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+}
+
+static u32 stackdepot_trie_side_table_alloc(struct kunit *test)
+{
+	void *prealloc = NULL;
+	u32 id;
+
+	if (__stack_depot_trie_side_table_prealloc_needed()) {
+		prealloc = __stack_depot_trie_side_table_prealloc(GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, prealloc);
+	}
+
+	id = __stack_depot_trie_side_table_alloc_id(&prealloc);
+	__stack_depot_trie_side_table_free_prealloc(prealloc);
+	return id;
+}
+
+static void stackdepot_trie_side_table_destroy_uninit(struct kunit *test)
+{
+	__stack_depot_trie_side_table_destroy();
+	KUNIT_SUCCEED(test);
+}
+
+static void stackdepot_trie_side_table_alloc_store_lookup(struct kunit *test)
+{
+	const void *entry1 = (const void *)0x1111UL;
+	const void *entry2 = (const void *)0x2222UL;
+	u32 id1;
+	u32 id2;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id1 = stackdepot_trie_side_table_alloc(test);
+	id2 = stackdepot_trie_side_table_alloc(test);
+
+	KUNIT_ASSERT_EQ(test, id1, 1U);
+	KUNIT_ASSERT_EQ(test, id2, 2U);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_store(id1, entry1), 0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_store(id2, entry2), 0);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id1), entry1);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id2), entry2);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 2UL);
+}
+
+static void stackdepot_trie_side_table_rejects_invalid_ids(struct kunit *test)
+{
+	int ret;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(0));
+
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(id + 1));
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_store(id, NULL), -EINVAL);
+	ret = __stack_depot_trie_side_table_store(id + 1, (const void *)0x1UL);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
+static void stackdepot_trie_side_table_revoke_latest(struct kunit *test)
+{
+	const void *entry = (const void *)0xaaaaUL;
+	size_t bytes;
+	int ret;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	ret = __stack_depot_trie_side_table_store(id, entry);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	bytes = __stack_depot_trie_side_table_bytes();
+	KUNIT_EXPECT_GT(test, bytes, 0UL);
+
+	__stack_depot_trie_side_table_revoke_latest(id);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 0UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_bytes(), bytes);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(id));
+}
+
+static void stackdepot_trie_side_table_revoke_keeps_chunk(struct kunit *test)
+{
+	const void *entry1 = (const void *)0x1111UL;
+	const void *entry2 = (const void *)0x2222UL;
+	size_t bytes;
+	u32 id1;
+	u32 id2;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id1 = stackdepot_trie_side_table_alloc(test);
+	id2 = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id1, 1U);
+	KUNIT_ASSERT_EQ(test, id2, 2U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id1, entry1), 0);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id2, entry2), 0);
+	bytes = __stack_depot_trie_side_table_bytes();
+
+	__stack_depot_trie_side_table_revoke_latest(id2);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 1UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_bytes(), bytes);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id1), entry1);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(id2));
+}
+
+static void stackdepot_trie_side_table_restore(struct kunit *test)
+{
+	const void *entry1 = (const void *)0xaaaaUL;
+	const void *entry2 = (const void *)0xbbbbUL;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id, entry1), 0);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id, entry2), 0);
+
+	__stack_depot_trie_side_table_restore(id, entry1);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id), entry1);
+	__stack_depot_trie_side_table_restore(id, NULL);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(id));
+}
+
+static void stackdepot_trie_side_table_chunk_boundary(struct kunit *test)
+{
+	void *prealloc = NULL;
+	u32 id = 0;
+	u32 i;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	for (i = 0; i < STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE; i++)
+		id = stackdepot_trie_side_table_alloc(test);
+
+	KUNIT_ASSERT_EQ(test, id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_side_table_prealloc_needed());
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_alloc_id(NULL), 0U);
+
+	prealloc = __stack_depot_trie_side_table_prealloc(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, prealloc);
+	id = __stack_depot_trie_side_table_alloc_id(&prealloc);
+	KUNIT_EXPECT_NULL(test, prealloc);
+	KUNIT_EXPECT_EQ(test, id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE + 1);
+}
+
+static void stackdepot_trie_side_table_bytes(struct kunit *test)
+{
+	size_t before;
+	size_t after;
+	void *prealloc;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	before = __stack_depot_trie_side_table_bytes();
+	KUNIT_EXPECT_GT(test, before, 0UL);
+	prealloc = __stack_depot_trie_side_table_prealloc(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, prealloc);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_bytes(), before);
+
+	id = __stack_depot_trie_side_table_alloc_id(&prealloc);
+	KUNIT_EXPECT_NULL(test, prealloc);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	after = __stack_depot_trie_side_table_bytes();
+	KUNIT_EXPECT_GT(test, after, before);
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4127,6 +4306,14 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_count_helpers),
 	KUNIT_CASE(stackdepot_trie_handle_namespace),
+	KUNIT_CASE(stackdepot_trie_side_table_destroy_uninit),
+	KUNIT_CASE(stackdepot_trie_side_table_alloc_store_lookup),
+	KUNIT_CASE(stackdepot_trie_side_table_rejects_invalid_ids),
+	KUNIT_CASE(stackdepot_trie_side_table_revoke_latest),
+	KUNIT_CASE(stackdepot_trie_side_table_revoke_keeps_chunk),
+	KUNIT_CASE(stackdepot_trie_side_table_restore),
+	KUNIT_CASE(stackdepot_trie_side_table_chunk_boundary),
+	KUNIT_CASE(stackdepot_trie_side_table_bytes),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

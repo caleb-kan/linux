@@ -222,6 +222,307 @@ u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 	return leaf_id > U32_MAX ? 0 : leaf_id;
 }
 
+static const void ***trie_side_table_chunks;
+static DEFINE_RAW_SPINLOCK(trie_side_table_lock);
+static unsigned int trie_side_table_high_water;
+static unsigned int trie_side_table_nr_chunks;
+static unsigned int trie_side_table_top_size;
+static u32 trie_side_table_next_id;
+static bool trie_side_table_initialized;
+
+static unsigned int trie_side_table_top_index(u32 id)
+{
+	return (id - 1) >> STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS;
+}
+
+static unsigned int trie_side_table_slot_index(u32 id)
+{
+	return (id - 1) & (STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE - 1);
+}
+
+static const void **trie_side_table_load_chunk(unsigned int top)
+{
+	/* Pairs with trie_side_table_publish_chunk(). */
+	return smp_load_acquire(&trie_side_table_chunks[top]);
+}
+
+static void trie_side_table_publish_chunk(unsigned int top, const void **chunk)
+{
+	/* Pairs with trie_side_table_load_chunk(). */
+	smp_store_release(&trie_side_table_chunks[top], chunk);
+}
+
+static const void *
+trie_side_table_load_entry(const void **chunk, unsigned int slot)
+{
+	/* Pairs with trie_side_table_store_entry(). */
+	return smp_load_acquire(&chunk[slot]);
+}
+
+static void
+trie_side_table_store_entry(const void **chunk, unsigned int slot, const void *entry)
+{
+	/* Pairs with trie_side_table_load_entry(). */
+	smp_store_release(&chunk[slot], entry);
+}
+
+static void trie_side_table_clear_entry(const void **chunk, unsigned int slot)
+{
+	WRITE_ONCE(chunk[slot], NULL);
+}
+
+int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
+{
+	u32 max_leaf_id;
+
+	if (trie_side_table_initialized)
+		return 0;
+
+	max_leaf_id = __stack_depot_trie_max_leaf_id();
+	if (!max_leaf_id)
+		return -EINVAL;
+
+	trie_side_table_top_size =
+		DIV_ROUND_UP(max_leaf_id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
+	trie_side_table_chunks =
+		kvcalloc(trie_side_table_top_size, sizeof(*trie_side_table_chunks),
+			 gfp_flags);
+	if (!trie_side_table_chunks)
+		return -ENOMEM;
+
+	trie_side_table_high_water = 0;
+	trie_side_table_nr_chunks = 0;
+	trie_side_table_next_id = 0;
+	trie_side_table_initialized = true;
+	return 0;
+}
+
+void __stack_depot_trie_side_table_destroy(void)
+{
+	unsigned int i;
+
+	if (!trie_side_table_initialized)
+		return;
+
+	for (i = 0; i < trie_side_table_high_water; i++)
+		kfree(trie_side_table_chunks[i]);
+	kvfree(trie_side_table_chunks);
+	trie_side_table_chunks = NULL;
+	trie_side_table_high_water = 0;
+	trie_side_table_nr_chunks = 0;
+	trie_side_table_top_size = 0;
+	trie_side_table_next_id = 0;
+	trie_side_table_initialized = false;
+}
+
+bool __stack_depot_trie_side_table_prealloc_needed(void)
+{
+	unsigned long flags;
+	bool needed;
+	u32 id;
+	unsigned int top;
+
+	if (!trie_side_table_initialized)
+		return false;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	id = READ_ONCE(trie_side_table_next_id) + 1;
+	if (!id || id > __stack_depot_trie_max_leaf_id()) {
+		needed = false;
+		goto out;
+	}
+
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size) {
+		needed = false;
+		goto out;
+	}
+
+	needed = !trie_side_table_load_chunk(top);
+out:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+	return needed;
+}
+
+void *__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags)
+{
+	return kcalloc(STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE,
+		       sizeof(*trie_side_table_chunks[0]), gfp_flags);
+}
+
+void __stack_depot_trie_side_table_free_prealloc(void *prealloc)
+{
+	kfree(prealloc);
+}
+
+u32 __stack_depot_trie_side_table_alloc_id(void **prealloc)
+{
+	const void **chunk;
+	unsigned long flags;
+	u32 id;
+	unsigned int top;
+
+	if (!trie_side_table_initialized)
+		return 0;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	id = trie_side_table_next_id + 1;
+	if (!id || id > __stack_depot_trie_max_leaf_id())
+		goto fail;
+
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		goto fail;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk) {
+		if (!prealloc || !*prealloc)
+			goto fail;
+		chunk = *prealloc;
+		*prealloc = NULL;
+		trie_side_table_publish_chunk(top, chunk);
+		trie_side_table_nr_chunks++;
+		if (trie_side_table_high_water < top + 1)
+			trie_side_table_high_water = top + 1;
+	}
+
+	WRITE_ONCE(trie_side_table_next_id, id);
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+	return id;
+fail:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+	return 0;
+}
+
+void __stack_depot_trie_side_table_revoke_latest(u32 id)
+{
+	const void **chunk;
+	unsigned long flags;
+	unsigned int slot;
+	unsigned int top;
+
+	if (!trie_side_table_initialized || !id ||
+	    id != READ_ONCE(trie_side_table_next_id))
+		return;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	if (id != trie_side_table_next_id)
+		goto out;
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		goto out;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		goto out;
+
+	slot = trie_side_table_slot_index(id);
+	trie_side_table_clear_entry(chunk, slot);
+	WRITE_ONCE(trie_side_table_next_id, id - 1);
+out:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+}
+
+void __stack_depot_trie_side_table_restore(u32 id, const void *entry)
+{
+	const void **chunk;
+	unsigned long flags;
+	unsigned int top;
+
+	if (!trie_side_table_initialized || !id)
+		return;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	if (id > trie_side_table_next_id)
+		goto out;
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		goto out;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		goto out;
+
+	trie_side_table_store_entry(chunk, trie_side_table_slot_index(id), entry);
+out:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+}
+
+int __stack_depot_trie_side_table_store(u32 id, const void *entry)
+{
+	const void **chunk;
+	unsigned long flags;
+	unsigned int top;
+	int ret = -EINVAL;
+
+	if (!trie_side_table_initialized || !id || !entry)
+		return -EINVAL;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	if (id > trie_side_table_next_id)
+		goto out;
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		goto out;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		goto out;
+
+	trie_side_table_store_entry(chunk, trie_side_table_slot_index(id), entry);
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+	return ret;
+}
+
+const void *__stack_depot_trie_side_table_lookup(u32 id)
+{
+	const void **chunk;
+	unsigned int top;
+
+	if (!trie_side_table_initialized || !id)
+		return NULL;
+
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		return NULL;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		return NULL;
+
+	return trie_side_table_load_entry(chunk, trie_side_table_slot_index(id));
+}
+
+size_t __stack_depot_trie_side_table_entries(void)
+{
+	return trie_side_table_initialized ? READ_ONCE(trie_side_table_next_id) : 0;
+}
+
+size_t __stack_depot_trie_side_table_bytes(void)
+{
+	unsigned int nr_chunks;
+	size_t bytes;
+	size_t top_bytes;
+
+	if (!trie_side_table_initialized)
+		return 0;
+	if (check_mul_overflow((size_t)trie_side_table_top_size,
+			       sizeof(*trie_side_table_chunks), &top_bytes))
+		return SIZE_MAX;
+
+	nr_chunks = READ_ONCE(trie_side_table_nr_chunks);
+	if (check_mul_overflow((size_t)nr_chunks,
+			       STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE *
+			       sizeof(*trie_side_table_chunks[0]), &bytes))
+		return SIZE_MAX;
+	if (check_add_overflow(top_bytes, bytes, &bytes))
+		return SIZE_MAX;
+
+	return bytes;
+}
+
 static int __init disable_stack_depot(char *str)
 {
 	return kstrtobool(str, &stack_depot_disabled);

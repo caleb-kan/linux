@@ -59,9 +59,31 @@ struct stack_depot_trie_publish_prepare {
 	void *ctx;
 };
 
+#define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
+#define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE \
+	(1U << STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS)
+
 depot_stack_handle_t __stack_depot_trie_handle(u32 leaf_id);
 u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle);
 u32 __stack_depot_trie_max_leaf_id(void);
+
+/*
+ * Private trie leaf side table. Writers serialize internally; lookup is
+ * lockless. Init and destroy are controlled setup/teardown operations and must
+ * not race with lookup.
+ */
+int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
+void __stack_depot_trie_side_table_destroy(void);
+bool __stack_depot_trie_side_table_prealloc_needed(void);
+void *__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags);
+void __stack_depot_trie_side_table_free_prealloc(void *prealloc);
+u32 __stack_depot_trie_side_table_alloc_id(void **prealloc);
+void __stack_depot_trie_side_table_revoke_latest(u32 id);
+void __stack_depot_trie_side_table_restore(u32 id, const void *entry);
+int __stack_depot_trie_side_table_store(u32 id, const void *entry);
+const void *__stack_depot_trie_side_table_lookup(u32 id);
+size_t __stack_depot_trie_side_table_entries(void);
+size_t __stack_depot_trie_side_table_bytes(void);
 bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
 				      u32 *low);
 bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
