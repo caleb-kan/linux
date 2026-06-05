@@ -1945,6 +1945,21 @@ trie_child_array_subtree_overlaps(const struct stack_depot_trie_child_array *arr
 	}
 }
 
+static const struct stack_depot_trie_node *
+trie_load_parent(const struct stack_depot_trie_node *node)
+{
+	/* Pairs with trie_publish_parent(). */
+	return smp_load_acquire(&node->parent);
+}
+
+static void
+trie_publish_parent(struct stack_depot_trie_node *child,
+		    const struct stack_depot_trie_node *parent)
+{
+	/* Pairs with trie_load_parent(). */
+	smp_store_release(&child->parent, parent);
+}
+
 static bool
 trie_node_slots_subtree_overlap(const struct stack_depot_trie_child_array *array,
 				const struct stack_depot_trie_node *parent,
@@ -2239,7 +2254,7 @@ static void trie_reparent_children(struct stack_depot_trie_node *parent)
 
 		/* Child arrays are const for readers; writers serialize reparenting. */
 		child = (struct stack_depot_trie_node *)children->children[i];
-		WRITE_ONCE(child->parent, parent);
+		trie_publish_parent(child, parent);
 	}
 }
 
@@ -2319,7 +2334,6 @@ trie_promote_child(struct stack_depot_trie_root *root,
 	ret = trie_clone_promoted_node(child, leaf_id, slot);
 	if (ret)
 		return ret;
-	trie_child_array_replace_at(old_array, slot->node, new_storage, pos);
 	if (prepare) {
 		if (!prepare->fn)
 			return -EINVAL;
@@ -2329,6 +2343,7 @@ trie_promote_child(struct stack_depot_trie_root *root,
 		if (ret)
 			return ret;
 	}
+	trie_child_array_replace_at(old_array, slot->node, new_storage, pos);
 	trie_reparent_children(slot->node);
 
 	publish_slot = trie_publish_slot(root, parent);
@@ -2657,7 +2672,7 @@ __stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
 		if (node) {
 			const struct stack_depot_trie_node *node_parent;
 
-			node_parent = READ_ONCE(node->parent);
+			node_parent = trie_load_parent(node);
 			if (node->stack_len != pos + lookup.matched)
 				return NULL;
 			if (node_parent != parent &&
@@ -2925,7 +2940,7 @@ trie_parent_chain_matches_prefix(const struct stack_depot_trie_node *node,
 
 		if (depth++ >= CONFIG_STACKDEPOT_MAX_FRAMES)
 			return false;
-		parent = READ_ONCE(cur->parent);
+		parent = trie_load_parent(cur);
 		if (stack_depot_frame_run_validate(&cur->run))
 			return false;
 		if (!cur->stack_len || cur->run.nr_entries > cur->stack_len)
@@ -3136,7 +3151,7 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 		return 0;
 
 	pos = total;
-	for (node = leaf; node; node = READ_ONCE(node->parent)) {
+	for (node = leaf; node; node = trie_load_parent(node)) {
 		if (stack_depot_frame_run_validate(&node->run))
 			return 0;
 		if (node->stack_len != pos || node->run.nr_entries > pos)
@@ -3609,8 +3624,10 @@ static int trie_split_subtree_prepare(const void *child_ptr, unsigned int matche
 		if (!prepare->fn)
 			return -EINVAL;
 		ret = prepare->fn(updates, nr_updates, prepare->ctx);
-		if (ret)
+		if (ret) {
+			memset(split_array, 0, split_array_size);
 			return ret;
+		}
 	}
 
 	old_tail->children = child->children;
