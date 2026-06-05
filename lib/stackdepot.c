@@ -525,13 +525,14 @@ size_t __stack_depot_trie_side_table_bytes(void)
 
 size_t __stack_depot_trie_pool_alloc_size(size_t size)
 {
+	size_t align = 1UL << DEPOT_STACK_ALIGN;
 	size_t aligned;
 
 	if (!size || size > DEPOT_POOL_SIZE)
 		return 0;
-	if (check_add_overflow(size, sizeof(unsigned long) - 1, &aligned))
+	if (check_add_overflow(size, align - 1, &aligned))
 		return 0;
-	aligned = ALIGN(size, sizeof(unsigned long));
+	aligned = ALIGN(size, align);
 	return aligned <= DEPOT_POOL_SIZE ? aligned : 0;
 }
 

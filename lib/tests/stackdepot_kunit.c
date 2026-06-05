@@ -913,10 +913,12 @@ static void stackdepot_trie_side_prepare_rejects_null_leaf(struct kunit *test)
 
 static void stackdepot_trie_pool_alloc_size(struct kunit *test)
 {
-	size_t align = sizeof(unsigned long);
+	size_t align = 1UL << DEPOT_STACK_ALIGN;
 
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(0), 0UL);
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(1), align);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(sizeof(unsigned long)),
+			align);
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(align), align);
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(align + 1),
 			align * 2);
