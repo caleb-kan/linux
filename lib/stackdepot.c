@@ -536,6 +536,68 @@ size_t __stack_depot_trie_pool_alloc_size(size_t size)
 	return aligned <= DEPOT_POOL_SIZE ? aligned : 0;
 }
 
+void *
+__stack_depot_trie_pool_carve_current(size_t size,
+				      struct stack_depot_trie_pool_mark *mark)
+{
+	unsigned long flags;
+	size_t alloc_size;
+	void *pool;
+	void *ptr = NULL;
+
+	if (!mark)
+		return NULL;
+	memset(mark, 0, sizeof(*mark));
+
+	alloc_size = __stack_depot_trie_pool_alloc_size(size);
+	if (!alloc_size)
+		return NULL;
+
+	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		return NULL;
+	if (!stack_pools || pools_num < 1)
+		goto out;
+	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
+		goto out;
+	if (alloc_size > DEPOT_POOL_SIZE - pool_offset)
+		goto out;
+
+	mark->pool_index = pools_num - 1;
+	pool = stack_pools[mark->pool_index];
+	if (WARN_ON_ONCE(!pool))
+		goto out;
+
+	mark->offset = pool_offset;
+	mark->size = alloc_size;
+	ptr = pool + pool_offset;
+	pool_offset += alloc_size;
+out:
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
+	return ptr;
+}
+
+bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark)
+{
+	unsigned long flags;
+	size_t end;
+	bool ret = false;
+
+	if (!mark || !mark->size)
+		return false;
+	if (check_add_overflow(mark->offset, mark->size, &end))
+		return false;
+
+	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		return false;
+	if (mark->pool_index == pools_num - 1 && pool_offset == end) {
+		pool_offset = mark->offset;
+		ret = true;
+	}
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
+
+	return ret;
+}
+
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state)
 {
 	if (state)

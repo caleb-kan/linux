@@ -71,6 +71,12 @@ struct stack_depot_trie_side_prepare {
 	unsigned int nr_updates;
 };
 
+struct stack_depot_trie_pool_mark {
+	unsigned int pool_index;
+	size_t offset;
+	size_t size;
+};
+
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE \
 	(1U << STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS)
@@ -97,6 +103,14 @@ const void *__stack_depot_trie_side_table_lookup(u32 id);
 size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
 size_t __stack_depot_trie_pool_alloc_size(size_t size);
+/*
+ * Best-effort current-pool helpers. They never allocate or roll over to a new
+ * pool, and they use trylock so constrained contexts fail instead of blocking.
+ */
+void *
+__stack_depot_trie_pool_carve_current(size_t size,
+				      struct stack_depot_trie_pool_mark *mark);
+bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int
 __stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
