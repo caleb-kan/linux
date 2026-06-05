@@ -59,6 +59,18 @@ struct stack_depot_trie_publish_prepare {
 	void *ctx;
 };
 
+#define STACK_DEPOT_TRIE_MAX_LEAF_UPDATES 2
+
+struct stack_depot_trie_side_checkpoint {
+	u32 leaf_id;
+	const void *old_leaf;
+};
+
+struct stack_depot_trie_side_prepare {
+	struct stack_depot_trie_side_checkpoint updates[STACK_DEPOT_TRIE_MAX_LEAF_UPDATES];
+	unsigned int nr_updates;
+};
+
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE \
 	(1U << STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS)
@@ -84,6 +96,11 @@ int __stack_depot_trie_side_table_store(u32 id, const void *entry);
 const void *__stack_depot_trie_side_table_lookup(u32 id);
 size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
+void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
+int
+__stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
+				unsigned int nr_updates, void *ctx);
+void __stack_depot_trie_side_rollback(struct stack_depot_trie_side_prepare *state);
 bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
 				      u32 *low);
 bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,

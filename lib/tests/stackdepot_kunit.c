@@ -753,6 +753,164 @@ static void stackdepot_trie_side_table_bytes(struct kunit *test)
 	KUNIT_EXPECT_GT(test, after, before);
 }
 
+static void stackdepot_trie_side_prepare_updates(struct kunit *test)
+{
+	struct stack_depot_trie_side_prepare state;
+	struct stack_depot_trie_leaf_update updates[2];
+	const void *old1 = (const void *)0x1111UL;
+	const void *old2 = (const void *)0x2222UL;
+	const void *new1 = (const void *)0xaaaaUL;
+	const void *new2 = (const void *)0xbbbbUL;
+	int ret;
+	u32 id1;
+	u32 id2;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id1 = stackdepot_trie_side_table_alloc(test);
+	id2 = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id1, 1U);
+	KUNIT_ASSERT_EQ(test, id2, 2U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id1, old1), 0);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id2, old2), 0);
+	updates[0].leaf_id = id1;
+	updates[0].leaf = new1;
+	updates[1].leaf_id = id2;
+	updates[1].leaf = new2;
+
+	__stack_depot_trie_side_prepare_init(&state);
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &state);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, state.nr_updates, (unsigned int)ARRAY_SIZE(updates));
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id1), new1);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id2), new2);
+
+	__stack_depot_trie_side_rollback(&state);
+	KUNIT_EXPECT_EQ(test, state.nr_updates, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id1), old1);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id2), old2);
+}
+
+static void stackdepot_trie_side_prepare_failure(struct kunit *test)
+{
+	struct stack_depot_trie_side_prepare state;
+	struct stack_depot_trie_leaf_update updates[2];
+	const void *old1 = (const void *)0x1111UL;
+	const void *new1 = (const void *)0xaaaaUL;
+	int ret;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id, old1), 0);
+	updates[0].leaf_id = id;
+	updates[0].leaf = new1;
+	updates[1].leaf_id = id + 1;
+	updates[1].leaf = (const void *)0xbbbbUL;
+
+	__stack_depot_trie_side_prepare_init(&state);
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &state);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, state.nr_updates, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id), old1);
+}
+
+static void stackdepot_trie_side_prepare_duplicate_id(struct kunit *test)
+{
+	struct stack_depot_trie_side_prepare state;
+	struct stack_depot_trie_leaf_update updates[2];
+	const void *old = (const void *)0x1111UL;
+	const void *mid = (const void *)0x2222UL;
+	const void *new = (const void *)0x3333UL;
+	int ret;
+	u32 id;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id, old), 0);
+	updates[0].leaf_id = id;
+	updates[0].leaf = mid;
+	updates[1].leaf_id = id;
+	updates[1].leaf = new;
+
+	__stack_depot_trie_side_prepare_init(&state);
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &state);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id), new);
+	__stack_depot_trie_side_rollback(&state);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id), old);
+}
+
+static void stackdepot_trie_side_prepare_rejects_extra_update(struct kunit *test)
+{
+	struct stack_depot_trie_side_prepare state;
+	struct stack_depot_trie_leaf_update updates[3];
+	const void *old[] = {
+		(const void *)0x1111UL,
+		(const void *)0x2222UL,
+		(const void *)0x3333UL,
+	};
+	const void *new[] = {
+		(const void *)0xaaaaUL,
+		(const void *)0xbbbbUL,
+		(const void *)0xccccUL,
+	};
+	u32 id[ARRAY_SIZE(updates)];
+	unsigned int i;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	for (i = 0; i < ARRAY_SIZE(updates); i++) {
+		id[i] = stackdepot_trie_side_table_alloc(test);
+		KUNIT_ASSERT_EQ(test, id[i], i + 1);
+		KUNIT_ASSERT_EQ(test,
+				__stack_depot_trie_side_table_store(id[i], old[i]),
+				0);
+		updates[i].leaf_id = id[i];
+		updates[i].leaf = new[i];
+	}
+
+	__stack_depot_trie_side_prepare_init(&state);
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &state);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, state.nr_updates, 0U);
+	for (i = 0; i < ARRAY_SIZE(updates); i++)
+		KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id[i]),
+				    old[i]);
+}
+
+static void stackdepot_trie_side_prepare_rejects_null_leaf(struct kunit *test)
+{
+	struct stack_depot_trie_side_prepare state;
+	struct stack_depot_trie_leaf_update updates[2];
+	const void *old1 = (const void *)0x1111UL;
+	const void *old2 = (const void *)0x2222UL;
+	const void *new1 = (const void *)0xaaaaUL;
+	u32 id1;
+	u32 id2;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	id1 = stackdepot_trie_side_table_alloc(test);
+	id2 = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id1, 1U);
+	KUNIT_ASSERT_EQ(test, id2, 2U);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id1, old1), 0);
+	KUNIT_ASSERT_EQ(test, __stack_depot_trie_side_table_store(id2, old2), 0);
+	updates[0].leaf_id = id1;
+	updates[0].leaf = new1;
+	updates[1].leaf_id = id2;
+	updates[1].leaf = NULL;
+
+	__stack_depot_trie_side_prepare_init(&state);
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &state);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, state.nr_updates, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id1), old1);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id2), old2);
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4314,6 +4472,11 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_side_table_restore),
 	KUNIT_CASE(stackdepot_trie_side_table_chunk_boundary),
 	KUNIT_CASE(stackdepot_trie_side_table_bytes),
+	KUNIT_CASE(stackdepot_trie_side_prepare_updates),
+	KUNIT_CASE(stackdepot_trie_side_prepare_failure),
+	KUNIT_CASE(stackdepot_trie_side_prepare_duplicate_id),
+	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_extra_update),
+	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_null_leaf),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

@@ -523,6 +523,67 @@ size_t __stack_depot_trie_side_table_bytes(void)
 	return bytes;
 }
 
+void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state)
+{
+	if (state)
+		memset(state, 0, sizeof(*state));
+}
+
+void __stack_depot_trie_side_rollback(struct stack_depot_trie_side_prepare *state)
+{
+	if (!state)
+		return;
+
+	while (state->nr_updates) {
+		struct stack_depot_trie_side_checkpoint *update;
+
+		state->nr_updates--;
+		update = &state->updates[state->nr_updates];
+		__stack_depot_trie_side_table_restore(update->leaf_id, update->old_leaf);
+	}
+}
+
+int
+__stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
+				unsigned int nr_updates, void *ctx)
+{
+	struct stack_depot_trie_side_prepare *state = ctx;
+	unsigned int start;
+	unsigned int i;
+	int ret;
+
+	if (!state || (!updates && nr_updates))
+		return -EINVAL;
+
+	start = state->nr_updates;
+	for (i = 0; i < nr_updates; i++) {
+		if (state->nr_updates >= STACK_DEPOT_TRIE_MAX_LEAF_UPDATES) {
+			ret = -EINVAL;
+			goto rollback;
+		}
+
+		state->updates[state->nr_updates].leaf_id = updates[i].leaf_id;
+		state->updates[state->nr_updates].old_leaf =
+			__stack_depot_trie_side_table_lookup(updates[i].leaf_id);
+		state->nr_updates++;
+		ret = __stack_depot_trie_side_table_store(updates[i].leaf_id, updates[i].leaf);
+		if (ret)
+			goto rollback;
+	}
+
+	return 0;
+
+rollback:
+	while (state->nr_updates > start) {
+		struct stack_depot_trie_side_checkpoint *update;
+
+		state->nr_updates--;
+		update = &state->updates[state->nr_updates];
+		__stack_depot_trie_side_table_restore(update->leaf_id, update->old_leaf);
+	}
+	return ret;
+}
+
 static int __init disable_stack_depot(char *str)
 {
 	return kstrtobool(str, &stack_depot_disabled);
