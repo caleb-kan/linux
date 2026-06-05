@@ -240,7 +240,7 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 			free_stack_record(stack);
 		return false;
 	}
-	/* new_count is only possible after allocating the list node above. */
+	/* new_count includes the list marker, and requires the node allocated above. */
 	if (new_count) {
 		if (WARN_ON_ONCE(!stack)) {
 			__stack_depot_dec_count_and_test(handle, nr_base_pages + 1);
