@@ -275,7 +275,7 @@ int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 {
 	u32 max_leaf_id;
 
-	if (trie_side_table_initialized)
+	if (READ_ONCE(trie_side_table_initialized))
 		return 0;
 
 	max_leaf_id = __stack_depot_trie_max_leaf_id();
@@ -293,7 +293,7 @@ int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 	trie_side_table_high_water = 0;
 	trie_side_table_nr_chunks = 0;
 	trie_side_table_next_id = 0;
-	trie_side_table_initialized = true;
+	WRITE_ONCE(trie_side_table_initialized, true);
 	return 0;
 }
 
@@ -301,7 +301,7 @@ void __stack_depot_trie_side_table_destroy(void)
 {
 	unsigned int i;
 
-	if (!trie_side_table_initialized)
+	if (!READ_ONCE(trie_side_table_initialized))
 		return;
 
 	for (i = 0; i < trie_side_table_high_water; i++)
@@ -312,7 +312,7 @@ void __stack_depot_trie_side_table_destroy(void)
 	trie_side_table_nr_chunks = 0;
 	trie_side_table_top_size = 0;
 	trie_side_table_next_id = 0;
-	trie_side_table_initialized = false;
+	WRITE_ONCE(trie_side_table_initialized, false);
 }
 
 bool __stack_depot_trie_side_table_prealloc_needed(void)
@@ -322,7 +322,7 @@ bool __stack_depot_trie_side_table_prealloc_needed(void)
 	u32 id;
 	unsigned int top;
 
-	if (!trie_side_table_initialized)
+	if (!READ_ONCE(trie_side_table_initialized))
 		return false;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -362,7 +362,7 @@ u32 __stack_depot_trie_side_table_alloc_id(void **prealloc)
 	u32 id;
 	unsigned int top;
 
-	if (!trie_side_table_initialized)
+	if (!READ_ONCE(trie_side_table_initialized))
 		return 0;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -401,7 +401,7 @@ void __stack_depot_trie_side_table_revoke_latest(u32 id)
 	unsigned int slot;
 	unsigned int top;
 
-	if (!trie_side_table_initialized || !id ||
+	if (!READ_ONCE(trie_side_table_initialized) || !id ||
 	    id != READ_ONCE(trie_side_table_next_id))
 		return;
 
@@ -429,7 +429,7 @@ void __stack_depot_trie_side_table_restore(u32 id, const void *entry)
 	unsigned long flags;
 	unsigned int top;
 
-	if (!trie_side_table_initialized || !id)
+	if (!READ_ONCE(trie_side_table_initialized) || !id)
 		return;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -455,7 +455,7 @@ int __stack_depot_trie_side_table_store(u32 id, const void *entry)
 	unsigned int top;
 	int ret = -EINVAL;
 
-	if (!trie_side_table_initialized || !id || !entry)
+	if (!READ_ONCE(trie_side_table_initialized) || !id || !entry)
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -481,7 +481,7 @@ const void *__stack_depot_trie_side_table_lookup(u32 id)
 	const void **chunk;
 	unsigned int top;
 
-	if (!trie_side_table_initialized || !id)
+	if (!READ_ONCE(trie_side_table_initialized) || !id)
 		return NULL;
 
 	top = trie_side_table_top_index(id);
@@ -497,7 +497,8 @@ const void *__stack_depot_trie_side_table_lookup(u32 id)
 
 size_t __stack_depot_trie_side_table_entries(void)
 {
-	return trie_side_table_initialized ? READ_ONCE(trie_side_table_next_id) : 0;
+	return READ_ONCE(trie_side_table_initialized) ?
+		READ_ONCE(trie_side_table_next_id) : 0;
 }
 
 size_t __stack_depot_trie_side_table_bytes(void)
@@ -506,7 +507,7 @@ size_t __stack_depot_trie_side_table_bytes(void)
 	size_t bytes;
 	size_t top_bytes;
 
-	if (!trie_side_table_initialized)
+	if (!READ_ONCE(trie_side_table_initialized))
 		return 0;
 	if (check_mul_overflow((size_t)trie_side_table_top_size,
 			       sizeof(*trie_side_table_chunks), &top_bytes))
@@ -595,6 +596,85 @@ bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mar
 	}
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 
+	return ret;
+}
+
+static int trie_pool_add_size(size_t size, size_t *total)
+{
+	size_t alloc_size;
+
+	alloc_size = __stack_depot_trie_pool_alloc_size(size);
+	if (!alloc_size)
+		return -EINVAL;
+	if (check_add_overflow(*total, alloc_size, total))
+		return -EINVAL;
+	return *total <= DEPOT_POOL_SIZE ? 0 : -EINVAL;
+}
+
+int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
+{
+	unsigned long flags;
+	unsigned int i;
+	size_t offset;
+	size_t total = 0;
+	void *pool;
+	int ret = -EINVAL;
+
+	if (!req || !req->mark)
+		return -EINVAL;
+	memset(req->mark, 0, sizeof(*req->mark));
+	if (!req->storage || *req->storage ||
+	    (!req->node_slots && req->nr_node_slots) ||
+	    (!req->child_slots && req->nr_child_slots))
+		return -EINVAL;
+
+	for (i = 0; i < req->nr_node_slots; i++) {
+		if (req->node_slots[i].node ||
+		    trie_pool_add_size(req->node_slots[i].size, &total))
+			return -EINVAL;
+	}
+	for (i = 0; i < req->nr_child_slots; i++) {
+		if (req->child_slots[i].array ||
+		    trie_pool_add_size(req->child_slots[i].size, &total))
+			return -EINVAL;
+	}
+	if (trie_pool_add_size(req->storage_size, &total))
+		return -EINVAL;
+
+	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		return -EBUSY;
+	if (!stack_pools || pools_num < 1) {
+		ret = -ENOSPC;
+		goto out;
+	}
+	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
+		goto out;
+	if (total > DEPOT_POOL_SIZE - pool_offset) {
+		ret = -ENOSPC;
+		goto out;
+	}
+
+	req->mark->pool_index = pools_num - 1;
+	pool = stack_pools[req->mark->pool_index];
+	if (WARN_ON_ONCE(!pool))
+		goto out;
+
+	req->mark->offset = pool_offset;
+	req->mark->size = total;
+	offset = pool_offset;
+	for (i = 0; i < req->nr_node_slots; i++) {
+		req->node_slots[i].node = pool + offset;
+		offset += __stack_depot_trie_pool_alloc_size(req->node_slots[i].size);
+	}
+	for (i = 0; i < req->nr_child_slots; i++) {
+		req->child_slots[i].array = pool + offset;
+		offset += __stack_depot_trie_pool_alloc_size(req->child_slots[i].size);
+	}
+	*req->storage = pool + offset;
+	pool_offset += total;
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
 	return ret;
 }
 

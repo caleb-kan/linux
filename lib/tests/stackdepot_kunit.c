@@ -1001,6 +1001,96 @@ static void stackdepot_trie_pool_carve_current_rejects_bad_inputs(struct kunit *
 	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_pool_try_rollback(&mark));
 }
 
+static void stackdepot_trie_pool_carve_slots(struct kunit *test)
+{
+	struct stack_depot_trie_child_array_slot child_slots[1] = {
+		{ .size = 1 },
+	};
+	struct stack_depot_trie_node_slot node_slots[2] = {
+		{ .size = 1 },
+		{ .size = (1UL << DEPOT_STACK_ALIGN) + 1 },
+	};
+	struct stack_depot_trie_pool_mark mark;
+	void *storage = NULL;
+	struct stack_depot_trie_pool_request req = {
+		.node_slots = node_slots,
+		.nr_node_slots = ARRAY_SIZE(node_slots),
+		.child_slots = child_slots,
+		.nr_child_slots = ARRAY_SIZE(child_slots),
+		.storage = &storage,
+		.storage_size = 1,
+		.mark = &mark,
+	};
+	size_t child_size;
+	size_t node0_size;
+	size_t node1_size;
+	size_t total;
+	void *again;
+	int ret;
+
+	stackdepot_trie_pool_seed_current_pool(test);
+	ret = __stack_depot_trie_pool_carve(&req);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_NOT_NULL(test, node_slots[0].node);
+	KUNIT_ASSERT_NOT_NULL(test, node_slots[1].node);
+	KUNIT_ASSERT_NOT_NULL(test, child_slots[0].array);
+	KUNIT_ASSERT_NOT_NULL(test, storage);
+
+	node0_size = __stack_depot_trie_pool_alloc_size(node_slots[0].size);
+	node1_size = __stack_depot_trie_pool_alloc_size(node_slots[1].size);
+	child_size = __stack_depot_trie_pool_alloc_size(child_slots[0].size);
+	KUNIT_EXPECT_PTR_EQ(test, node_slots[1].node,
+			    (char *)node_slots[0].node + node0_size);
+	KUNIT_EXPECT_PTR_EQ(test, child_slots[0].array,
+			    (char *)node_slots[1].node + node1_size);
+	KUNIT_EXPECT_PTR_EQ(test, storage,
+			    (char *)child_slots[0].array + child_size);
+	total = node0_size + node1_size + child_size +
+		__stack_depot_trie_pool_alloc_size(1);
+	KUNIT_EXPECT_EQ(test, mark.size, total);
+
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&mark));
+	again = __stack_depot_trie_pool_carve_current(1, &mark);
+	KUNIT_ASSERT_NOT_NULL(test, again);
+	KUNIT_EXPECT_PTR_EQ(test, again, node_slots[0].node);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&mark));
+}
+
+static void stackdepot_trie_pool_carve_slots_rejects_bad_inputs(struct kunit *test)
+{
+	struct stack_depot_trie_child_array_slot child_slot = { .size = 1 };
+	struct stack_depot_trie_node_slot node_slot = { .size = 1 };
+	struct stack_depot_trie_pool_mark mark;
+	void *storage = (void *)0x1UL;
+	struct stack_depot_trie_pool_request req = {
+		.node_slots = &node_slot,
+		.nr_node_slots = 1,
+		.child_slots = &child_slot,
+		.nr_child_slots = 1,
+		.storage = &storage,
+		.storage_size = 1,
+		.mark = &mark,
+	};
+	int ret;
+
+	stackdepot_trie_pool_seed_current_pool(test);
+	ret = __stack_depot_trie_pool_carve(&req);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, mark.size, 0UL);
+
+	storage = NULL;
+	node_slot.node = (void *)0x1UL;
+	ret = __stack_depot_trie_pool_carve(&req);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, mark.size, 0UL);
+
+	node_slot.node = NULL;
+	req.storage_size = DEPOT_POOL_SIZE;
+	ret = __stack_depot_trie_pool_carve(&req);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+	KUNIT_EXPECT_EQ(test, mark.size, 0UL);
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4571,6 +4661,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_pool_carve_current),
 	KUNIT_CASE(stackdepot_trie_pool_rollback_requires_lifo),
 	KUNIT_CASE(stackdepot_trie_pool_carve_current_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_trie_pool_carve_slots),
+	KUNIT_CASE(stackdepot_trie_pool_carve_slots_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),
