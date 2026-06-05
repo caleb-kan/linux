@@ -911,6 +911,27 @@ static void stackdepot_trie_side_prepare_rejects_null_leaf(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(id2), old2);
 }
 
+static void stackdepot_trie_pool_alloc_size(struct kunit *test)
+{
+	size_t align = sizeof(unsigned long);
+
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(0), 0UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(1), align);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(align), align);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(align + 1),
+			align * 2);
+	KUNIT_EXPECT_EQ(test,
+			__stack_depot_trie_pool_alloc_size(DEPOT_POOL_SIZE - 1),
+			(size_t)DEPOT_POOL_SIZE);
+	KUNIT_EXPECT_EQ(test,
+			__stack_depot_trie_pool_alloc_size(DEPOT_POOL_SIZE),
+			(size_t)DEPOT_POOL_SIZE);
+	KUNIT_EXPECT_EQ(test,
+			__stack_depot_trie_pool_alloc_size(DEPOT_POOL_SIZE + 1),
+			0UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(SIZE_MAX), 0UL);
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4477,6 +4498,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_side_prepare_duplicate_id),
 	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_extra_update),
 	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_null_leaf),
+	KUNIT_CASE(stackdepot_trie_pool_alloc_size),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

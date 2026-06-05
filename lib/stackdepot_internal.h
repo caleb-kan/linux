@@ -96,6 +96,7 @@ int __stack_depot_trie_side_table_store(u32 id, const void *entry);
 const void *__stack_depot_trie_side_table_lookup(u32 id);
 size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
+size_t __stack_depot_trie_pool_alloc_size(size_t size);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int
 __stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
