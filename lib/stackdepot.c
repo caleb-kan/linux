@@ -723,6 +723,26 @@ out:
 	return ret;
 }
 
+void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn)
+{
+	if (txn)
+		memset(txn, 0, sizeof(*txn));
+}
+
+void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
+{
+	if (!txn)
+		return;
+
+	__stack_depot_trie_side_rollback(&txn->side);
+	if (txn->leaf_id) {
+		__stack_depot_trie_side_table_revoke_latest(txn->leaf_id);
+		txn->leaf_id = 0;
+	}
+	__stack_depot_trie_pool_try_rollback(&txn->pool);
+	memset(&txn->pool, 0, sizeof(txn->pool));
+}
+
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state)
 {
 	if (state)

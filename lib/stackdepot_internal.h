@@ -91,6 +91,12 @@ struct stack_depot_trie_pool_request {
 	struct stack_depot_trie_pool_mark *mark;
 };
 
+struct stack_depot_trie_alloc_txn {
+	struct stack_depot_trie_side_prepare side;
+	struct stack_depot_trie_pool_mark pool;
+	u32 leaf_id;
+};
+
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE \
 	(1U << STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS)
@@ -128,6 +134,8 @@ __stack_depot_trie_pool_carve_current(size_t size,
 				      struct stack_depot_trie_pool_mark *mark);
 bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark);
 int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
+void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
+void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int
 __stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,

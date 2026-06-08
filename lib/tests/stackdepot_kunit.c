@@ -1141,6 +1141,51 @@ static void stackdepot_trie_pool_carve_uses_prealloc(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&second_mark));
 }
 
+static void stackdepot_trie_alloc_txn_rollback(struct kunit *test)
+{
+	struct stack_depot_trie_leaf_update updates[2];
+	struct stack_depot_trie_alloc_txn txn;
+	const void *old_leaf = (const void *)0x1111UL;
+	void *pool_leaf;
+	u32 old_id;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+	__stack_depot_trie_alloc_txn_init(&txn);
+	old_id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, old_id, 1U);
+	txn.leaf_id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, txn.leaf_id, 2U);
+	ret = __stack_depot_trie_side_table_store(old_id, old_leaf);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	pool_leaf = __stack_depot_trie_pool_carve_current(1, &txn.pool);
+	KUNIT_ASSERT_NOT_NULL(test, pool_leaf);
+	updates[0].leaf_id = old_id;
+	updates[0].leaf = pool_leaf;
+	updates[1].leaf_id = txn.leaf_id;
+	updates[1].leaf = pool_leaf;
+	ret = __stack_depot_trie_side_prepare(updates, ARRAY_SIZE(updates), &txn.side);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(old_id),
+			    pool_leaf);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(txn.leaf_id),
+			    pool_leaf);
+
+	__stack_depot_trie_alloc_txn_rollback(&txn);
+	KUNIT_EXPECT_EQ(test, txn.leaf_id, 0U);
+	KUNIT_EXPECT_EQ(test, txn.side.nr_updates, 0U);
+	KUNIT_EXPECT_EQ(test, txn.pool.size, 0UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 1UL);
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_lookup(old_id),
+			    old_leaf);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_lookup(2));
+	pool_leaf = __stack_depot_trie_pool_carve_current(1, &txn.pool);
+	KUNIT_ASSERT_NOT_NULL(test, pool_leaf);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&txn.pool));
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4715,6 +4760,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots),
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_pool_carve_uses_prealloc),
+	KUNIT_CASE(stackdepot_trie_alloc_txn_rollback),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),
