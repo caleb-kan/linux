@@ -151,6 +151,13 @@ int
 __stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
+int
+__stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
+				    struct stack_depot_trie_alloc_request *req,
+				    const unsigned long *entries,
+				    unsigned int nr_entries, u32 *scratch,
+				    unsigned int nr_scratch, const void **tail,
+				    u32 *leaf_id);
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int

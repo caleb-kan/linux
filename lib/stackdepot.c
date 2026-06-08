@@ -809,6 +809,54 @@ u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
 	return leaf_id;
 }
 
+int
+__stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
+				    struct stack_depot_trie_alloc_request *req,
+				    const unsigned long *entries,
+				    unsigned int nr_entries, u32 *scratch,
+				    unsigned int nr_scratch, const void **tail,
+				    u32 *leaf_id)
+{
+	struct stack_depot_trie_publish_prepare prepare;
+	struct stack_depot_trie_alloc_txn *txn;
+	u32 id;
+	void *storage;
+	unsigned int nr_used;
+	int ret;
+
+	if (!root || !req || !req->txn || !tail || !leaf_id)
+		return -EINVAL;
+	txn = req->txn;
+	*tail = NULL;
+	*leaf_id = 0;
+
+	ret = __stack_depot_trie_alloc_txn_reserve(req);
+	if (ret)
+		return ret;
+	storage = req->storage ? *req->storage : NULL;
+
+	prepare.fn = __stack_depot_trie_side_prepare;
+	prepare.ctx = &txn->side;
+	id = txn->leaf_id;
+	ret = __stack_depot_trie_insert_append_prepare(root, NULL, id, entries,
+						       nr_entries, req->node_slots,
+						       req->nr_node_slots, req->child_slots,
+						       req->nr_child_slots, scratch,
+						       nr_scratch, storage, req->storage_size,
+						       &prepare, tail, &nr_used);
+	if (ret)
+		goto rollback;
+
+	*leaf_id = __stack_depot_trie_alloc_txn_commit(txn);
+	return 0;
+
+rollback:
+	__stack_depot_trie_alloc_txn_rollback(req->txn);
+	trie_alloc_request_clear_outputs(req);
+	*tail = NULL;
+	return ret;
+}
+
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
 {
 	if (!txn)
