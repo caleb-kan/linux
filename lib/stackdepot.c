@@ -745,6 +745,54 @@ __stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **p
 	return 0;
 }
 
+static void trie_alloc_request_clear_outputs(struct stack_depot_trie_alloc_request *req)
+{
+	unsigned int i;
+
+	if (!req)
+		return;
+
+	if (req->storage)
+		*req->storage = NULL;
+	for (i = 0; req->node_slots && i < req->nr_node_slots; i++)
+		req->node_slots[i].node = NULL;
+	for (i = 0; req->child_slots && i < req->nr_child_slots; i++)
+		req->child_slots[i].array = NULL;
+}
+
+int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req)
+{
+	struct stack_depot_trie_pool_request pool_req = {};
+	int ret;
+
+	if (!req || !req->txn)
+		return -EINVAL;
+	if (req->txn->leaf_id || req->txn->pool.size || req->txn->side.nr_updates)
+		return -EINVAL;
+
+	pool_req.node_slots = req->node_slots;
+	pool_req.nr_node_slots = req->nr_node_slots;
+	pool_req.child_slots = req->child_slots;
+	pool_req.nr_child_slots = req->nr_child_slots;
+	pool_req.storage = req->storage;
+	pool_req.storage_size = req->storage_size;
+	pool_req.prealloc = req->pool_prealloc;
+	pool_req.mark = &req->txn->pool;
+
+	ret = __stack_depot_trie_pool_carve(&pool_req);
+	if (ret)
+		return ret;
+
+	ret = __stack_depot_trie_alloc_txn_id(req->txn, req->side_prealloc);
+	if (ret) {
+		__stack_depot_trie_alloc_txn_rollback(req->txn);
+		trie_alloc_request_clear_outputs(req);
+		return ret;
+	}
+
+	return 0;
+}
+
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
 {
 	if (!txn)

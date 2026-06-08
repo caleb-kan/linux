@@ -42,9 +42,9 @@ struct stack_depot_trie_root {
 };
 
 struct stack_depot_trie_lookup {
-	enum stack_depot_trie_lookup_status status;
 	const void *parent;
 	const void *node;
+	enum stack_depot_trie_lookup_status status;
 	unsigned int matched;
 };
 
@@ -73,28 +73,40 @@ struct stack_depot_trie_side_prepare {
 
 struct stack_depot_trie_pool_mark {
 	void *pool;
-	unsigned int pool_index;
 	size_t prev_offset;
 	size_t offset;
 	size_t size;
+	unsigned int pool_index;
 	bool added_pool;
 };
 
 struct stack_depot_trie_pool_request {
 	struct stack_depot_trie_node_slot *node_slots;
-	unsigned int nr_node_slots;
 	struct stack_depot_trie_child_array_slot *child_slots;
-	unsigned int nr_child_slots;
 	void **storage;
-	size_t storage_size;
 	void **prealloc;
 	struct stack_depot_trie_pool_mark *mark;
+	size_t storage_size;
+	unsigned int nr_node_slots;
+	unsigned int nr_child_slots;
 };
 
 struct stack_depot_trie_alloc_txn {
 	struct stack_depot_trie_side_prepare side;
 	struct stack_depot_trie_pool_mark pool;
 	u32 leaf_id;
+};
+
+struct stack_depot_trie_alloc_request {
+	struct stack_depot_trie_alloc_txn *txn;
+	struct stack_depot_trie_node_slot *node_slots;
+	unsigned int nr_node_slots;
+	struct stack_depot_trie_child_array_slot *child_slots;
+	unsigned int nr_child_slots;
+	void **storage;
+	size_t storage_size;
+	void **pool_prealloc;
+	void **side_prealloc;
 };
 
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
@@ -137,6 +149,7 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
 void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 int
 __stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc);
+int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int

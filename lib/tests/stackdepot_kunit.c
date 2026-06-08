@@ -1167,6 +1167,76 @@ static void stackdepot_trie_alloc_txn_id(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 0UL);
 }
 
+static void stackdepot_trie_alloc_txn_reserve(struct kunit *test)
+{
+	struct stack_depot_trie_node_slot node_slot = { .size = 1 };
+	struct stack_depot_trie_alloc_txn txn;
+	struct stack_depot_trie_alloc_request req;
+	void *side_prealloc = NULL;
+	void *storage = NULL;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+	if (__stack_depot_trie_side_table_prealloc_needed()) {
+		side_prealloc = __stack_depot_trie_side_table_prealloc(GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, side_prealloc);
+	}
+
+	__stack_depot_trie_alloc_txn_init(&txn);
+	req = (struct stack_depot_trie_alloc_request) {
+		.txn = &txn,
+		.node_slots = &node_slot,
+		.nr_node_slots = 1,
+		.storage = &storage,
+		.storage_size = 1,
+		.side_prealloc = &side_prealloc,
+	};
+	ret = __stack_depot_trie_alloc_txn_reserve(&req);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NULL(test, side_prealloc);
+	KUNIT_EXPECT_EQ(test, txn.leaf_id, 1U);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 1UL);
+	KUNIT_EXPECT_NOT_NULL(test, node_slot.node);
+	KUNIT_EXPECT_NOT_NULL(test, storage);
+
+	__stack_depot_trie_alloc_txn_rollback(&txn);
+	KUNIT_EXPECT_EQ(test, txn.leaf_id, 0U);
+	KUNIT_EXPECT_EQ(test, txn.pool.size, 0UL);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 0UL);
+}
+
+static void stackdepot_trie_alloc_txn_reserve_id_failure(struct kunit *test)
+{
+	struct stack_depot_trie_node_slot node_slot = { .size = 1 };
+	struct stack_depot_trie_alloc_txn txn;
+	struct stack_depot_trie_pool_mark mark;
+	struct stack_depot_trie_alloc_request req;
+	void *storage = NULL;
+	void *again;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+	__stack_depot_trie_alloc_txn_init(&txn);
+	req = (struct stack_depot_trie_alloc_request) {
+		.txn = &txn,
+		.node_slots = &node_slot,
+		.nr_node_slots = 1,
+		.storage = &storage,
+		.storage_size = 1,
+	};
+	ret = __stack_depot_trie_alloc_txn_reserve(&req);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_EQ(test, txn.leaf_id, 0U);
+	KUNIT_EXPECT_EQ(test, txn.pool.size, 0UL);
+	KUNIT_EXPECT_NULL(test, node_slot.node);
+	KUNIT_EXPECT_NULL(test, storage);
+	again = __stack_depot_trie_pool_carve_current(1, &mark);
+	KUNIT_ASSERT_NOT_NULL(test, again);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&mark));
+}
+
 static void stackdepot_trie_alloc_txn_rollback(struct kunit *test)
 {
 	struct stack_depot_trie_leaf_update updates[2];
@@ -4787,6 +4857,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_pool_carve_uses_prealloc),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_id),
+	KUNIT_CASE(stackdepot_trie_alloc_txn_reserve),
+	KUNIT_CASE(stackdepot_trie_alloc_txn_reserve_id_failure),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_rollback),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
