@@ -226,6 +226,7 @@ u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 
 static const void ***trie_side_table_chunks;
 static DEFINE_RAW_SPINLOCK(trie_side_table_lock);
+static DEFINE_RAW_SPINLOCK(trie_alloc_lock);
 static unsigned int trie_side_table_high_water;
 static unsigned int trie_side_table_nr_chunks;
 static unsigned int trie_side_table_top_size;
@@ -819,6 +820,7 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 {
 	struct stack_depot_trie_publish_prepare prepare;
 	struct stack_depot_trie_alloc_txn *txn;
+	unsigned long flags;
 	u32 id;
 	void *storage;
 	unsigned int nr_used;
@@ -830,9 +832,12 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 	*tail = NULL;
 	*leaf_id = 0;
 
+	if (!raw_spin_trylock_irqsave(&trie_alloc_lock, flags))
+		return -EBUSY;
+
 	ret = __stack_depot_trie_alloc_txn_reserve(req);
 	if (ret)
-		return ret;
+		goto out_unlock;
 	storage = req->storage ? *req->storage : NULL;
 
 	prepare.fn = __stack_depot_trie_side_prepare;
@@ -848,12 +853,15 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 		goto rollback;
 
 	*leaf_id = __stack_depot_trie_alloc_txn_commit(txn);
-	return 0;
+	ret = 0;
+	goto out_unlock;
 
 rollback:
 	__stack_depot_trie_alloc_txn_rollback(req->txn);
 	trie_alloc_request_clear_outputs(req);
 	*tail = NULL;
+out_unlock:
+	raw_spin_unlock_irqrestore(&trie_alloc_lock, flags);
 	return ret;
 }
 
