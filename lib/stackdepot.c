@@ -729,6 +729,22 @@ void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn)
 		memset(txn, 0, sizeof(*txn));
 }
 
+int
+__stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc)
+{
+	u32 leaf_id;
+
+	if (!txn || txn->leaf_id)
+		return -EINVAL;
+
+	leaf_id = __stack_depot_trie_side_table_alloc_id(prealloc);
+	if (!leaf_id)
+		return -ENOSPC;
+
+	txn->leaf_id = leaf_id;
+	return 0;
+}
+
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
 {
 	if (!txn)
