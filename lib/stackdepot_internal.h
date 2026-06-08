@@ -72,9 +72,12 @@ struct stack_depot_trie_side_prepare {
 };
 
 struct stack_depot_trie_pool_mark {
+	void *pool;
 	unsigned int pool_index;
+	size_t prev_offset;
 	size_t offset;
 	size_t size;
+	bool added_pool;
 };
 
 struct stack_depot_trie_pool_request {
@@ -84,6 +87,7 @@ struct stack_depot_trie_pool_request {
 	unsigned int nr_child_slots;
 	void **storage;
 	size_t storage_size;
+	void **prealloc;
 	struct stack_depot_trie_pool_mark *mark;
 };
 

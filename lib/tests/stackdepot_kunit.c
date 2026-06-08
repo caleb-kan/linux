@@ -1103,6 +1103,44 @@ static void stackdepot_trie_pool_carve_slots_rejects_bad_inputs(struct kunit *te
 	KUNIT_EXPECT_EQ(test, mark.size, 0UL);
 }
 
+static void stackdepot_trie_pool_carve_uses_prealloc(struct kunit *test)
+{
+	struct stack_depot_trie_pool_mark first_mark;
+	struct stack_depot_trie_pool_mark second_mark;
+	void *first_storage = NULL;
+	void *second_storage = NULL;
+	void *prealloc;
+	struct stack_depot_trie_pool_request first = {
+		.storage = &first_storage,
+		.storage_size = DEPOT_POOL_SIZE,
+		.prealloc = &prealloc,
+		.mark = &first_mark,
+	};
+	struct stack_depot_trie_pool_request second = {
+		.storage = &second_storage,
+		.storage_size = DEPOT_POOL_SIZE,
+		.mark = &second_mark,
+	};
+	int ret;
+
+	stackdepot_trie_pool_seed_current_pool(test);
+	prealloc = __stack_depot_trie_pool_prealloc(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, prealloc);
+
+	ret = __stack_depot_trie_pool_carve(&first);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	__stack_depot_trie_pool_free_prealloc(prealloc);
+	KUNIT_ASSERT_NOT_NULL(test, first_storage);
+	KUNIT_ASSERT_TRUE(test, first_mark.added_pool);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&first_mark));
+
+	ret = __stack_depot_trie_pool_carve(&second);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, second_storage, first_storage);
+	KUNIT_ASSERT_TRUE(test, second_mark.added_pool);
+	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&second_mark));
+}
+
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
@@ -4676,6 +4714,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_pool_carve_current_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots),
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots_rejects_bad_inputs),
+	KUNIT_CASE(stackdepot_trie_pool_carve_uses_prealloc),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

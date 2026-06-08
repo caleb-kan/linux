@@ -153,6 +153,8 @@ static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
 /* Count helpers rely on saturated refcounts looking negative. */
 static_assert(REFCOUNT_SATURATED < 0);
 
+static bool depot_init_pool(void **prealloc);
+
 static u32 stack_depot_pool_index_mask(void)
 {
 	return (1U << DEPOT_POOL_INDEX_BITS) - 1;
@@ -607,10 +609,23 @@ bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mar
 
 	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
 		return false;
-	if (mark->pool_index == pools_num - 1 && pool_offset == end) {
+	if (mark->pool_index != pools_num - 1 || pool_offset != end)
+		goto out;
+	if (mark->added_pool) {
+		if (mark->offset || stack_pools[mark->pool_index] != mark->pool)
+			goto out;
+		if (new_pool && new_pool != STACK_DEPOT_POISON)
+			goto out;
+		stack_pools[mark->pool_index] = NULL;
+		WRITE_ONCE(pools_num, mark->pool_index);
+		pool_offset = mark->prev_offset;
+		WRITE_ONCE(new_pool, mark->pool);
+		ret = true;
+	} else {
 		pool_offset = mark->offset;
 		ret = true;
 	}
+out:
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 
 	return ret;
@@ -660,15 +675,27 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 
 	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
 		return -EBUSY;
-	if (!stack_pools || pools_num < 1) {
+	if (!stack_pools) {
 		ret = -ENOSPC;
 		goto out;
+	}
+	if (pools_num < 1) {
+		req->mark->prev_offset = pool_offset;
+		if (!depot_init_pool(req->prealloc)) {
+			ret = -ENOSPC;
+			goto out;
+		}
+		req->mark->added_pool = true;
 	}
 	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
 		goto out;
 	if (total > DEPOT_POOL_SIZE - pool_offset) {
-		ret = -ENOSPC;
-		goto out;
+		req->mark->prev_offset = pool_offset;
+		if (!depot_init_pool(req->prealloc)) {
+			ret = -ENOSPC;
+			goto out;
+		}
+		req->mark->added_pool = true;
 	}
 
 	req->mark->pool_index = pools_num - 1;
@@ -677,6 +704,7 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 		goto out;
 
 	req->mark->offset = pool_offset;
+	req->mark->pool = pool;
 	req->mark->size = total;
 	offset = pool_offset;
 	for (i = 0; i < req->nr_node_slots; i++) {
