@@ -1141,6 +1141,48 @@ static void stackdepot_trie_pool_carve_uses_prealloc(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&second_mark));
 }
 
+static void stackdepot_trie_pool_carve_no_prealloc_rollover(struct kunit *test)
+{
+	struct stack_depot_trie_pool_mark marks[2];
+	void *storage[ARRAY_SIZE(marks)];
+	unsigned int consumed = 0;
+	void *failed_storage = NULL;
+	struct stack_depot_trie_pool_mark failed_mark;
+	struct stack_depot_trie_pool_request failed = {
+		.storage = &failed_storage,
+		.storage_size = 1,
+		.mark = &failed_mark,
+	};
+	unsigned int i;
+	int ret;
+
+	stackdepot_trie_pool_seed_current_pool(test);
+	for (i = 0; i < ARRAY_SIZE(marks); i++) {
+		struct stack_depot_trie_pool_request req = {
+			.storage = &storage[i],
+			.storage_size = DEPOT_POOL_SIZE,
+			.mark = &marks[i],
+		};
+
+		storage[i] = NULL;
+		ret = __stack_depot_trie_pool_carve(&req);
+		if (ret)
+			break;
+		KUNIT_ASSERT_NOT_NULL(test, storage[i]);
+		consumed++;
+	}
+
+	failed.storage_size = DEPOT_POOL_SIZE;
+	ret = __stack_depot_trie_pool_carve(&failed);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_NULL(test, failed_storage);
+	KUNIT_EXPECT_EQ(test, failed_mark.size, 0UL);
+
+	while (consumed--)
+		KUNIT_ASSERT_TRUE(test,
+				  __stack_depot_trie_pool_try_rollback(&marks[consumed]));
+}
+
 static void stackdepot_trie_alloc_txn_id(struct kunit *test)
 {
 	struct stack_depot_trie_alloc_txn txn;
@@ -5073,6 +5115,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots),
 	KUNIT_CASE(stackdepot_trie_pool_carve_slots_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_trie_pool_carve_uses_prealloc),
+	KUNIT_CASE(stackdepot_trie_pool_carve_no_prealloc_rollover),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_id),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_reserve),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_reserve_id_failure),
