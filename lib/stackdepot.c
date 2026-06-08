@@ -537,6 +537,23 @@ size_t __stack_depot_trie_pool_alloc_size(size_t size)
 	return aligned <= DEPOT_POOL_SIZE ? aligned : 0;
 }
 
+void *__stack_depot_trie_pool_prealloc(gfp_t gfp_flags)
+{
+	struct page *page;
+
+	if (!gfpflags_allow_spinning(gfp_flags))
+		return NULL;
+
+	page = alloc_pages(gfp_nested_mask(gfp_flags), DEPOT_POOL_ORDER);
+	return page ? page_address(page) : NULL;
+}
+
+void __stack_depot_trie_pool_free_prealloc(void *prealloc)
+{
+	if (prealloc)
+		free_pages((unsigned long)prealloc, DEPOT_POOL_ORDER);
+}
+
 void *
 __stack_depot_trie_pool_carve_current(size_t size,
 				      struct stack_depot_trie_pool_mark *mark)

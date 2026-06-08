@@ -934,6 +934,18 @@ static void stackdepot_trie_pool_alloc_size(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_pool_alloc_size(SIZE_MAX), 0UL);
 }
 
+static void stackdepot_trie_pool_prealloc(struct kunit *test)
+{
+	void *prealloc;
+
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_pool_prealloc(0));
+	prealloc = __stack_depot_trie_pool_prealloc(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, prealloc);
+	KUNIT_EXPECT_TRUE(test, IS_ALIGNED((unsigned long)prealloc, PAGE_SIZE));
+	__stack_depot_trie_pool_free_prealloc(prealloc);
+	__stack_depot_trie_pool_free_prealloc(NULL);
+}
+
 static void stackdepot_trie_pool_seed_current_pool(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1234567800990000UL };
@@ -4658,6 +4670,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_extra_update),
 	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_null_leaf),
 	KUNIT_CASE(stackdepot_trie_pool_alloc_size),
+	KUNIT_CASE(stackdepot_trie_pool_prealloc),
 	KUNIT_CASE(stackdepot_trie_pool_carve_current),
 	KUNIT_CASE(stackdepot_trie_pool_rollback_requires_lifo),
 	KUNIT_CASE(stackdepot_trie_pool_carve_current_rejects_bad_inputs),
