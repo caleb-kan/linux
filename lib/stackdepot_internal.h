@@ -19,10 +19,10 @@ enum stack_depot_trie_lookup_status {
 };
 
 struct stack_depot_frame_run {
-	enum stack_depot_frame_mode mode;
-	u8 prefix_id;
-	unsigned int nr_entries;
 	size_t bytes;
+	unsigned int nr_entries;
+	u8 mode;
+	u8 prefix_id;
 };
 
 struct stack_depot_trie_node_slot {
@@ -100,13 +100,13 @@ struct stack_depot_trie_alloc_txn {
 struct stack_depot_trie_alloc_request {
 	struct stack_depot_trie_alloc_txn *txn;
 	struct stack_depot_trie_node_slot *node_slots;
-	unsigned int nr_node_slots;
 	struct stack_depot_trie_child_array_slot *child_slots;
-	unsigned int nr_child_slots;
 	void **storage;
-	size_t storage_size;
 	void **pool_prealloc;
 	void **side_prealloc;
+	size_t storage_size;
+	unsigned int nr_node_slots;
+	unsigned int nr_child_slots;
 };
 
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
@@ -150,6 +150,7 @@ void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 int
 __stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
+u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn);
 void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int

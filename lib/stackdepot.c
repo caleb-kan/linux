@@ -575,6 +575,7 @@ __stack_depot_trie_pool_carve_current(size_t size,
 
 	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
 		return NULL;
+	printk_deferred_enter();
 	if (!stack_pools || pools_num < 1)
 		goto out;
 	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
@@ -592,6 +593,7 @@ __stack_depot_trie_pool_carve_current(size_t size,
 	ptr = pool + pool_offset;
 	pool_offset += alloc_size;
 out:
+	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 	return ptr;
 }
@@ -675,6 +677,7 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 
 	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
 		return -EBUSY;
+	printk_deferred_enter();
 	if (!stack_pools) {
 		ret = -ENOSPC;
 		goto out;
@@ -719,6 +722,7 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 	pool_offset += total;
 	ret = 0;
 out:
+	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 	return ret;
 }
@@ -791,6 +795,18 @@ int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *
 	}
 
 	return 0;
+}
+
+u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
+{
+	u32 leaf_id;
+
+	if (!txn)
+		return 0;
+
+	leaf_id = txn->leaf_id;
+	__stack_depot_trie_alloc_txn_init(txn);
+	return leaf_id;
 }
 
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
@@ -923,6 +939,8 @@ static void init_stack_table(unsigned long entries)
 int __init stack_depot_early_init(void)
 {
 	unsigned long entries = 0;
+	unsigned long min = 1UL << STACK_BUCKET_NUMBER_ORDER_MIN;
+	unsigned long max = 1UL << STACK_BUCKET_NUMBER_ORDER_MAX;
 
 	/* This function must be called only once, from mm_init(). */
 	if (WARN_ON(__stack_depot_early_init_passed))
@@ -960,15 +978,10 @@ int __init stack_depot_early_init(void)
 	if (stack_bucket_number_order)
 		entries = 1UL << stack_bucket_number_order;
 	pr_info("allocating hash table via alloc_large_system_hash\n");
-	stack_table = alloc_large_system_hash("stackdepot",
-						sizeof(struct list_head),
-						entries,
-						STACK_HASH_TABLE_SCALE,
-						HASH_EARLY,
-						NULL,
-						&stack_hash_mask,
-						1UL << STACK_BUCKET_NUMBER_ORDER_MIN,
-						1UL << STACK_BUCKET_NUMBER_ORDER_MAX);
+	stack_table = alloc_large_system_hash("stackdepot", sizeof(*stack_table),
+					      entries, STACK_HASH_TABLE_SCALE,
+					      HASH_EARLY, NULL, &stack_hash_mask,
+					      min, max);
 	if (!stack_table) {
 		pr_err("hash table allocation failed, disabling\n");
 		stack_depot_disabled = true;
@@ -1200,7 +1213,8 @@ static inline size_t depot_stack_record_size(struct stack_record *s, unsigned in
 
 /* Allocates a new stack in a stack depot pool. */
 static struct stack_record *
-depot_alloc_stack(unsigned long *entries, unsigned int nr_entries, u32 hash, depot_flags_t flags, void **prealloc)
+depot_alloc_stack(unsigned long *entries, unsigned int nr_entries, u32 hash,
+		  depot_flags_t flags, void **prealloc)
 {
 	struct stack_record *stack = NULL;
 	size_t record_size;
@@ -1342,9 +1356,8 @@ static inline u32 hash_stack(unsigned long *entries, unsigned int size)
  * Non-instrumented version of memcmp().
  * Does not check the lexicographical order, only the equality.
  */
-static inline
-int stackdepot_memcmp(const unsigned long *u1, const unsigned long *u2,
-			unsigned int n)
+static inline int stackdepot_memcmp(const unsigned long *u1,
+				    const unsigned long *u2, unsigned int n)
 {
 	for ( ; n-- ; u1++, u2++) {
 		if (*u1 != *u2)
@@ -1630,7 +1643,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 
 		underflow = count > (unsigned int)old;
 		if (underflow) {
-			WARN_RATELIMIT(1, "stack depot count underflow\n");
+			WARN_RATELIMIT(underflow, "stack depot count underflow\n");
 			return false;
 		}
 
@@ -2876,7 +2889,8 @@ static int trie_publish_append_prepare(struct stack_depot_trie_root *root,
 		slot = &parent->children;
 	}
 
-	old_array = READ_ONCE(*slot);
+	/* Pairs with append publication's smp_store_release(). */
+	old_array = smp_load_acquire(slot);
 	old_size = old_array ?
 		__stack_depot_trie_child_array_size(old_array->nr_children) : 0;
 	new_size = old_array ? old_array->nr_children + 1 : 1;
