@@ -18,10 +18,12 @@
 #include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/jhash.h>
+#include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/kmsan.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
 #include <linux/poison.h>
@@ -52,6 +54,50 @@ static unsigned int stack_max_pools __read_mostly =
 static bool stack_depot_disabled;
 static bool __stack_depot_early_init_requested __initdata = IS_ENABLED(CONFIG_STACKDEPOT_ALWAYS_INIT);
 static bool __stack_depot_early_init_passed __initdata;
+static DEFINE_STATIC_KEY_FALSE(stack_depot_trie_enabled);
+static bool stack_depot_trie_enabled_param;
+
+bool __stack_depot_trie_enabled(void)
+{
+	return static_branch_unlikely(&stack_depot_trie_enabled);
+}
+
+void __stack_depot_trie_set_enabled(bool enabled)
+{
+	if (READ_ONCE(stack_depot_trie_enabled_param) == enabled)
+		return;
+
+	WRITE_ONCE(stack_depot_trie_enabled_param, enabled);
+	if (enabled)
+		static_branch_enable(&stack_depot_trie_enabled);
+	else
+		static_branch_disable(&stack_depot_trie_enabled);
+}
+
+static int stack_depot_trie_enabled_param_set(const char *val,
+					      const struct kernel_param *kp)
+{
+	struct kernel_param tmp = *kp;
+	bool enabled;
+	int ret;
+
+	tmp.arg = &enabled;
+	ret = param_set_bool(val, &tmp);
+	if (ret)
+		return ret;
+
+	__stack_depot_trie_set_enabled(enabled);
+	return 0;
+}
+
+static const struct kernel_param_ops stack_depot_trie_enabled_param_ops = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = stack_depot_trie_enabled_param_set,
+	.get = param_get_bool,
+};
+module_param_cb(trie_enabled, &stack_depot_trie_enabled_param_ops,
+		&stack_depot_trie_enabled_param, 0644);
+MODULE_PARM_DESC(trie_enabled, "Enable stack depot trie storage");
 
 /* Use one hash table bucket per 16 KB of memory. */
 #define STACK_HASH_TABLE_SCALE 14

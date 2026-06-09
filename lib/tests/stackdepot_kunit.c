@@ -574,6 +574,35 @@ static void stackdepot_trie_handle_namespace(struct kunit *test)
 			(depot_stack_handle_t)0);
 }
 
+static void stackdepot_trie_disable_action(void *data)
+{
+	__stack_depot_trie_set_enabled(false);
+}
+
+static void stackdepot_trie_add_disable_action(struct kunit *test)
+{
+	int ret;
+
+	ret = kunit_add_action_or_reset(test, stackdepot_trie_disable_action, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+}
+
+static void stackdepot_trie_feature_flag(struct kunit *test)
+{
+	stackdepot_trie_add_disable_action(test);
+
+	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_enabled());
+
+	__stack_depot_trie_set_enabled(true);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_trie_enabled());
+
+	__stack_depot_trie_set_enabled(true);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_trie_enabled());
+
+	__stack_depot_trie_set_enabled(false);
+	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_enabled());
+}
+
 static void stackdepot_trie_side_table_destroy_action(void *data)
 {
 	__stack_depot_trie_side_table_destroy();
@@ -5422,6 +5451,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
 	KUNIT_CASE(stackdepot_count_helpers),
 	KUNIT_CASE(stackdepot_trie_handle_namespace),
+	KUNIT_CASE(stackdepot_trie_feature_flag),
 	KUNIT_CASE(stackdepot_trie_side_table_destroy_uninit),
 	KUNIT_CASE(stackdepot_trie_side_table_alloc_store_lookup),
 	KUNIT_CASE(stackdepot_trie_side_table_rejects_invalid_ids),
