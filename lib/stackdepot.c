@@ -798,6 +798,50 @@ int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *
 	return 0;
 }
 
+int
+__stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
+				  const unsigned long *entries,
+				  unsigned int nr_entries,
+				  struct stack_depot_trie_node_slot *node_slots,
+				  unsigned int nr_node_slots,
+				  struct stack_depot_trie_child_array_slot *child_slots,
+				  unsigned int nr_child_slots,
+				  struct stack_depot_trie_alloc_txn *txn,
+				  void **storage, void **pool_prealloc,
+				  void **side_prealloc,
+				  struct stack_depot_trie_alloc_request *req)
+{
+	unsigned int nr_child_used;
+	unsigned int nr_used;
+	size_t storage_size;
+	int ret;
+
+	if (!root || !txn || !storage || !req)
+		return -EINVAL;
+
+	ret = __stack_depot_trie_insert_plan(root, NULL, entries, nr_entries,
+					     node_slots, nr_node_slots, child_slots,
+					     nr_child_slots, &storage_size, &nr_used,
+					     &nr_child_used);
+	if (ret)
+		return ret;
+
+	__stack_depot_trie_alloc_txn_init(txn);
+	*storage = NULL;
+	*req = (struct stack_depot_trie_alloc_request) {
+		.txn = txn,
+		.node_slots = node_slots,
+		.child_slots = child_slots,
+		.storage = storage,
+		.pool_prealloc = pool_prealloc,
+		.side_prealloc = side_prealloc,
+		.storage_size = storage_size,
+		.nr_node_slots = nr_used,
+		.nr_child_slots = nr_child_used,
+	};
+	return 0;
+}
+
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
 {
 	u32 leaf_id;

@@ -1383,33 +1383,15 @@ static int txn_insert_plan(struct stack_depot_trie_root *root,
 			   struct stack_depot_trie_child_array_slot *child_slots,
 			   unsigned int nr_child_slots,
 			   struct stack_depot_trie_alloc_txn *txn,
-			   void **storage, void **side_prealloc,
+			   void **storage, void **pool_prealloc,
+			   void **side_prealloc,
 			   struct stack_depot_trie_alloc_request *req)
 {
-	unsigned int child_used;
-	unsigned int used;
-	size_t storage_size;
-	int ret;
-
-	ret = insert_plan(root, NULL, entries, nr_entries, node_slots,
-			  nr_node_slots, child_slots, nr_child_slots, &storage_size,
-			  &used, &child_used);
-	if (ret)
-		return ret;
-
-	__stack_depot_trie_alloc_txn_init(txn);
-	*storage = NULL;
-	*req = (struct stack_depot_trie_alloc_request) {
-		.txn = txn,
-		.node_slots = node_slots,
-		.nr_node_slots = used,
-		.child_slots = child_slots,
-		.nr_child_slots = child_used,
-		.storage = storage,
-		.storage_size = storage_size,
-		.side_prealloc = side_prealloc,
-	};
-	return 0;
+	return __stack_depot_trie_alloc_txn_plan(root, entries, nr_entries,
+					       node_slots, nr_node_slots,
+					       child_slots, nr_child_slots, txn,
+					       storage, pool_prealloc, side_prealloc,
+					       req);
 }
 
 static int txn_insert(struct stack_depot_trie_root *root,
@@ -1419,6 +1401,43 @@ static int txn_insert(struct stack_depot_trie_root *root,
 {
 	return __stack_depot_trie_alloc_txn_insert(root, req, entries, nr_entries,
 						 NULL, 0, tail, leaf_id);
+}
+
+static void stackdepot_trie_alloc_txn_plan(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL };
+	struct stack_depot_trie_child_array_slot child_slot;
+	struct stack_depot_trie_node_slot node_slot;
+	struct stack_depot_trie_alloc_request req;
+	struct stack_depot_trie_alloc_txn txn;
+	struct stack_depot_trie_root root = {};
+	void *pool_prealloc = (void *)0x1111UL;
+	void *side_prealloc = (void *)0x2222UL;
+	void *storage = (void *)0x3333UL;
+	int ret;
+
+	ret = txn_insert_plan(&root, entries, ARRAY_SIZE(entries), &node_slot, 1,
+			      &child_slot, 1, &txn, &storage, &pool_prealloc,
+			      &side_prealloc, &req);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_PTR_EQ(test, req.txn, &txn);
+	KUNIT_EXPECT_PTR_EQ(test, req.node_slots, &node_slot);
+	KUNIT_EXPECT_EQ(test, req.nr_node_slots, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, req.child_slots, &child_slot);
+	KUNIT_EXPECT_EQ(test, req.nr_child_slots, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, req.storage, &storage);
+	KUNIT_EXPECT_PTR_EQ(test, req.pool_prealloc, &pool_prealloc);
+	KUNIT_EXPECT_PTR_EQ(test, req.side_prealloc, &side_prealloc);
+	KUNIT_EXPECT_NE(test, req.storage_size, 0UL);
+	KUNIT_EXPECT_NULL(test, storage);
+	KUNIT_EXPECT_EQ(test, txn.leaf_id, 0U);
+	KUNIT_EXPECT_EQ(test, txn.pool.size, 0UL);
+	KUNIT_EXPECT_EQ(test, txn.side.nr_updates, 0U);
+
+	ret = txn_insert_plan(NULL, entries, ARRAY_SIZE(entries), &node_slot, 1,
+			      &child_slot, 1, &txn, &storage, &pool_prealloc,
+			      &side_prealloc, &req);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
 static void stackdepot_trie_alloc_txn_insert(struct kunit *test)
@@ -1448,7 +1467,7 @@ static void stackdepot_trie_alloc_txn_insert(struct kunit *test)
 	ret = txn_insert_plan(&root, entries, ARRAY_SIZE(entries), node_slots,
 			      ARRAY_SIZE(node_slots), child_slots,
 			      ARRAY_SIZE(child_slots), &txn, &storage,
-			      &side_prealloc, &req);
+			      NULL, &side_prealloc, &req);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	ret = txn_insert(&root, &req, entries, ARRAY_SIZE(entries), &tail, &leaf_id);
 	KUNIT_ASSERT_EQ(test, ret, 0);
@@ -1503,7 +1522,7 @@ static void stackdepot_trie_alloc_txn_insert_stale_plan(struct kunit *test)
 	ret = txn_insert_plan(&root, first, ARRAY_SIZE(first), fresh_node_slots,
 			      ARRAY_SIZE(fresh_node_slots), fresh_child_slots,
 			      ARRAY_SIZE(fresh_child_slots), &fresh_txn,
-			      &fresh_storage, &side_prealloc, &fresh_req);
+			      &fresh_storage, NULL, &side_prealloc, &fresh_req);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	ret = txn_insert(&root, &fresh_req, first, ARRAY_SIZE(first), &fresh_tail,
 			 &fresh_leaf_id);
@@ -1513,12 +1532,12 @@ static void stackdepot_trie_alloc_txn_insert_stale_plan(struct kunit *test)
 	ret = txn_insert_plan(&root, second, ARRAY_SIZE(second), node_slots,
 			      ARRAY_SIZE(node_slots), child_slots,
 			      ARRAY_SIZE(child_slots), &txn, &storage,
-			      &side_prealloc, &req);
+			      NULL, &side_prealloc, &req);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	ret = txn_insert_plan(&root, second, ARRAY_SIZE(second), fresh_node_slots,
 			      ARRAY_SIZE(fresh_node_slots), fresh_child_slots,
 			      ARRAY_SIZE(fresh_child_slots), &fresh_txn,
-			      &fresh_storage, &side_prealloc, &fresh_req);
+			      &fresh_storage, NULL, &side_prealloc, &fresh_req);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	ret = txn_insert(&root, &fresh_req, second, ARRAY_SIZE(second), &fresh_tail,
 			 &fresh_leaf_id);
@@ -5121,6 +5140,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_alloc_txn_reserve_id_failure),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_commit),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_rollback),
+	KUNIT_CASE(stackdepot_trie_alloc_txn_plan),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert_stale_plan),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),

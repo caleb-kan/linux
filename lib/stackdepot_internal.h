@@ -149,6 +149,18 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
 void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 int
 __stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc);
+int
+__stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
+				  const unsigned long *entries,
+				  unsigned int nr_entries,
+				  struct stack_depot_trie_node_slot *node_slots,
+				  unsigned int nr_node_slots,
+				  struct stack_depot_trie_child_array_slot *child_slots,
+				  unsigned int nr_child_slots,
+				  struct stack_depot_trie_alloc_txn *txn,
+				  void **storage, void **pool_prealloc,
+				  void **side_prealloc,
+				  struct stack_depot_trie_alloc_request *req);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
 int
