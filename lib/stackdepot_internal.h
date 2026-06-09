@@ -172,13 +172,17 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  void **storage, void **pool_prealloc,
 				  void **side_prealloc,
 				  struct stack_depot_trie_alloc_request *req);
-int
-__stack_depot_trie_alloc_workspace_plan(const struct stack_depot_trie_root *root,
+int __stack_depot_trie_workspace_plan(const struct stack_depot_trie_root *root,
+				      const unsigned long *entries,
+				      unsigned int nr_entries, void **pool_prealloc,
+				      void **side_prealloc,
+				      struct stack_depot_trie_alloc_workspace *workspace);
+int __stack_depot_trie_workspace_insert(struct stack_depot_trie_root *root,
 					const unsigned long *entries,
-					unsigned int nr_entries,
-					void **pool_prealloc,
+					unsigned int nr_entries, void **pool_prealloc,
 					void **side_prealloc,
-					struct stack_depot_trie_alloc_workspace *workspace);
+					struct stack_depot_trie_alloc_workspace *workspace,
+					const void **tail, u32 *leaf_id);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
 int

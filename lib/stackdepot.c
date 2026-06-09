@@ -271,7 +271,8 @@ trie_side_table_store_entry(const void **chunk, unsigned int slot, const void *e
 
 static void trie_side_table_clear_entry(const void **chunk, unsigned int slot)
 {
-	WRITE_ONCE(chunk[slot], NULL);
+	/* Pairs with trie_side_table_load_entry(). */
+	smp_store_release(&chunk[slot], NULL);
 }
 
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
@@ -842,13 +843,11 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 	return 0;
 }
 
-int
-__stack_depot_trie_alloc_workspace_plan(const struct stack_depot_trie_root *root,
-					const unsigned long *entries,
-					unsigned int nr_entries,
-					void **pool_prealloc,
-					void **side_prealloc,
-					struct stack_depot_trie_alloc_workspace *workspace)
+static int
+trie_ws_plan(const struct stack_depot_trie_root *root,
+	     const unsigned long *entries, unsigned int nr_entries,
+	     void **pool_prealloc, void **side_prealloc,
+	     struct stack_depot_trie_alloc_workspace *workspace)
 {
 	if (!workspace)
 		return -EINVAL;
@@ -859,6 +858,36 @@ __stack_depot_trie_alloc_workspace_plan(const struct stack_depot_trie_root *root
 			workspace->child_slots, ARRAY_SIZE(workspace->child_slots),
 			&workspace->txn, &workspace->storage, pool_prealloc,
 			side_prealloc, &workspace->req);
+}
+
+int __stack_depot_trie_workspace_plan(const struct stack_depot_trie_root *root,
+				      const unsigned long *entries,
+				      unsigned int nr_entries, void **pool_prealloc,
+				      void **side_prealloc,
+				      struct stack_depot_trie_alloc_workspace *workspace)
+{
+	return trie_ws_plan(root, entries, nr_entries, pool_prealloc, side_prealloc,
+			    workspace);
+}
+
+int __stack_depot_trie_workspace_insert(struct stack_depot_trie_root *root,
+					const unsigned long *entries,
+					unsigned int nr_entries, void **pool_prealloc,
+					void **side_prealloc,
+					struct stack_depot_trie_alloc_workspace *workspace,
+					const void **tail, u32 *leaf_id)
+{
+	void **pool = pool_prealloc;
+	void **side = side_prealloc;
+	int ret;
+
+	ret = trie_ws_plan(root, entries, nr_entries, pool, side, workspace);
+	if (ret)
+		return ret;
+
+	return __stack_depot_trie_alloc_txn_insert(root, &workspace->req, entries,
+			nr_entries, workspace->scratch, ARRAY_SIZE(workspace->scratch),
+			tail, leaf_id);
 }
 
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
