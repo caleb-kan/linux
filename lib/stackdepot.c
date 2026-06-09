@@ -563,6 +563,7 @@ int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 				      void **pool_prealloc,
 				      void **side_prealloc)
 {
+	bool needs_side_prealloc;
 	bool can_alloc;
 
 	if (!pool_prealloc || !side_prealloc || *pool_prealloc || *side_prealloc)
@@ -570,12 +571,13 @@ int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 
 	can_alloc = (depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC) &&
 		gfpflags_allow_spinning(alloc_flags);
+	needs_side_prealloc = __stack_depot_trie_side_table_prealloc_needed();
 	if (can_alloc && !READ_ONCE(new_pool))
 		*pool_prealloc = __stack_depot_trie_pool_prealloc(alloc_flags);
-	if (can_alloc && __stack_depot_trie_side_table_prealloc_needed())
+	if (can_alloc && needs_side_prealloc)
 		*side_prealloc = __stack_depot_trie_side_table_prealloc(alloc_flags);
 
-	if (__stack_depot_trie_side_table_prealloc_needed() && !*side_prealloc)
+	if (needs_side_prealloc && !*side_prealloc)
 		return -ENOSPC;
 	return 0;
 }
@@ -912,6 +914,72 @@ int __stack_depot_trie_workspace_insert(struct stack_depot_trie_root *root,
 			tail, leaf_id);
 }
 
+static int
+trie_prealloc(gfp_t alloc_flags, depot_flags_t depot_flags,
+	      void **pool_prealloc, void **side_prealloc)
+{
+	return __stack_depot_trie_alloc_prealloc(alloc_flags, depot_flags,
+					      pool_prealloc, side_prealloc);
+}
+
+static int trie_ws_insert(struct stack_depot_trie_root *root,
+			  const unsigned long *entries, unsigned int nr_entries,
+			  void **pool_prealloc, void **side_prealloc,
+			  struct stack_depot_trie_alloc_workspace *workspace,
+			  const void **tail, u32 *leaf_id)
+{
+	return __stack_depot_trie_workspace_insert(root, entries, nr_entries,
+					       pool_prealloc, side_prealloc,
+					       workspace, tail, leaf_id);
+}
+
+static depot_stack_handle_t
+trie_save_miss(struct stack_depot_trie_root *root, const unsigned long *entries,
+	       unsigned int nr_entries, gfp_t alloc_flags,
+	       depot_flags_t depot_flags,
+	       struct stack_depot_trie_alloc_workspace *workspace)
+{
+	depot_stack_handle_t handle = 0;
+	void *pool_prealloc = NULL;
+	void *side_prealloc = NULL;
+	const void *tail;
+	u32 leaf_id;
+	int ret;
+
+	if (!root || !entries || !nr_entries || !workspace)
+		return 0;
+	if (depot_flags & STACK_DEPOT_FLAG_GET)
+		return 0;
+	if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return 0;
+
+	ret = trie_prealloc(alloc_flags, depot_flags, &pool_prealloc,
+			    &side_prealloc);
+	if (ret)
+		goto out;
+
+	ret = trie_ws_insert(root, entries, nr_entries, &pool_prealloc,
+			     &side_prealloc, workspace, &tail, &leaf_id);
+	if (ret)
+		goto out;
+
+	handle = __stack_depot_trie_handle(leaf_id);
+out:
+	__stack_depot_trie_pool_free_prealloc(pool_prealloc);
+	__stack_depot_trie_side_table_free_prealloc(side_prealloc);
+	return handle;
+}
+
+depot_stack_handle_t
+__stack_depot_trie_save_miss(struct stack_depot_trie_root *root,
+			     const unsigned long *entries, unsigned int nr_entries,
+			     gfp_t alloc_flags, depot_flags_t depot_flags,
+			     struct stack_depot_trie_alloc_workspace *workspace)
+{
+	return trie_save_miss(root, entries, nr_entries, alloc_flags, depot_flags,
+			      workspace);
+}
+
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
 {
 	u32 leaf_id;
@@ -1232,6 +1300,8 @@ int stack_depot_init(void)
 	if (!stack_pools) {
 		pr_err("stack pools allocation failed, disabling\n");
 		kvfree(stack_table);
+		stack_table = NULL;
+		stack_hash_mask = 0;
 		stack_depot_disabled = true;
 		ret = -ENOMEM;
 	}

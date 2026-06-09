@@ -1470,6 +1470,16 @@ static int ws_insert_prealloc(struct stack_depot_trie_root *root,
 						 side, workspace, tail, leaf_id);
 }
 
+static depot_stack_handle_t save_miss(struct stack_depot_trie_root *root,
+				      const unsigned long *entries,
+				      unsigned int nr_entries, gfp_t gfp_flags,
+				      depot_flags_t depot_flags,
+				      struct stack_depot_trie_alloc_workspace *workspace)
+{
+	return __stack_depot_trie_save_miss(root, entries, nr_entries, gfp_flags,
+					  depot_flags, workspace);
+}
+
 static void stackdepot_trie_alloc_workspace_plan(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
@@ -1553,6 +1563,62 @@ static void stackdepot_trie_alloc_workspace_insert(struct kunit *test)
 	ret = ws_insert_prealloc(NULL, workspace, entries, ARRAY_SIZE(entries),
 				 &side_prealloc, &tail, &leaf_id);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
+static void stackdepot_trie_save_miss(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL };
+	struct stack_depot_trie_alloc_workspace *workspace;
+	struct stack_depot_trie_root root = {};
+	unsigned long out[ARRAY_SIZE(entries)] = {};
+	unsigned long scratch[ARRAY_SIZE(entries)];
+	depot_stack_handle_t handle;
+	const void *tail;
+	unsigned int fetched;
+	u32 leaf_id;
+
+	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+
+	handle = save_miss(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+			   STACK_DEPOT_FLAG_CAN_ALLOC, workspace);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	KUNIT_EXPECT_EQ(test, leaf_id, 1U);
+	tail = __stack_depot_trie_side_table_lookup(leaf_id);
+	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, entries, ARRAY_SIZE(entries)),
+			    tail);
+	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+
+	handle = save_miss(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+			   STACK_DEPOT_FLAG_GET, workspace);
+	KUNIT_EXPECT_EQ(test, handle, (depot_stack_handle_t)0);
+	handle = save_miss(NULL, entries, ARRAY_SIZE(entries), GFP_KERNEL, 0,
+			   workspace);
+	KUNIT_EXPECT_EQ(test, handle, (depot_stack_handle_t)0);
+}
+
+static void stackdepot_trie_save_miss_noalloc(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL };
+	struct stack_depot_trie_alloc_workspace *workspace;
+	struct stack_depot_trie_root root = {};
+	depot_stack_handle_t handle;
+
+	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+
+	handle = save_miss(&root, entries, ARRAY_SIZE(entries), GFP_NOWAIT, 0,
+			   workspace);
+	KUNIT_EXPECT_EQ(test, handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_NULL(test, find_leaf(&root, entries, ARRAY_SIZE(entries)));
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 0UL);
 }
 
 static void stackdepot_trie_alloc_txn_plan(struct kunit *test)
@@ -5295,6 +5361,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_alloc_txn_rollback),
 	KUNIT_CASE(stackdepot_trie_alloc_workspace_plan),
 	KUNIT_CASE(stackdepot_trie_alloc_workspace_insert),
+	KUNIT_CASE(stackdepot_trie_save_miss),
+	KUNIT_CASE(stackdepot_trie_save_miss_noalloc),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_plan),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert_stale_plan),
