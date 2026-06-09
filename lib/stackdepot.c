@@ -3518,9 +3518,13 @@ static int trie_plan_append_chain(unsigned int base_stack_len,
 static bool trie_node_depth_invalid(const struct stack_depot_trie_node *parent,
 				    const struct stack_depot_trie_node *node)
 {
+	const struct stack_depot_trie_node *node_parent;
 	u32 base = parent ? parent->stack_len : 0;
 
-	if (!node || node->parent != parent || !node->stack_len)
+	if (!node || !node->stack_len)
+		return true;
+	node_parent = trie_load_parent(node);
+	if (node_parent != parent)
 		return true;
 	if (parent && !parent->stack_len)
 		return true;
@@ -3537,11 +3541,16 @@ static bool trie_node_chain_depth_invalid(const struct stack_depot_trie_node *no
 {
 	unsigned int depth = 0;
 
-	for (; node; node = node->parent, depth++) {
+	while (node) {
+		const struct stack_depot_trie_node *parent;
+
 		if (depth >= CONFIG_STACKDEPOT_MAX_FRAMES)
 			return true;
-		if (trie_node_depth_invalid(node->parent, node))
+		parent = trie_load_parent(node);
+		if (trie_node_depth_invalid(parent, node))
 			return true;
+		node = parent;
+		depth++;
 	}
 
 	return false;
@@ -3801,7 +3810,42 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 		return 0;
 
 	memcpy(entries, scratch, total * sizeof(*entries));
+	kmsan_unpoison_memory(entries, total * sizeof(*entries));
 	return total;
+}
+
+static unsigned int trie_fetch_leaf(const void *leaf, unsigned long *entries,
+				    unsigned int max_entries, unsigned long *scratch,
+				    unsigned int nr_scratch)
+{
+	return __stack_depot_trie_fetch_into(leaf, entries, max_entries, scratch,
+					       nr_scratch);
+}
+
+unsigned int
+__stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
+				     unsigned long *entries,
+				     unsigned int max_entries,
+				     unsigned long *scratch,
+				     unsigned int nr_scratch)
+{
+	const void *leaf;
+	u32 leaf_id;
+	unsigned int nr_entries;
+
+	if (!handle || !entries || !scratch || !max_entries || !nr_scratch)
+		return 0;
+
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	if (!leaf_id)
+		return 0;
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	nr_entries = trie_fetch_leaf(leaf, entries, max_entries, scratch, nr_scratch);
+	rcu_read_unlock_sched_notrace();
+
+	return nr_entries;
 }
 
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
@@ -4511,6 +4555,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 	 * keep the handle valid while this helper copies from it.
 	 */
 	memcpy(entries, stack_entries, nr_entries * sizeof(*entries));
+	kmsan_unpoison_memory(entries, nr_entries * sizeof(*entries));
 	copied = nr_entries;
 
 out:

@@ -2,6 +2,7 @@
 #ifndef _STACKDEPOT_INTERNAL_H
 #define _STACKDEPOT_INTERNAL_H
 
+#include <linux/limits.h>
 #include <linux/stackdepot.h>
 #include <linux/types.h>
 
@@ -19,11 +20,13 @@ enum stack_depot_trie_lookup_status {
 };
 
 struct stack_depot_frame_run {
-	size_t bytes;
 	unsigned int nr_entries;
+	u16 bytes;
 	u8 mode;
 	u8 prefix_id;
 };
+
+static_assert(CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(unsigned long) <= U16_MAX);
 
 struct stack_depot_trie_node_slot {
 	void *node;
@@ -299,6 +302,11 @@ unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned int max_entries,
 					   unsigned long *scratch,
 					   unsigned int nr_scratch);
+unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
+						  unsigned long *entries,
+						  unsigned int max_entries,
+						  unsigned long *scratch,
+						  unsigned int nr_scratch);
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,
