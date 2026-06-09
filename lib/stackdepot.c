@@ -980,6 +980,34 @@ __stack_depot_trie_save_miss(struct stack_depot_trie_root *root,
 			      workspace);
 }
 
+depot_stack_handle_t
+__stack_depot_trie_save(struct stack_depot_trie_root *root,
+			const unsigned long *entries, unsigned int nr_entries,
+			gfp_t alloc_flags, depot_flags_t depot_flags,
+			struct stack_depot_trie_alloc_workspace *workspace)
+{
+	depot_stack_handle_t handle = 0;
+	const struct stack_depot_trie_node *leaf;
+
+	if (!root || !entries || !nr_entries || !workspace)
+		return 0;
+	if (depot_flags & STACK_DEPOT_FLAG_GET)
+		return 0;
+	if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return 0;
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_find_leaf(root, entries, nr_entries);
+	if (leaf)
+		handle = __stack_depot_trie_handle(leaf->leaf_id);
+	rcu_read_unlock_sched_notrace();
+
+	if (handle)
+		return handle;
+	return trie_save_miss(root, entries, nr_entries, alloc_flags, depot_flags,
+			      workspace);
+}
+
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
 {
 	u32 leaf_id;
