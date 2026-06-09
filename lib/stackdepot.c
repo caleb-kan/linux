@@ -2180,13 +2180,49 @@ stack_depot_frame_run_read_compressed(const struct stack_depot_frame_run *run,
 	return 0;
 }
 
-static int frame_run_read_to_scratch(const struct stack_depot_frame_run *run,
-				     const void *src, unsigned long *scratch,
-				     unsigned int nr_scratch)
+static int frame_run_validate_payload(const struct stack_depot_frame_run *run,
+				      const void *src)
 {
-	/* Private staging helper: the public frame-run read API rejects aliasing. */
-	return stack_depot_frame_run_read_compressed(run, src, scratch, scratch,
-						      nr_scratch);
+	unsigned long frame;
+	unsigned int i;
+
+	if (!src || stack_depot_frame_run_validate(run))
+		return -EINVAL;
+	if (run->mode == STACK_DEPOT_FRAME_RAW)
+		return 0;
+
+	for (i = 0; i < run->nr_entries; i++) {
+		u32 low;
+
+		memcpy(&low, (const char *)src + i * sizeof(low), sizeof(low));
+		if (!frame_decompress(run->prefix_id, low, &frame))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int frame_run_read_direct(const struct stack_depot_frame_run *run,
+				 const void *src, unsigned long *entries)
+{
+	unsigned int i;
+
+	if (!entries || frame_run_validate_payload(run, src))
+		return -EINVAL;
+	if (run->mode == STACK_DEPOT_FRAME_RAW) {
+		memcpy(entries, src, run->bytes);
+		return 0;
+	}
+
+	for (i = 0; i < run->nr_entries; i++) {
+		u32 low;
+
+		memcpy(&low, (const char *)src + i * sizeof(low), sizeof(low));
+		if (!frame_decompress(run->prefix_id, low, &entries[i]))
+			return -EINVAL;
+	}
+
+	return 0;
 }
 
 static bool stack_depot_ranges_overlap(const void *a, size_t a_size,
@@ -3815,71 +3851,65 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 
 unsigned int
 __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
-			      unsigned int max_entries, unsigned long *scratch,
-			      unsigned int nr_scratch)
+			      unsigned int max_entries)
 {
 	const struct stack_depot_trie_node *node = leaf;
 	unsigned int pos;
 	unsigned int total;
 	int ret;
 
-	if (!node || !entries || !scratch || !node->stack_len || !node->leaf_id)
+	if (!node || !entries || !node->stack_len || !node->leaf_id)
 		return 0;
 
 	total = node->stack_len;
-	if (max_entries < total || nr_scratch < total)
-		return 0;
-	if (stack_depot_ranges_overlap(entries, total * sizeof(*entries), scratch,
-				       total * sizeof(*scratch)))
+	if (max_entries < total)
 		return 0;
 
+	/* Validate first so failure cannot partially write the caller buffer. */
 	pos = total;
 	for (node = leaf; node; node = trie_load_parent(node)) {
-		if (stack_depot_frame_run_validate(&node->run))
+		if (frame_run_validate_payload(&node->run, node->data))
+			return 0;
+		if (stack_depot_ranges_overlap(entries, total * sizeof(*entries),
+					       node->data, node->run.bytes))
 			return 0;
 		if (node->stack_len != pos || node->run.nr_entries > pos)
 			return 0;
 		pos -= node->run.nr_entries;
-		/* nr_scratch >= total, and pos tracks the remaining prefix length. */
-		/* Decode directly into the staged output; node->data is separate. */
-		if (node->run.mode == STACK_DEPOT_FRAME_COMPRESSED)
-			ret = frame_run_read_to_scratch(&node->run, node->data,
-							&scratch[pos], nr_scratch - pos);
-		else
-			ret = frame_run_read(&node->run, node->data,
-					     node->run.bytes, &scratch[pos],
-					     nr_scratch - pos, NULL, 0);
+	}
+	if (pos)
+		return 0;
+
+	pos = total;
+	for (node = leaf; node; node = trie_load_parent(node)) {
+		pos -= node->run.nr_entries;
+		ret = frame_run_read_direct(&node->run, node->data, &entries[pos]);
 		if (ret)
 			return 0;
 	}
 	if (pos)
 		return 0;
 
-	memcpy(entries, scratch, total * sizeof(*entries));
 	kmsan_unpoison_memory(entries, total * sizeof(*entries));
 	return total;
 }
 
 static unsigned int trie_fetch_leaf(const void *leaf, unsigned long *entries,
-				    unsigned int max_entries, unsigned long *scratch,
-				    unsigned int nr_scratch)
+				    unsigned int max_entries)
 {
-	return __stack_depot_trie_fetch_into(leaf, entries, max_entries, scratch,
-					       nr_scratch);
+	return __stack_depot_trie_fetch_into(leaf, entries, max_entries);
 }
 
 unsigned int
 __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 				     unsigned long *entries,
-				     unsigned int max_entries,
-				     unsigned long *scratch,
-				     unsigned int nr_scratch)
+				     unsigned int max_entries)
 {
 	const void *leaf;
 	u32 leaf_id;
 	unsigned int nr_entries;
 
-	if (!handle || !entries || !scratch || !max_entries || !nr_scratch)
+	if (!handle || !entries || !max_entries)
 		return 0;
 
 	leaf_id = __stack_depot_trie_leaf_id(handle);
@@ -3888,7 +3918,7 @@ __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 
 	rcu_read_lock_sched_notrace();
 	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	nr_entries = trie_fetch_leaf(leaf, entries, max_entries, scratch, nr_scratch);
+	nr_entries = trie_fetch_leaf(leaf, entries, max_entries);
 	rcu_read_unlock_sched_notrace();
 
 	return nr_entries;

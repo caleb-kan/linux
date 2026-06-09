@@ -302,14 +302,10 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 			       unsigned int *nr_used, unsigned int *nr_child_used);
 unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned long *entries,
-					   unsigned int max_entries,
-					   unsigned long *scratch,
-					   unsigned int nr_scratch);
+					   unsigned int max_entries);
 unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 						  unsigned long *entries,
-						  unsigned int max_entries,
-						  unsigned long *scratch,
-						  unsigned int nr_scratch);
+						  unsigned int max_entries);
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,

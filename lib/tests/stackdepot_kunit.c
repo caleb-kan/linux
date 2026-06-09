@@ -58,11 +58,9 @@ tnode_init_slice(void *storage, size_t storage_size, const void *parent,
 }
 
 static unsigned int tfetch(const void *leaf, unsigned long *entries,
-			   unsigned int max_entries, unsigned long *scratch,
-			   unsigned int nr_scratch)
+			   unsigned int max_entries)
 {
-	return __stack_depot_trie_fetch_into(leaf, entries, max_entries, scratch,
-					       nr_scratch);
+	return __stack_depot_trie_fetch_into(leaf, entries, max_entries);
 }
 
 static unsigned int tmatch(const void *node, const unsigned long *entries,
@@ -1519,11 +1517,9 @@ static depot_stack_handle_t tsave(struct stack_depot_trie_root *root,
 }
 
 static unsigned int tfetch_handle(depot_stack_handle_t handle,
-				  unsigned long *entries, unsigned int max_entries,
-				  unsigned long *scratch, unsigned int nr_scratch)
+				  unsigned long *entries, unsigned int max_entries)
 {
-	return __stack_depot_trie_fetch_handle_into(handle, entries, max_entries,
-						  scratch, nr_scratch);
+	return __stack_depot_trie_fetch_handle_into(handle, entries, max_entries);
 }
 
 static void stackdepot_trie_alloc_workspace_plan(struct kunit *test)
@@ -1578,7 +1574,6 @@ static void stackdepot_trie_alloc_workspace_insert(struct kunit *test)
 	struct stack_depot_trie_alloc_workspace *workspace;
 	struct stack_depot_trie_root root = {};
 	unsigned long out[ARRAY_SIZE(entries)] = {};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	void *side_prealloc = NULL;
 	const void *tail = NULL;
 	unsigned int fetched;
@@ -1602,7 +1597,7 @@ static void stackdepot_trie_alloc_workspace_insert(struct kunit *test)
 			    tail);
 	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, entries, ARRAY_SIZE(entries)),
 			    tail);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 
@@ -1617,7 +1612,6 @@ static void stackdepot_trie_save_miss(struct kunit *test)
 	struct stack_depot_trie_alloc_workspace *workspace;
 	struct stack_depot_trie_root root = {};
 	unsigned long out[ARRAY_SIZE(entries)] = {};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	depot_stack_handle_t handle;
 	const void *tail;
 	unsigned int fetched;
@@ -1636,7 +1630,7 @@ static void stackdepot_trie_save_miss(struct kunit *test)
 	tail = __stack_depot_trie_side_table_lookup(leaf_id);
 	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, entries, ARRAY_SIZE(entries)),
 			    tail);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 
@@ -1703,7 +1697,6 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
 	struct stack_depot_trie_alloc_workspace *workspace;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long small[1] = { 0xdeadUL };
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t hash_handle;
@@ -1719,25 +1712,24 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	handle = tsave(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
 		       STACK_DEPOT_FLAG_CAN_ALLOC, workspace);
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
-	fetched = tfetch_handle(handle, out, ARRAY_SIZE(out), scratch,
-				ARRAY_SIZE(scratch));
+	fetched = tfetch_handle(handle, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 
-	fetched = tfetch_handle(handle, small, ARRAY_SIZE(small), scratch,
-				ARRAY_SIZE(scratch));
+	fetched = tfetch_handle(handle, small, ARRAY_SIZE(small));
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
-	invalid = tfetch_handle(0, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	invalid = tfetch_handle(0, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
-	invalid = tfetch_handle(handle, NULL, 0, scratch, ARRAY_SIZE(scratch));
+	invalid = tfetch_handle(handle, NULL, 0);
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
-	invalid = tfetch_handle(handle, out, ARRAY_SIZE(out), NULL, 0);
-	KUNIT_EXPECT_EQ(test, invalid, 0U);
+	fetched = tfetch_handle(handle, out, ARRAY_SIZE(out));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 
 	hash_handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
 	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
-	invalid = tfetch_handle(hash_handle, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	invalid = tfetch_handle(hash_handle, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
 }
 
@@ -1786,7 +1778,6 @@ static void stackdepot_trie_alloc_txn_insert(struct kunit *test)
 	struct stack_depot_trie_alloc_request req;
 	struct stack_depot_trie_alloc_txn txn;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	void *side_prealloc = NULL;
 	const void *tail = NULL;
@@ -1818,7 +1809,7 @@ static void stackdepot_trie_alloc_txn_insert(struct kunit *test)
 			    tail);
 	KUNIT_EXPECT_PTR_EQ(test, find_leaf(&root, entries, ARRAY_SIZE(entries)),
 			    tail);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 
@@ -2206,13 +2197,12 @@ static void stackdepot_frame_run_invalid_inputs(struct kunit *test)
 static void stackdepot_trie_node_raw_roundtrip(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	unsigned int fetched;
 	void *node;
 
 	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 7, &node);
-	fetched = tfetch(node, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(node, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
@@ -2222,7 +2212,6 @@ static void stackdepot_trie_node_parent_chain(struct kunit *test)
 	unsigned long root_entries[] = { 0x1000UL, 0x2000UL };
 	unsigned long child_entries[] = { 0x3000UL, 0x4000UL };
 	unsigned long expected[] = { 0x1000UL, 0x2000UL, 0x3000UL, 0x4000UL };
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	unsigned int fetched;
 	void *root;
@@ -2232,7 +2221,7 @@ static void stackdepot_trie_node_parent_chain(struct kunit *test)
 			&root);
 	trie_node_alloc(test, child_entries, ARRAY_SIZE(child_entries), root, 9,
 			&child);
-	fetched = tfetch(child, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(child, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
@@ -2242,7 +2231,6 @@ static void stackdepot_trie_node_slice_raw(struct kunit *test)
 	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
 	unsigned long expected[] = { 0x2000UL, 0x3000UL };
 	struct stack_depot_frame_run run;
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	unsigned int fetched;
 	void *source;
@@ -2260,7 +2248,7 @@ static void stackdepot_trie_node_slice_raw(struct kunit *test)
 	ret = tnode_init_slice(slice, size, NULL, 10, source, 1,
 			       ARRAY_SIZE(expected));
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	fetched = tfetch(slice, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(slice, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 	KUNIT_EXPECT_EQ(test, tmatch(slice, expected, ARRAY_SIZE(expected)),
@@ -2273,7 +2261,6 @@ static void stackdepot_trie_node_slice_parent_chain(struct kunit *test)
 	unsigned long entries[] = { 0x2000UL, 0x3000UL, 0x4000UL };
 	unsigned long expected[] = { 0x1000UL, 0x3000UL, 0x4000UL };
 	struct stack_depot_frame_run run;
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	unsigned int fetched;
 	void *root;
@@ -2293,7 +2280,7 @@ static void stackdepot_trie_node_slice_parent_chain(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, slice);
 	ret = tnode_init_slice(slice, size, root, 11, source, 1, 2);
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	fetched = tfetch(slice, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(slice, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
@@ -2314,7 +2301,6 @@ static void stackdepot_trie_node_slice_compressed(struct kunit *test)
 	};
 	unsigned long expected[] = { entries[1], entries[2] };
 	struct stack_depot_frame_run run;
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	unsigned int fetched;
 	void *source;
@@ -2333,7 +2319,7 @@ static void stackdepot_trie_node_slice_compressed(struct kunit *test)
 	ret = tnode_init_slice(slice, size, NULL, 12, source, 1,
 			       ARRAY_SIZE(expected));
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	fetched = tfetch(slice, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(slice, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
@@ -2450,7 +2436,6 @@ static void stackdepot_trie_append_chain_raw(struct kunit *test)
 	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
 	struct stack_depot_frame_run run;
 	struct stack_depot_trie_node_slot node_slots[1];
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	const void *head = NULL;
 	const void *tail = NULL;
@@ -2472,7 +2457,7 @@ static void stackdepot_trie_append_chain_raw(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, head, node_slots[0].node);
 	KUNIT_EXPECT_PTR_EQ(test, tail, node_slots[0].node);
 	KUNIT_EXPECT_EQ(test, used, 1U);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
@@ -2484,7 +2469,6 @@ static void stackdepot_trie_append_chain_parent(struct kunit *test)
 	unsigned long expected[] = { 0x1000UL, 0x2000UL, 0x3000UL };
 	struct stack_depot_frame_run run;
 	struct stack_depot_trie_node_slot node_slots[1];
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	const void *head = NULL;
 	const void *tail = NULL;
@@ -2508,7 +2492,7 @@ static void stackdepot_trie_append_chain_parent(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_PTR_EQ(test, head, tail);
 	KUNIT_EXPECT_EQ(test, used, 1U);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
@@ -3444,7 +3428,6 @@ static void stackdepot_trie_insert_append_descends_one_level(struct kunit *test)
 	struct stack_depot_trie_node_slot child_slot;
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(stack_entries)];
 	unsigned long out[ARRAY_SIZE(stack_entries)] = {};
 	const void *prefix = NULL;
 	const void *tail = NULL;
@@ -3479,7 +3462,7 @@ static void stackdepot_trie_insert_append_descends_one_level(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, tail);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(stack_entries));
 	KUNIT_EXPECT_MEMEQ(test, out, stack_entries, sizeof(stack_entries));
 }
@@ -3499,7 +3482,6 @@ static void stackdepot_trie_insert_append_descends_multiple_levels(struct kunit 
 	struct stack_depot_trie_node_slot third_slot;
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(full_stack)];
 	unsigned long out[ARRAY_SIZE(full_stack)] = {};
 	const void *first = NULL;
 	const void *second = NULL;
@@ -3543,7 +3525,7 @@ static void stackdepot_trie_insert_append_descends_multiple_levels(struct kunit 
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, tail);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(full_stack));
 	KUNIT_EXPECT_MEMEQ(test, out, full_stack, sizeof(full_stack));
 }
@@ -3614,7 +3596,6 @@ static void stackdepot_trie_insert_append_promotes_internal(struct kunit *test)
 	struct stack_depot_trie_node_slot promote_slot;
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	const void *children[1];
 	const void *tail = (const void *)1;
@@ -3645,7 +3626,7 @@ static void stackdepot_trie_insert_append_promotes_internal(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, child_array_find(root.children, entries[0]), tail);
 	KUNIT_EXPECT_PTR_EQ(test, tail, promote_slot.node);
 	KUNIT_EXPECT_EQ(test, used, 1U);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 	ret = lookup_step(&root, NULL, entries, ARRAY_SIZE(entries), &lookup);
@@ -3665,7 +3646,6 @@ static void stackdepot_trie_insert_append_descends_to_promote(struct kunit *test
 	struct stack_depot_trie_node_slot promote_slot;
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(stack_entries)];
 	unsigned long out[ARRAY_SIZE(stack_entries)] = {};
 	const void *root_children[1];
 	const void *tail = (const void *)1;
@@ -3710,7 +3690,7 @@ static void stackdepot_trie_insert_append_descends_to_promote(struct kunit *test
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, tail);
 	KUNIT_EXPECT_EQ(test, used, 1U);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(stack_entries));
 	KUNIT_EXPECT_MEMEQ(test, out, stack_entries, sizeof(stack_entries));
 }
@@ -3725,7 +3705,6 @@ static void stackdepot_trie_insert_append_promotes_with_children(struct kunit *t
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
 	unsigned long expected[] = { 0x1000UL, 0x2000UL };
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	const void *root_children[1];
 	const void *tail = NULL;
@@ -3770,7 +3749,7 @@ static void stackdepot_trie_insert_append_promotes_with_children(struct kunit *t
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, child);
 	KUNIT_EXPECT_EQ(test, used, 1U);
-	fetched = tfetch(child, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(child, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
@@ -3795,7 +3774,6 @@ static void stackdepot_trie_insert_append_splits_frame_runs(struct kunit *test)
 	struct stack_depot_trie_child_array_slot child_slots[2];
 	struct stack_depot_trie_child_array_slot root_array;
 	struct stack_depot_trie_root root = {};
-	unsigned long read_scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	u32 write_scratch[CONFIG_STACKDEPOT_MAX_FRAMES];
 	const void *tail = NULL;
@@ -3827,8 +3805,7 @@ static void stackdepot_trie_insert_append_splits_frame_runs(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, tail, node_slots[2].node);
 	KUNIT_EXPECT_PTR_EQ(test, child_array_find(root.children, entries[0]),
 			    node_slots[0].node);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), read_scratch,
-			 ARRAY_SIZE(read_scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
@@ -3845,7 +3822,6 @@ static void stackdepot_trie_insert_append_splits_child(struct kunit *test)
 	struct stack_depot_trie_node_slot node_slots[3];
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(old_entries)];
 	unsigned long out[ARRAY_SIZE(old_entries)] = {};
 	const void *old_head = NULL;
 	const void *old_tail;
@@ -3896,7 +3872,7 @@ static void stackdepot_trie_insert_append_splits_child(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	old_tail = lookup.node;
-	fetched = tfetch(old_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(old_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, old_entries, sizeof(old_entries));
 
@@ -3909,7 +3885,7 @@ static void stackdepot_trie_insert_append_splits_child(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, new_tail);
-	fetched = tfetch(new_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(new_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, new_entries, sizeof(new_entries));
 }
@@ -3925,7 +3901,6 @@ static void stackdepot_trie_insert_append_splits_prefix_leaf(struct kunit *test)
 	struct stack_depot_trie_node_slot node_slots[2];
 	struct stack_depot_trie_lookup lookup;
 	struct stack_depot_trie_root root = {};
-	unsigned long scratch[ARRAY_SIZE(old_entries)];
 	unsigned long out[ARRAY_SIZE(old_entries)] = {};
 	const void *old_head = NULL;
 	const void *old_tail;
@@ -3969,7 +3944,7 @@ static void stackdepot_trie_insert_append_splits_prefix_leaf(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, new_tail);
-	fetched = tfetch(new_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(new_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 1U);
 	KUNIT_EXPECT_MEMEQ(test, out, new_entries, sizeof(new_entries));
 
@@ -3981,8 +3956,7 @@ static void stackdepot_trie_insert_append_splits_prefix_leaf(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	memset(out, 0, sizeof(out));
-	fetched = tfetch(lookup.node, out, ARRAY_SIZE(out), scratch,
-			 ARRAY_SIZE(scratch));
+	fetched = tfetch(lookup.node, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, old_entries, sizeof(old_entries));
 }
@@ -4624,13 +4598,12 @@ static void stackdepot_trie_node_compressed_roundtrip(struct kunit *test)
 		0xffffffff81002000UL,
 #endif
 	};
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	unsigned int fetched;
 	void *node;
 
 	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 11, &node);
-	fetched = tfetch(node, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(node, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
@@ -4679,7 +4652,6 @@ static void stackdepot_trie_append_chain_splits_frame_runs(struct kunit *test)
 	};
 	struct stack_depot_trie_node_slot node_slots[3];
 	struct stack_depot_trie_child_array_slot child_slots[2];
-	unsigned long read_scratch[ARRAY_SIZE(entries)];
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	const void *child;
 	u32 write_scratch[CONFIG_STACKDEPOT_MAX_FRAMES];
@@ -4715,8 +4687,7 @@ static void stackdepot_trie_append_chain_splits_frame_runs(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, child, node_slots[1].node);
 	child = child_array_find(child_slots[1].array, entries[3]);
 	KUNIT_EXPECT_PTR_EQ(test, child, node_slots[2].node);
-	fetched = tfetch(tail, out, ARRAY_SIZE(out), read_scratch,
-			 ARRAY_SIZE(read_scratch));
+	fetched = tfetch(tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
 }
@@ -4830,7 +4801,6 @@ static void stackdepot_trie_fetch_rejects_bad_inputs(struct kunit *test)
 	unsigned long root_entries[] = { 0x3000UL };
 	unsigned long out[ARRAY_SIZE(entries)] = { 0xa5a5UL, 0xb6b6UL };
 	unsigned long expected[ARRAY_SIZE(out)];
-	unsigned long scratch[ARRAY_SIZE(entries)];
 	unsigned int fetched;
 	void *node;
 	void *root;
@@ -4838,18 +4808,19 @@ static void stackdepot_trie_fetch_rejects_bad_inputs(struct kunit *test)
 	memcpy(expected, out, sizeof(expected));
 	trie_node_alloc(test, root_entries, ARRAY_SIZE(root_entries), NULL, 0,
 			&root);
-	fetched = tfetch(root, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(root, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 0);
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(out));
 
 	trie_node_alloc(test, entries, ARRAY_SIZE(entries), NULL, 5, &node);
-	fetched = tfetch(node, out, ARRAY_SIZE(out) - 1, scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(node, out, ARRAY_SIZE(out) - 1);
 	KUNIT_EXPECT_EQ(test, fetched, 0);
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(out));
-	fetched = tfetch(node, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch) - 1);
-	KUNIT_EXPECT_EQ(test, fetched, 0);
-	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(out));
-	fetched = tfetch(NULL, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(node, out, ARRAY_SIZE(out));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+	memcpy(out, expected, sizeof(out));
+	fetched = tfetch(NULL, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 0);
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(out));
 }
@@ -5280,7 +5251,6 @@ static void stackdepot_trie_split_subtree_divergent_tail(struct kunit *test)
 	struct stack_depot_trie_child_array_slot child_slot;
 	struct stack_depot_trie_node_slot node_slots[3];
 	struct stack_depot_trie_lookup lookup;
-	unsigned long scratch[ARRAY_SIZE(old_entries)];
 	unsigned long out[ARRAY_SIZE(old_entries)] = {};
 	const void *new_tail = NULL;
 	const void *old_tail;
@@ -5309,11 +5279,11 @@ static void stackdepot_trie_split_subtree_divergent_tail(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	old_tail = lookup.node;
 	KUNIT_EXPECT_PTR_EQ(test, new_tail, node_slots[2].node);
-	fetched = tfetch(old_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(old_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, old_entries, sizeof(old_entries));
 	memset(out, 0, sizeof(out));
-	fetched = tfetch(new_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(new_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, new_entries, sizeof(new_entries));
 }
@@ -5325,7 +5295,6 @@ static void stackdepot_trie_split_subtree_prefix_leaf(struct kunit *test)
 	struct stack_depot_trie_child_array_slot child_slot;
 	struct stack_depot_trie_node_slot node_slots[2];
 	struct stack_depot_trie_lookup lookup;
-	unsigned long scratch[ARRAY_SIZE(old_entries)];
 	unsigned long out[ARRAY_SIZE(old_entries)] = {};
 	const void *new_tail = NULL;
 	const void *old_tail;
@@ -5350,7 +5319,7 @@ static void stackdepot_trie_split_subtree_prefix_leaf(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, used, 2U);
 	KUNIT_EXPECT_PTR_EQ(test, new_tail, prefix);
 
-	fetched = tfetch(prefix, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(prefix, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 1U);
 	KUNIT_EXPECT_MEMEQ(test, out, new_entries, sizeof(new_entries));
 
@@ -5359,7 +5328,7 @@ static void stackdepot_trie_split_subtree_prefix_leaf(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	old_tail = lookup.node;
 	memset(out, 0, sizeof(out));
-	fetched = tfetch(old_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(old_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, 2U);
 	KUNIT_EXPECT_MEMEQ(test, out, old_entries, sizeof(old_entries));
 }
@@ -5376,7 +5345,6 @@ static void stackdepot_trie_split_subtree_preserves_children(struct kunit *test)
 	struct stack_depot_trie_node_slot desc_slot;
 	struct stack_depot_trie_node_slot node_slots[3];
 	struct stack_depot_trie_lookup lookup;
-	unsigned long scratch[ARRAY_SIZE(expected)];
 	unsigned long out[ARRAY_SIZE(expected)] = {};
 	const void *desc_head = NULL;
 	const void *desc_tail = NULL;
@@ -5424,7 +5392,7 @@ static void stackdepot_trie_split_subtree_preserves_children(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, lookup.status, STACK_DEPOT_TRIE_LOOKUP_FOUND);
 	KUNIT_EXPECT_PTR_EQ(test, lookup.node, desc_tail);
-	fetched = tfetch(desc_tail, out, ARRAY_SIZE(out), scratch, ARRAY_SIZE(scratch));
+	fetched = tfetch(desc_tail, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(expected));
 	KUNIT_EXPECT_MEMEQ(test, out, expected, sizeof(expected));
 }
