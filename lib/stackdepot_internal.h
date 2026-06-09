@@ -148,6 +148,10 @@ size_t __stack_depot_trie_side_table_bytes(void);
 size_t __stack_depot_trie_pool_alloc_size(size_t size);
 void *__stack_depot_trie_pool_prealloc(gfp_t gfp_flags);
 void __stack_depot_trie_pool_free_prealloc(void *prealloc);
+int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
+				      depot_flags_t depot_flags,
+				      void **pool_prealloc,
+				      void **side_prealloc);
 /*
  * Best-effort current-pool helpers. They never allocate or roll over to a new
  * pool, and they use trylock so constrained contexts fail instead of blocking.

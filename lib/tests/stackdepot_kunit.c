@@ -946,6 +946,53 @@ static void stackdepot_trie_pool_prealloc(struct kunit *test)
 	__stack_depot_trie_pool_free_prealloc(NULL);
 }
 
+static int alloc_prealloc_flags(gfp_t gfp_flags, depot_flags_t depot_flags,
+				void **pool_prealloc, void **side_prealloc)
+{
+	return __stack_depot_trie_alloc_prealloc(gfp_flags, depot_flags,
+					      pool_prealloc, side_prealloc);
+}
+
+static int alloc_prealloc(gfp_t gfp_flags, void **pool_prealloc,
+			  void **side_prealloc)
+{
+	return alloc_prealloc_flags(gfp_flags, STACK_DEPOT_FLAG_CAN_ALLOC,
+				    pool_prealloc, side_prealloc);
+}
+
+static void stackdepot_trie_alloc_prealloc(struct kunit *test)
+{
+	void *pool_prealloc = NULL;
+	void *side_prealloc = NULL;
+	u32 id;
+	int ret;
+
+	stackdepot_trie_side_table_init_or_skip(test);
+	ret = alloc_prealloc_flags(GFP_NOWAIT, 0, &pool_prealloc, &side_prealloc);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_NULL(test, pool_prealloc);
+	KUNIT_EXPECT_NULL(test, side_prealloc);
+
+	ret = alloc_prealloc(GFP_KERNEL, &pool_prealloc, &side_prealloc);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NOT_NULL(test, side_prealloc);
+	__stack_depot_trie_pool_free_prealloc(pool_prealloc);
+	__stack_depot_trie_side_table_free_prealloc(side_prealloc);
+	pool_prealloc = NULL;
+	side_prealloc = NULL;
+
+	id = stackdepot_trie_side_table_alloc(test);
+	KUNIT_ASSERT_EQ(test, id, 1U);
+	ret = alloc_prealloc(GFP_NOWAIT, &pool_prealloc, &side_prealloc);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NULL(test, pool_prealloc);
+	KUNIT_EXPECT_NULL(test, side_prealloc);
+
+	pool_prealloc = (void *)0x1111UL;
+	ret = alloc_prealloc(GFP_KERNEL, &pool_prealloc, &side_prealloc);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 static void stackdepot_trie_pool_seed_current_pool(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1234567800990000UL };
@@ -5233,6 +5280,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_side_prepare_rejects_null_leaf),
 	KUNIT_CASE(stackdepot_trie_pool_alloc_size),
 	KUNIT_CASE(stackdepot_trie_pool_prealloc),
+	KUNIT_CASE(stackdepot_trie_alloc_prealloc),
 	KUNIT_CASE(stackdepot_trie_pool_carve_current),
 	KUNIT_CASE(stackdepot_trie_pool_rollback_requires_lifo),
 	KUNIT_CASE(stackdepot_trie_pool_carve_current_rejects_bad_inputs),

@@ -294,9 +294,9 @@ int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 	if (!trie_side_table_chunks)
 		return -ENOMEM;
 
-	trie_side_table_high_water = 0;
-	trie_side_table_nr_chunks = 0;
-	trie_side_table_next_id = 0;
+	WRITE_ONCE(trie_side_table_high_water, 0);
+	WRITE_ONCE(trie_side_table_nr_chunks, 0);
+	WRITE_ONCE(trie_side_table_next_id, 0);
 	WRITE_ONCE(trie_side_table_initialized, true);
 	return 0;
 }
@@ -312,10 +312,10 @@ void __stack_depot_trie_side_table_destroy(void)
 		kfree(trie_side_table_chunks[i]);
 	kvfree(trie_side_table_chunks);
 	trie_side_table_chunks = NULL;
-	trie_side_table_high_water = 0;
-	trie_side_table_nr_chunks = 0;
-	trie_side_table_top_size = 0;
-	trie_side_table_next_id = 0;
+	WRITE_ONCE(trie_side_table_high_water, 0);
+	WRITE_ONCE(trie_side_table_nr_chunks, 0);
+	WRITE_ONCE(trie_side_table_top_size, 0);
+	WRITE_ONCE(trie_side_table_next_id, 0);
 	WRITE_ONCE(trie_side_table_initialized, false);
 }
 
@@ -556,6 +556,28 @@ void __stack_depot_trie_pool_free_prealloc(void *prealloc)
 {
 	if (prealloc)
 		free_pages((unsigned long)prealloc, DEPOT_POOL_ORDER);
+}
+
+int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
+				      depot_flags_t depot_flags,
+				      void **pool_prealloc,
+				      void **side_prealloc)
+{
+	bool can_alloc;
+
+	if (!pool_prealloc || !side_prealloc || *pool_prealloc || *side_prealloc)
+		return -EINVAL;
+
+	can_alloc = (depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC) &&
+		gfpflags_allow_spinning(alloc_flags);
+	if (can_alloc && !READ_ONCE(new_pool))
+		*pool_prealloc = __stack_depot_trie_pool_prealloc(alloc_flags);
+	if (can_alloc && __stack_depot_trie_side_table_prealloc_needed())
+		*side_prealloc = __stack_depot_trie_side_table_prealloc(alloc_flags);
+
+	if (__stack_depot_trie_side_table_prealloc_needed() && !*side_prealloc)
+		return -ENOSPC;
+	return 0;
 }
 
 void *
