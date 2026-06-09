@@ -842,6 +842,25 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 	return 0;
 }
 
+int
+__stack_depot_trie_alloc_workspace_plan(const struct stack_depot_trie_root *root,
+					const unsigned long *entries,
+					unsigned int nr_entries,
+					void **pool_prealloc,
+					void **side_prealloc,
+					struct stack_depot_trie_alloc_workspace *workspace)
+{
+	if (!workspace)
+		return -EINVAL;
+
+	memset(workspace, 0, sizeof(*workspace));
+	return __stack_depot_trie_alloc_txn_plan(root, entries, nr_entries,
+			workspace->node_slots, ARRAY_SIZE(workspace->node_slots),
+			workspace->child_slots, ARRAY_SIZE(workspace->child_slots),
+			&workspace->txn, &workspace->storage, pool_prealloc,
+			side_prealloc, &workspace->req);
+}
+
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)
 {
 	u32 leaf_id;
@@ -1188,6 +1207,7 @@ static bool depot_init_pool(void **prealloc)
 		return false;
 	}
 
+	/* Trie allocation probes may intentionally call without a preallocation. */
 	if (!new_pool && prealloc && *prealloc) {
 		/* We have preallocated memory, use it. */
 		WRITE_ONCE(new_pool, *prealloc);

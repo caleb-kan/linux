@@ -60,6 +60,8 @@ struct stack_depot_trie_publish_prepare {
 };
 
 #define STACK_DEPOT_TRIE_MAX_LEAF_UPDATES 2
+#define STACK_DEPOT_TRIE_MAX_NODE_SLOTS (CONFIG_STACKDEPOT_MAX_FRAMES + 1)
+#define STACK_DEPOT_TRIE_MAX_CHILD_SLOTS CONFIG_STACKDEPOT_MAX_FRAMES
 
 struct stack_depot_trie_side_checkpoint {
 	u32 leaf_id;
@@ -107,6 +109,15 @@ struct stack_depot_trie_alloc_request {
 	size_t storage_size;
 	unsigned int nr_node_slots;
 	unsigned int nr_child_slots;
+};
+
+struct stack_depot_trie_alloc_workspace {
+	struct stack_depot_trie_alloc_txn txn;
+	struct stack_depot_trie_alloc_request req;
+	struct stack_depot_trie_node_slot node_slots[STACK_DEPOT_TRIE_MAX_NODE_SLOTS];
+	struct stack_depot_trie_child_array_slot child_slots[STACK_DEPOT_TRIE_MAX_CHILD_SLOTS];
+	u32 scratch[CONFIG_STACKDEPOT_MAX_FRAMES];
+	void *storage;
 };
 
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
@@ -161,6 +172,13 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  void **storage, void **pool_prealloc,
 				  void **side_prealloc,
 				  struct stack_depot_trie_alloc_request *req);
+int
+__stack_depot_trie_alloc_workspace_plan(const struct stack_depot_trie_root *root,
+					const unsigned long *entries,
+					unsigned int nr_entries,
+					void **pool_prealloc,
+					void **side_prealloc,
+					struct stack_depot_trie_alloc_workspace *workspace);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
 int
