@@ -317,6 +317,11 @@ __stack_depot_trie_walk_frames(const void *leaf, trie_frame_fn_t fn, void *data)
 unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 						  unsigned long *entries,
 						  unsigned int max_entries);
+unsigned int
+__stack_depot_trie_materialize_handle(depot_stack_handle_t handle,
+				      unsigned long *storage,
+				      unsigned int max_entries,
+				      const unsigned long **frames);
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,

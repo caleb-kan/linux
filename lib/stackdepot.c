@@ -4047,6 +4047,70 @@ __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 	return nr_entries;
 }
 
+unsigned int
+__stack_depot_trie_materialize_handle(depot_stack_handle_t handle,
+				      unsigned long *storage,
+				      unsigned int max_entries,
+				      const unsigned long **frames)
+{
+	const unsigned long *cached;
+	const void *leaf;
+	unsigned int nr_entries;
+	u32 leaf_id;
+	int ret;
+
+	if (!frames)
+		return 0;
+	*frames = NULL;
+
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	if (!leaf_id)
+		return 0;
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (WARN(!leaf, "corrupt trie handle %08x\n", handle)) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
+	nr_entries = trie_validate_leaf(leaf, NULL);
+	if (!nr_entries) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
+	cached = __stack_depot_trie_side_table_frames(leaf_id);
+	if (cached) {
+		*frames = cached;
+		rcu_read_unlock_sched_notrace();
+		return nr_entries;
+	}
+	if (!storage || max_entries < nr_entries) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
+
+	nr_entries = trie_fetch_leaf(leaf, storage, max_entries);
+	if (!nr_entries) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
+
+	ret = __stack_depot_trie_side_table_store_frames(leaf_id, storage);
+	if (!ret) {
+		*frames = storage;
+		rcu_read_unlock_sched_notrace();
+		return nr_entries;
+	}
+	if (ret == -EEXIST) {
+		cached = __stack_depot_trie_side_table_frames(leaf_id);
+		if (cached)
+			*frames = cached;
+	}
+	rcu_read_unlock_sched_notrace();
+
+	return *frames ? nr_entries : 0;
+}
+
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
 {
 	size_t size;

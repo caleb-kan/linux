@@ -1551,6 +1551,14 @@ static unsigned int tfetch_handle(depot_stack_handle_t handle,
 	return __stack_depot_trie_fetch_handle_into(handle, entries, max_entries);
 }
 
+static unsigned int tmaterialize(depot_stack_handle_t handle,
+				 unsigned long *storage, unsigned int max_entries,
+				 const unsigned long **frames)
+{
+	return __stack_depot_trie_materialize_handle(handle, storage, max_entries,
+						     frames);
+}
+
 struct trie_frame_iter_ctx {
 	unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];
 	unsigned int nr_entries;
@@ -1747,9 +1755,13 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	struct trie_frame_iter_ctx *iter;
 	struct stack_depot_trie_root root = {};
 	unsigned long small[1] = { 0xdeadUL };
+	unsigned long cache[ARRAY_SIZE(entries)] = {};
+	unsigned long loser[ARRAY_SIZE(entries)] = { 0xdeadUL, 0xbeefUL };
+	unsigned long *cache_ptr = cache;
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t hash_handle;
 	depot_stack_handle_t handle;
+	const unsigned long *frames;
 	const void *leaf;
 	unsigned int invalid;
 	unsigned int fetched;
@@ -1790,6 +1802,24 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	fetched = stack_depot_fetch_into(handle, small, ARRAY_SIZE(small));
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
+	frames = (const unsigned long *)0x1UL;
+	fetched = tmaterialize(handle, small, ARRAY_SIZE(small), &frames);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_NULL(test, frames);
+	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
+	fetched = tmaterialize(handle, cache, ARRAY_SIZE(cache), &frames);
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_PTR_EQ(test, frames, cache_ptr);
+	KUNIT_EXPECT_MEMEQ(test, cache, entries, sizeof(entries));
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_frames(leaf_id),
+			    cache_ptr);
+	fetched = tmaterialize(handle, loser, ARRAY_SIZE(loser), &frames);
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_PTR_EQ(test, frames, cache_ptr);
+	KUNIT_EXPECT_EQ(test, loser[0], 0xdeadUL);
+	KUNIT_EXPECT_EQ(test, loser[1], 0xbeefUL);
+	KUNIT_EXPECT_EQ(test, tmaterialize(handle, cache, ARRAY_SIZE(cache), NULL),
+			0U);
 	invalid = tfetch_handle(0, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
 	invalid = tfetch_handle(handle, NULL, 0);
@@ -1802,6 +1832,10 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
 	invalid = tfetch_handle(hash_handle, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
+	frames = (const unsigned long *)0x1UL;
+	fetched = tmaterialize(hash_handle, cache, ARRAY_SIZE(cache), &frames);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_NULL(test, frames);
 }
 
 static void stackdepot_trie_alloc_txn_plan(struct kunit *test)
