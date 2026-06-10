@@ -3918,6 +3918,10 @@ __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 
 	rcu_read_lock_sched_notrace();
 	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (WARN(!leaf, "corrupt trie handle %08x\n", handle)) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
 	nr_entries = trie_fetch_leaf(leaf, entries, max_entries);
 	rcu_read_unlock_sched_notrace();
 
@@ -4619,6 +4623,11 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 
 	if (!handle || !entries || !max_entries)
 		return 0;
+	if (stack_depot_disabled)
+		return 0;
+	if (__stack_depot_trie_leaf_id(handle))
+		return __stack_depot_trie_fetch_handle_into(handle, entries,
+							      max_entries);
 
 	/* Extend the lookup RCU section so the fetched record cannot be reused. */
 	rcu_read_lock_sched_notrace();

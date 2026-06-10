@@ -1719,6 +1719,12 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	fetched = tfetch_handle(handle, small, ARRAY_SIZE(small));
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
+	fetched = stack_depot_fetch_into(handle, out, ARRAY_SIZE(out));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+	fetched = stack_depot_fetch_into(handle, small, ARRAY_SIZE(small));
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
 	invalid = tfetch_handle(0, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
 	invalid = tfetch_handle(handle, NULL, 0);
