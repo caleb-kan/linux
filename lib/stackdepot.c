@@ -4111,6 +4111,39 @@ __stack_depot_trie_materialize_handle(depot_stack_handle_t handle,
 	return *frames ? nr_entries : 0;
 }
 
+size_t __stack_depot_trie_materialize_bytes(depot_stack_handle_t handle, unsigned int *nr_entries)
+{
+	const void *leaf;
+	unsigned int total;
+	u32 leaf_id;
+	size_t size;
+
+	if (nr_entries)
+		*nr_entries = 0;
+
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	if (!leaf_id)
+		return 0;
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (!leaf)
+		goto out;
+	total = trie_validate_leaf(leaf, NULL);
+	if (!total)
+		goto out;
+	if (check_mul_overflow((size_t)total, sizeof(unsigned long), &size))
+		goto out;
+
+	if (nr_entries)
+		*nr_entries = total;
+	rcu_read_unlock_sched_notrace();
+	return size;
+out:
+	rcu_read_unlock_sched_notrace();
+	return 0;
+}
+
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
 {
 	size_t size;

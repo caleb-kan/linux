@@ -1765,6 +1765,8 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	const void *leaf;
 	unsigned int invalid;
 	unsigned int fetched;
+	unsigned int nr_sized;
+	size_t size;
 	u32 leaf_id;
 
 	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
@@ -1802,6 +1804,12 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	fetched = stack_depot_fetch_into(handle, small, ARRAY_SIZE(small));
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
+	size = __stack_depot_trie_materialize_bytes(handle, &nr_sized);
+	KUNIT_EXPECT_EQ(test, size, sizeof(entries));
+	KUNIT_EXPECT_EQ(test, nr_sized, (unsigned int)ARRAY_SIZE(entries));
+	nr_sized = 0xdeadU;
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_materialize_bytes(0, &nr_sized), 0UL);
+	KUNIT_EXPECT_EQ(test, nr_sized, 0U);
 	frames = (const unsigned long *)0x1UL;
 	fetched = tmaterialize(handle, small, ARRAY_SIZE(small), &frames);
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
@@ -1836,6 +1844,10 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	fetched = tmaterialize(hash_handle, cache, ARRAY_SIZE(cache), &frames);
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_NULL(test, frames);
+	nr_sized = 0xdeadU;
+	size = __stack_depot_trie_materialize_bytes(hash_handle, &nr_sized);
+	KUNIT_EXPECT_EQ(test, size, 0UL);
+	KUNIT_EXPECT_EQ(test, nr_sized, 0U);
 }
 
 static void stackdepot_trie_alloc_txn_plan(struct kunit *test)
