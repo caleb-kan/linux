@@ -598,35 +598,28 @@ int
 __stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames)
 {
 	struct stack_depot_trie_side_entry *chunk;
-	unsigned long flags;
+	const unsigned long *old;
+	unsigned int slot;
 	unsigned int top;
-	int ret = -EINVAL;
 
 	if (!READ_ONCE(trie_side_table_initialized) || !id || !frames)
 		return -EINVAL;
 
-	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
-	if (id > trie_side_table_next_id)
-		goto out;
+	if (id > READ_ONCE(trie_side_table_next_id))
+		return -EINVAL;
 	top = trie_side_table_top_index(id);
 	if (top >= trie_side_table_top_size)
-		goto out;
+		return -EINVAL;
 
 	chunk = trie_side_table_load_chunk(top);
 	if (!chunk)
-		goto out;
-	if (!trie_side_table_load_leaf(chunk, trie_side_table_slot_index(id)))
-		goto out;
-	if (trie_side_table_load_frames(chunk, trie_side_table_slot_index(id))) {
-		ret = -EEXIST;
-		goto out;
-	}
+		return -EINVAL;
+	slot = trie_side_table_slot_index(id);
+	if (!trie_side_table_load_leaf(chunk, slot))
+		return -EINVAL;
 
-	trie_side_table_store_frames(chunk, trie_side_table_slot_index(id), frames);
-	ret = 0;
-out:
-	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
-	return ret;
+	old = cmpxchg_release(&chunk[slot].frames, NULL, frames);
+	return old ? -EEXIST : 0;
 }
 
 size_t __stack_depot_trie_side_table_entries(void)
@@ -4713,7 +4706,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 		return __stack_depot_trie_fetch_handle_into(handle, entries,
 							      max_entries);
 
-	/* Extend the lookup RCU section so the fetched record cannot be reused. */
+	/* Hold RCU so the fetched record cannot be reused during the copy. */
 	rcu_read_lock_sched_notrace();
 	nr_entries = stack_depot_fetch(handle, &stack_entries);
 	if (!nr_entries || nr_entries > max_entries)

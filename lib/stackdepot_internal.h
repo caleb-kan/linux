@@ -137,8 +137,10 @@ u32 __stack_depot_trie_max_leaf_id(void);
 /*
  * Private trie side table. Writers serialize internally; lookups are lockless.
  * Leaf slots are populated before trie publication, while frame slots are for
- * future stable materialization of trie handles. Init and destroy are
- * controlled setup/teardown operations and must not race with lookup.
+ * future stable materialization of trie handles. The side table reserves the
+ * frame pointer per handle, but the backing materialized frame array is
+ * allocated lazily only for the rare fetch path. Init and destroy are controlled
+ * setup/teardown operations and must not race with readers or writers.
  */
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
 void __stack_depot_trie_side_table_destroy(void);
