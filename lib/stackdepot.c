@@ -4912,7 +4912,9 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 			       unsigned long **entries)
 {
+	const unsigned long *trie_entries;
 	struct stack_record *stack;
+	unsigned int nr_entries;
 
 	*entries = NULL;
 	/*
@@ -4923,6 +4925,13 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 
 	if (!handle || stack_depot_disabled)
 		return 0;
+	if (__stack_depot_trie_leaf_id(handle)) {
+		nr_entries = __stack_depot_trie_materialize_cached(handle, &trie_entries);
+		if (!nr_entries)
+			return 0;
+		*entries = (unsigned long *)trie_entries;
+		return nr_entries;
+	}
 
 	stack = depot_fetch_stack(handle);
 	/*
@@ -4978,6 +4987,8 @@ void stack_depot_put(depot_stack_handle_t handle)
 	struct stack_record *stack;
 
 	if (!handle || stack_depot_disabled)
+		return;
+	if (__stack_depot_trie_leaf_id(handle))
 		return;
 
 	stack = depot_fetch_stack(handle);
