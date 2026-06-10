@@ -59,6 +59,9 @@ struct stack_depot_trie_leaf_update {
 	const void *leaf;
 };
 
+typedef void (*trie_frame_fn_t)(unsigned int index, unsigned long frame,
+				void *data);
+
 struct stack_depot_trie_publish_prepare {
 	int (*fn)(const struct stack_depot_trie_leaf_update *updates,
 		  unsigned int nr_updates, void *ctx);
@@ -309,6 +312,8 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned long *entries,
 					   unsigned int max_entries);
+unsigned int
+__stack_depot_trie_walk_frames(const void *leaf, trie_frame_fn_t fn, void *data);
 unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 						  unsigned long *entries,
 						  unsigned int max_entries);

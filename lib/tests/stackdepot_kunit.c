@@ -1551,6 +1551,25 @@ static unsigned int tfetch_handle(depot_stack_handle_t handle,
 	return __stack_depot_trie_fetch_handle_into(handle, entries, max_entries);
 }
 
+struct trie_frame_iter_ctx {
+	unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];
+	unsigned int nr_entries;
+};
+
+static void trie_frame_iter_record(unsigned int index, unsigned long frame,
+				   void *data)
+{
+	struct trie_frame_iter_ctx *ctx = data;
+
+	ctx->entries[index] = frame;
+	ctx->nr_entries++;
+}
+
+static unsigned int twalk_frames(const void *leaf, struct trie_frame_iter_ctx *ctx)
+{
+	return __stack_depot_trie_walk_frames(leaf, trie_frame_iter_record, ctx);
+}
+
 static void stackdepot_trie_alloc_workspace_plan(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
@@ -1725,22 +1744,39 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
 	struct stack_depot_trie_alloc_workspace *workspace;
+	struct trie_frame_iter_ctx *iter;
 	struct stack_depot_trie_root root = {};
 	unsigned long small[1] = { 0xdeadUL };
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t hash_handle;
 	depot_stack_handle_t handle;
+	const void *leaf;
 	unsigned int invalid;
 	unsigned int fetched;
+	u32 leaf_id;
 
 	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	iter = kunit_kzalloc(test, sizeof(*iter), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, iter);
 	stackdepot_trie_side_table_init_or_skip(test);
 	stackdepot_trie_pool_seed_current_pool(test);
 
 	handle = tsave(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
 		       STACK_DEPOT_FLAG_CAN_ALLOC, workspace);
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	KUNIT_ASSERT_NE(test, leaf_id, 0U);
+	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	KUNIT_ASSERT_NOT_NULL(test, leaf);
+	fetched = twalk_frames(leaf, iter);
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_EQ(test, iter->nr_entries, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, iter->entries, entries, sizeof(entries));
+	iter->nr_entries = 0;
+	fetched = twalk_frames(NULL, iter);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_EQ(test, iter->nr_entries, 0U);
 	fetched = tfetch_handle(handle, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));

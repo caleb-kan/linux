@@ -2279,29 +2279,6 @@ static int frame_run_validate_payload(const struct stack_depot_frame_run *run,
 	return 0;
 }
 
-static int frame_run_read_direct(const struct stack_depot_frame_run *run,
-				 const void *src, unsigned long *entries)
-{
-	unsigned int i;
-
-	if (!entries || frame_run_validate_payload(run, src))
-		return -EINVAL;
-	if (run->mode == STACK_DEPOT_FRAME_RAW) {
-		memcpy(entries, src, run->bytes);
-		return 0;
-	}
-
-	for (i = 0; i < run->nr_entries; i++) {
-		u32 low;
-
-		memcpy(&low, (const char *)src + i * sizeof(low), sizeof(low));
-		if (!frame_decompress(run->prefix_id, low, &entries[i]))
-			return -EINVAL;
-	}
-
-	return 0;
-}
-
 static bool stack_depot_ranges_overlap(const void *a, size_t a_size,
 				       const void *b, size_t b_size)
 {
@@ -3926,45 +3903,110 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 	}
 }
 
-unsigned int
-__stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
-			      unsigned int max_entries)
+struct stack_depot_trie_fetch_ctx {
+	unsigned long *entries;
+	unsigned int nr_entries;
+};
+
+static unsigned int trie_validate_leaf(const void *leaf,
+				       const unsigned long *entries)
 {
 	const struct stack_depot_trie_node *node = leaf;
+	size_t entries_size;
 	unsigned int pos;
 	unsigned int total;
-	int ret;
 
-	if (!node || !entries || !node->stack_len || !node->leaf_id)
+	if (!node || !node->stack_len || !node->leaf_id)
 		return 0;
 
 	total = node->stack_len;
-	if (max_entries < total)
-		return 0;
-
-	/* Validate first so failure cannot partially write the caller buffer. */
+	entries_size = total * sizeof(*entries);
 	pos = total;
 	for (node = leaf; node; node = trie_load_parent(node)) {
+		bool overlap;
+
 		if (frame_run_validate_payload(&node->run, node->data))
 			return 0;
-		if (stack_depot_ranges_overlap(entries, total * sizeof(*entries),
-					       node->data, node->run.bytes))
+		overlap = entries && stack_depot_ranges_overlap(entries,
+							       entries_size, node->data,
+							       node->run.bytes);
+		if (overlap)
 			return 0;
 		if (node->stack_len != pos || node->run.nr_entries > pos)
 			return 0;
 		pos -= node->run.nr_entries;
 	}
-	if (pos)
+
+	return pos ? 0 : total;
+}
+
+static unsigned int trie_walk_frames(const void *leaf, unsigned int total,
+				     trie_frame_fn_t fn, void *data)
+{
+	const struct stack_depot_trie_node *node;
+	unsigned int seen = 0;
+	unsigned int i;
+
+	if (!fn)
 		return 0;
 
-	pos = total;
 	for (node = leaf; node; node = trie_load_parent(node)) {
-		pos -= node->run.nr_entries;
-		ret = frame_run_read_direct(&node->run, node->data, &entries[pos]);
-		if (ret)
+		unsigned int start;
+
+		if (node->run.nr_entries > node->stack_len)
 			return 0;
+		start = node->stack_len - node->run.nr_entries;
+		for (i = 0; i < node->run.nr_entries; i++) {
+			unsigned long frame;
+
+			if (stack_depot_trie_node_frame(node, i, &frame))
+				return 0;
+			fn(start + i, frame, data);
+			seen++;
+		}
 	}
-	if (pos)
+
+	return seen == total ? total : 0;
+}
+
+static void trie_fetch_frame(unsigned int index, unsigned long frame, void *data)
+{
+	struct stack_depot_trie_fetch_ctx *ctx = data;
+
+	ctx->entries[index] = frame;
+	ctx->nr_entries++;
+}
+
+unsigned int
+__stack_depot_trie_walk_frames(const void *leaf, trie_frame_fn_t fn, void *data)
+{
+	unsigned int total;
+
+	total = trie_validate_leaf(leaf, NULL);
+	if (!total)
+		return 0;
+
+	return trie_walk_frames(leaf, total, fn, data);
+}
+
+unsigned int
+__stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
+			      unsigned int max_entries)
+{
+	struct stack_depot_trie_fetch_ctx ctx;
+	unsigned int total;
+
+	if (!entries)
+		return 0;
+	total = trie_validate_leaf(leaf, entries);
+	if (!total)
+		return 0;
+	if (max_entries < total)
+		return 0;
+
+	ctx.entries = entries;
+	ctx.nr_entries = 0;
+	if (trie_walk_frames(leaf, total, trie_fetch_frame, &ctx) != total)
 		return 0;
 
 	kmsan_unpoison_memory(entries, total * sizeof(*entries));
