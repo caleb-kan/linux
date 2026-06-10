@@ -1559,6 +1559,12 @@ static unsigned int tmaterialize(depot_stack_handle_t handle,
 						     frames);
 }
 
+static unsigned int tmaterialize_cached(depot_stack_handle_t handle,
+					const unsigned long **frames)
+{
+	return __stack_depot_trie_materialize_cached(handle, frames);
+}
+
 #define TMREC(handle, record, size, frames) \
 	__stack_depot_trie_materialize_record(handle, record, size, frames)
 
@@ -1860,6 +1866,68 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	size = __stack_depot_trie_materialize_bytes(hash_handle, &nr_sized);
 	KUNIT_EXPECT_EQ(test, size, 0UL);
 	KUNIT_EXPECT_EQ(test, nr_sized, 0U);
+}
+
+static void stackdepot_trie_materialize_cached(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
+	struct stack_depot_trie_alloc_workspace *workspace;
+	struct stack_depot_trie_root root = {};
+	depot_stack_handle_t hash_handle;
+	depot_stack_handle_t extra;
+	depot_stack_handle_t handle;
+	const unsigned long *again;
+	const unsigned long *frames;
+	unsigned int fetched;
+	u32 leaf_id;
+
+	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+
+	handle = tsave(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+		       STACK_DEPOT_FLAG_CAN_ALLOC, workspace);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	KUNIT_ASSERT_NE(test, leaf_id, 0U);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_frames(leaf_id));
+
+	frames = NULL;
+	fetched = tmaterialize_cached(handle, &frames);
+	KUNIT_ASSERT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_ASSERT_NOT_NULL(test, frames);
+	KUNIT_EXPECT_MEMEQ(test, frames, entries, sizeof(entries));
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_materialized_count(frames),
+			(unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_frames(leaf_id),
+			    frames);
+
+	again = NULL;
+	fetched = tmaterialize_cached(handle, &again);
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_PTR_EQ(test, again, frames);
+
+	extra = stack_depot_set_extra_bits(handle,
+					   (1U << STACK_DEPOT_EXTRA_BITS) - 1);
+	again = NULL;
+	fetched = tmaterialize_cached(extra, &again);
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_PTR_EQ(test, again, frames);
+
+	frames = (const unsigned long *)0x1UL;
+	fetched = tmaterialize_cached(0, &frames);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_NULL(test, frames);
+	fetched = tmaterialize_cached(handle, NULL);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+
+	hash_handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
+	frames = (const unsigned long *)0x1UL;
+	fetched = tmaterialize_cached(hash_handle, &frames);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
+	KUNIT_EXPECT_NULL(test, frames);
 }
 
 static void stackdepot_trie_alloc_txn_plan(struct kunit *test)
@@ -5583,6 +5651,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_save_miss_noalloc),
 	KUNIT_CASE(stackdepot_trie_save),
 	KUNIT_CASE(stackdepot_trie_fetch_handle_into),
+	KUNIT_CASE(stackdepot_trie_materialize_cached),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_plan),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert_stale_plan),

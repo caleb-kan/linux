@@ -4186,7 +4186,70 @@ __stack_depot_trie_materialize_record(depot_stack_handle_t handle,
 
 	WRITE_ONCE(record->nr_entries, nr_entries);
 	return __stack_depot_trie_materialize_handle(handle, record->entries,
-						      nr_entries, frames);
+					      nr_entries, frames);
+}
+
+unsigned int
+__stack_depot_trie_materialize_cached(depot_stack_handle_t handle,
+				      const unsigned long **frames)
+{
+	struct stack_depot_trie_materialized *record;
+	unsigned int nr_entries;
+	unsigned long flags;
+	size_t record_size;
+	size_t offset;
+	void *pool;
+	int ret;
+
+	if (!frames)
+		return 0;
+	*frames = NULL;
+
+	nr_entries = __stack_depot_trie_materialize_handle(handle, NULL, 0,
+							   frames);
+	if (nr_entries)
+		return nr_entries;
+
+	record_size = __stack_depot_trie_materialize_bytes(handle, &nr_entries);
+	if (!record_size)
+		return 0;
+	record_size = __stack_depot_trie_materialized_size(nr_entries);
+	if (!record_size)
+		return 0;
+
+	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		return 0;
+	printk_deferred_enter();
+
+	ret = __stack_depot_trie_materialize_handle(handle, NULL, 0, frames);
+	if (ret)
+		goto out;
+
+	if (!stack_pools || pools_num < 1)
+		goto out;
+	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
+		goto out;
+	if (record_size > DEPOT_POOL_SIZE - pool_offset)
+		goto out;
+
+	pool = stack_pools[pools_num - 1];
+	if (WARN_ON_ONCE(!pool))
+		goto out;
+
+	offset = pool_offset;
+	record = pool + offset;
+	pool_offset += record_size;
+	ret = __stack_depot_trie_materialize_record(handle, record, record_size, frames);
+	if (ret && *frames == record->entries)
+		goto out;
+
+	pool_offset = offset;
+	if (!*frames)
+		ret = 0;
+out:
+	printk_deferred_exit();
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
+	return ret;
 }
 
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)

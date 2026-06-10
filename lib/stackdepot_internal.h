@@ -336,6 +336,9 @@ __stack_depot_trie_materialize_record(depot_stack_handle_t handle,
 				      struct stack_depot_trie_materialized *record,
 				      size_t record_size,
 				      const unsigned long **frames);
+unsigned int
+__stack_depot_trie_materialize_cached(depot_stack_handle_t handle,
+				      const unsigned long **frames);
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,
