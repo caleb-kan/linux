@@ -1559,6 +1559,9 @@ static unsigned int tmaterialize(depot_stack_handle_t handle,
 						     frames);
 }
 
+#define TMREC(handle, record, size, frames) \
+	__stack_depot_trie_materialize_record(handle, record, size, frames)
+
 struct trie_frame_iter_ctx {
 	unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];
 	unsigned int nr_entries;
@@ -1752,17 +1755,18 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 {
 	unsigned long entries[] = { 0x1000UL, 0x2000UL };
 	struct stack_depot_trie_alloc_workspace *workspace;
+	struct stack_depot_trie_materialized *record;
 	struct trie_frame_iter_ctx *iter;
 	struct stack_depot_trie_root root = {};
 	unsigned long small[1] = { 0xdeadUL };
-	unsigned long cache[ARRAY_SIZE(entries)] = {};
 	unsigned long loser[ARRAY_SIZE(entries)] = { 0xdeadUL, 0xbeefUL };
-	unsigned long *cache_ptr = cache;
+	unsigned long *record_entries;
 	unsigned long out[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t hash_handle;
 	depot_stack_handle_t handle;
 	const unsigned long *frames;
 	const void *leaf;
+	size_t record_size;
 	unsigned int invalid;
 	unsigned int fetched;
 	unsigned int nr_sized;
@@ -1807,6 +1811,12 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	size = __stack_depot_trie_materialize_bytes(handle, &nr_sized);
 	KUNIT_EXPECT_EQ(test, size, sizeof(entries));
 	KUNIT_EXPECT_EQ(test, nr_sized, (unsigned int)ARRAY_SIZE(entries));
+	record_size = __stack_depot_trie_materialized_size(nr_sized);
+	KUNIT_ASSERT_NE(test, record_size, 0UL);
+	record = kunit_kzalloc(test, record_size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, record);
+	record->nr_entries = nr_sized;
+	record_entries = record->entries;
 	nr_sized = 0xdeadU;
 	KUNIT_EXPECT_EQ(test, __stack_depot_trie_materialize_bytes(0, &nr_sized), 0UL);
 	KUNIT_EXPECT_EQ(test, nr_sized, 0U);
@@ -1815,19 +1825,21 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_NULL(test, frames);
 	KUNIT_EXPECT_EQ(test, small[0], 0xdeadUL);
-	fetched = tmaterialize(handle, cache, ARRAY_SIZE(cache), &frames);
+	fetched = TMREC(handle, record, record_size, &frames);
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
-	KUNIT_EXPECT_PTR_EQ(test, frames, cache_ptr);
-	KUNIT_EXPECT_MEMEQ(test, cache, entries, sizeof(entries));
+	KUNIT_EXPECT_PTR_EQ(test, frames, record_entries);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_materialized_count(frames),
+			(unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, record->entries, entries, sizeof(entries));
 	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_frames(leaf_id),
-			    cache_ptr);
+			    record_entries);
 	fetched = tmaterialize(handle, loser, ARRAY_SIZE(loser), &frames);
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
-	KUNIT_EXPECT_PTR_EQ(test, frames, cache_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, frames, record_entries);
 	KUNIT_EXPECT_EQ(test, loser[0], 0xdeadUL);
 	KUNIT_EXPECT_EQ(test, loser[1], 0xbeefUL);
-	KUNIT_EXPECT_EQ(test, tmaterialize(handle, cache, ARRAY_SIZE(cache), NULL),
-			0U);
+	fetched = TMREC(handle, record, record_size, NULL);
+	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	invalid = tfetch_handle(0, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
 	invalid = tfetch_handle(handle, NULL, 0);
@@ -1841,7 +1853,7 @@ static void stackdepot_trie_fetch_handle_into(struct kunit *test)
 	invalid = tfetch_handle(hash_handle, out, ARRAY_SIZE(out));
 	KUNIT_EXPECT_EQ(test, invalid, 0U);
 	frames = (const unsigned long *)0x1UL;
-	fetched = tmaterialize(hash_handle, cache, ARRAY_SIZE(cache), &frames);
+	fetched = TMREC(hash_handle, record, record_size, &frames);
 	KUNIT_EXPECT_EQ(test, fetched, 0U);
 	KUNIT_EXPECT_NULL(test, frames);
 	nr_sized = 0xdeadU;

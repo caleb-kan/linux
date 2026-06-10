@@ -4144,6 +4144,51 @@ out:
 	return 0;
 }
 
+size_t __stack_depot_trie_materialized_size(unsigned int nr_entries)
+{
+	struct stack_depot_trie_materialized *record = NULL;
+	size_t size;
+
+	if (!nr_entries || nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return 0;
+	size = struct_size(record, entries, nr_entries);
+	return size <= DEPOT_POOL_SIZE ? __stack_depot_trie_pool_alloc_size(size) : 0;
+}
+
+unsigned int __stack_depot_trie_materialized_count(const unsigned long *frames)
+{
+	const struct stack_depot_trie_materialized *record;
+
+	if (!frames)
+		return 0;
+	record = (const void *)((const char *)frames -
+				 offsetof(struct stack_depot_trie_materialized, entries));
+	return READ_ONCE(record->nr_entries);
+}
+
+unsigned int
+__stack_depot_trie_materialize_record(depot_stack_handle_t handle,
+				      struct stack_depot_trie_materialized *record,
+				      size_t record_size,
+				      const unsigned long **frames)
+{
+	unsigned int nr_entries;
+	size_t size;
+
+	if (!frames)
+		return 0;
+	*frames = NULL;
+	size = __stack_depot_trie_materialize_bytes(handle, &nr_entries);
+	if (!size)
+		return 0;
+	if (!record || record_size < __stack_depot_trie_materialized_size(nr_entries))
+		return 0;
+
+	WRITE_ONCE(record->nr_entries, nr_entries);
+	return __stack_depot_trie_materialize_handle(handle, record->entries,
+						      nr_entries, frames);
+}
+
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
 {
 	size_t size;
