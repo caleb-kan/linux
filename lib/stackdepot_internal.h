@@ -135,9 +135,10 @@ u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle);
 u32 __stack_depot_trie_max_leaf_id(void);
 
 /*
- * Private trie leaf side table. Writers serialize internally; lookup is
- * lockless. Init and destroy are controlled setup/teardown operations and must
- * not race with lookup.
+ * Private trie side table. Writers serialize internally; lookups are lockless.
+ * Leaf slots are populated before trie publication, while frame slots are for
+ * future stable materialization of trie handles. Init and destroy are
+ * controlled setup/teardown operations and must not race with lookup.
  */
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
 void __stack_depot_trie_side_table_destroy(void);
@@ -149,6 +150,9 @@ void __stack_depot_trie_side_table_revoke_latest(u32 id);
 void __stack_depot_trie_side_table_restore(u32 id, const void *entry);
 int __stack_depot_trie_side_table_store(u32 id, const void *entry);
 const void *__stack_depot_trie_side_table_lookup(u32 id);
+const unsigned long *__stack_depot_trie_side_table_frames(u32 id);
+int
+__stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames);
 size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
 size_t __stack_depot_trie_pool_alloc_size(size_t size);

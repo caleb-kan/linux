@@ -270,7 +270,12 @@ u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 	return leaf_id > U32_MAX ? 0 : leaf_id;
 }
 
-static const void ***trie_side_table_chunks;
+struct stack_depot_trie_side_entry {
+	const void *leaf;
+	const unsigned long *frames;
+};
+
+static struct stack_depot_trie_side_entry **trie_side_table_chunks;
 static DEFINE_RAW_SPINLOCK(trie_side_table_lock);
 static DEFINE_RAW_SPINLOCK(trie_alloc_lock);
 static unsigned int trie_side_table_high_water;
@@ -289,36 +294,58 @@ static unsigned int trie_side_table_slot_index(u32 id)
 	return (id - 1) & (STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE - 1);
 }
 
-static const void **trie_side_table_load_chunk(unsigned int top)
+static struct stack_depot_trie_side_entry *trie_side_table_load_chunk(unsigned int top)
 {
 	/* Pairs with trie_side_table_publish_chunk(). */
 	return smp_load_acquire(&trie_side_table_chunks[top]);
 }
 
-static void trie_side_table_publish_chunk(unsigned int top, const void **chunk)
+static void
+trie_side_table_publish_chunk(unsigned int top,
+			      struct stack_depot_trie_side_entry *chunk)
 {
 	/* Pairs with trie_side_table_load_chunk(). */
 	smp_store_release(&trie_side_table_chunks[top], chunk);
 }
 
 static const void *
-trie_side_table_load_entry(const void **chunk, unsigned int slot)
+trie_side_table_load_leaf(struct stack_depot_trie_side_entry *chunk,
+			  unsigned int slot)
 {
-	/* Pairs with trie_side_table_store_entry(). */
-	return smp_load_acquire(&chunk[slot]);
+	/* Pairs with trie_side_table_store_leaf(). */
+	return smp_load_acquire(&chunk[slot].leaf);
 }
 
 static void
-trie_side_table_store_entry(const void **chunk, unsigned int slot, const void *entry)
+trie_side_table_store_leaf(struct stack_depot_trie_side_entry *chunk,
+			   unsigned int slot, const void *leaf)
 {
-	/* Pairs with trie_side_table_load_entry(). */
-	smp_store_release(&chunk[slot], entry);
+	/* Pairs with trie_side_table_load_leaf(). */
+	smp_store_release(&chunk[slot].leaf, leaf);
 }
 
-static void trie_side_table_clear_entry(const void **chunk, unsigned int slot)
+static const unsigned long *
+trie_side_table_load_frames(struct stack_depot_trie_side_entry *chunk,
+			    unsigned int slot)
 {
-	/* Pairs with trie_side_table_load_entry(). */
-	smp_store_release(&chunk[slot], NULL);
+	/* Pairs with trie_side_table_store_frames(). */
+	return smp_load_acquire(&chunk[slot].frames);
+}
+
+static void
+trie_side_table_store_frames(struct stack_depot_trie_side_entry *chunk,
+			     unsigned int slot, const unsigned long *frames)
+{
+	/* Pairs with trie_side_table_load_frames(). */
+	smp_store_release(&chunk[slot].frames, frames);
+}
+
+static void
+trie_side_table_clear_entry(struct stack_depot_trie_side_entry *chunk,
+			    unsigned int slot)
+{
+	trie_side_table_store_frames(chunk, slot, NULL);
+	trie_side_table_store_leaf(chunk, slot, NULL);
 }
 
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
@@ -407,7 +434,7 @@ void __stack_depot_trie_side_table_free_prealloc(void *prealloc)
 
 u32 __stack_depot_trie_side_table_alloc_id(void **prealloc)
 {
-	const void **chunk;
+	struct stack_depot_trie_side_entry *chunk;
 	unsigned long flags;
 	u32 id;
 	unsigned int top;
@@ -446,7 +473,7 @@ fail:
 
 void __stack_depot_trie_side_table_revoke_latest(u32 id)
 {
-	const void **chunk;
+	struct stack_depot_trie_side_entry *chunk;
 	unsigned long flags;
 	unsigned int slot;
 	unsigned int top;
@@ -475,7 +502,7 @@ out:
 
 void __stack_depot_trie_side_table_restore(u32 id, const void *entry)
 {
-	const void **chunk;
+	struct stack_depot_trie_side_entry *chunk;
 	unsigned long flags;
 	unsigned int top;
 
@@ -493,14 +520,17 @@ void __stack_depot_trie_side_table_restore(u32 id, const void *entry)
 	if (!chunk)
 		goto out;
 
-	trie_side_table_store_entry(chunk, trie_side_table_slot_index(id), entry);
+	if (entry)
+		trie_side_table_store_leaf(chunk, trie_side_table_slot_index(id), entry);
+	else
+		trie_side_table_clear_entry(chunk, trie_side_table_slot_index(id));
 out:
 	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
 }
 
 int __stack_depot_trie_side_table_store(u32 id, const void *entry)
 {
-	const void **chunk;
+	struct stack_depot_trie_side_entry *chunk;
 	unsigned long flags;
 	unsigned int top;
 	int ret = -EINVAL;
@@ -519,7 +549,7 @@ int __stack_depot_trie_side_table_store(u32 id, const void *entry)
 	if (!chunk)
 		goto out;
 
-	trie_side_table_store_entry(chunk, trie_side_table_slot_index(id), entry);
+	trie_side_table_store_leaf(chunk, trie_side_table_slot_index(id), entry);
 	ret = 0;
 out:
 	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
@@ -528,7 +558,7 @@ out:
 
 const void *__stack_depot_trie_side_table_lookup(u32 id)
 {
-	const void **chunk;
+	struct stack_depot_trie_side_entry *chunk;
 	unsigned int top;
 
 	if (!READ_ONCE(trie_side_table_initialized) || !id)
@@ -542,7 +572,61 @@ const void *__stack_depot_trie_side_table_lookup(u32 id)
 	if (!chunk)
 		return NULL;
 
-	return trie_side_table_load_entry(chunk, trie_side_table_slot_index(id));
+	return trie_side_table_load_leaf(chunk, trie_side_table_slot_index(id));
+}
+
+const unsigned long *__stack_depot_trie_side_table_frames(u32 id)
+{
+	struct stack_depot_trie_side_entry *chunk;
+	unsigned int top;
+
+	if (!READ_ONCE(trie_side_table_initialized) || !id)
+		return NULL;
+
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		return NULL;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		return NULL;
+
+	return trie_side_table_load_frames(chunk, trie_side_table_slot_index(id));
+}
+
+int
+__stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames)
+{
+	struct stack_depot_trie_side_entry *chunk;
+	unsigned long flags;
+	unsigned int top;
+	int ret = -EINVAL;
+
+	if (!READ_ONCE(trie_side_table_initialized) || !id || !frames)
+		return -EINVAL;
+
+	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
+	if (id > trie_side_table_next_id)
+		goto out;
+	top = trie_side_table_top_index(id);
+	if (top >= trie_side_table_top_size)
+		goto out;
+
+	chunk = trie_side_table_load_chunk(top);
+	if (!chunk)
+		goto out;
+	if (!trie_side_table_load_leaf(chunk, trie_side_table_slot_index(id)))
+		goto out;
+	if (trie_side_table_load_frames(chunk, trie_side_table_slot_index(id))) {
+		ret = -EEXIST;
+		goto out;
+	}
+
+	trie_side_table_store_frames(chunk, trie_side_table_slot_index(id), frames);
+	ret = 0;
+out:
+	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
+	return ret;
 }
 
 size_t __stack_depot_trie_side_table_entries(void)
