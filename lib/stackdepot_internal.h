@@ -3,6 +3,7 @@
 #define _STACKDEPOT_INTERNAL_H
 
 #include <linux/limits.h>
+#include <linux/spinlock_types.h>
 #include <linux/stackdepot.h>
 #include <linux/types.h>
 
@@ -217,6 +218,12 @@ __stack_depot_trie_save(struct stack_depot_trie_root *root,
 			const unsigned long *entries, unsigned int nr_entries,
 			gfp_t alloc_flags, depot_flags_t depot_flags,
 			struct stack_depot_trie_alloc_workspace *workspace);
+depot_stack_handle_t
+__stack_depot_trie_save_locked(struct stack_depot_trie_root *root,
+			       const unsigned long *entries, unsigned int nr_entries,
+			       gfp_t alloc_flags, depot_flags_t depot_flags,
+			       struct stack_depot_trie_alloc_workspace *workspace,
+			       raw_spinlock_t *workspace_lock);
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req);
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn);
 int

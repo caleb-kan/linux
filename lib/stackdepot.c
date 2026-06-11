@@ -1061,6 +1061,22 @@ static int trie_ws_insert(struct stack_depot_trie_root *root,
 }
 
 static depot_stack_handle_t
+trie_find_handle(const struct stack_depot_trie_root *root,
+		 const unsigned long *entries, unsigned int nr_entries)
+{
+	depot_stack_handle_t handle = 0;
+	const struct stack_depot_trie_node *leaf;
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_find_leaf(root, entries, nr_entries);
+	if (leaf)
+		handle = __stack_depot_trie_handle(leaf->leaf_id);
+	rcu_read_unlock_sched_notrace();
+
+	return handle;
+}
+
+static depot_stack_handle_t
 trie_save_miss(struct stack_depot_trie_root *root, const unsigned long *entries,
 	       unsigned int nr_entries, gfp_t alloc_flags,
 	       depot_flags_t depot_flags,
@@ -1114,7 +1130,6 @@ __stack_depot_trie_save(struct stack_depot_trie_root *root,
 			struct stack_depot_trie_alloc_workspace *workspace)
 {
 	depot_stack_handle_t handle = 0;
-	const struct stack_depot_trie_node *leaf;
 
 	if (!root || !entries || !nr_entries || !workspace)
 		return 0;
@@ -1123,16 +1138,113 @@ __stack_depot_trie_save(struct stack_depot_trie_root *root,
 	if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
 		return 0;
 
-	rcu_read_lock_sched_notrace();
-	leaf = __stack_depot_trie_find_leaf(root, entries, nr_entries);
-	if (leaf)
-		handle = __stack_depot_trie_handle(leaf->leaf_id);
-	rcu_read_unlock_sched_notrace();
-
+	handle = trie_find_handle(root, entries, nr_entries);
 	if (handle)
 		return handle;
 	return trie_save_miss(root, entries, nr_entries, alloc_flags, depot_flags,
 			      workspace);
+}
+
+static depot_stack_handle_t
+trie_save_locked_insert(struct stack_depot_trie_root *root,
+			const unsigned long *entries, unsigned int nr_entries,
+			struct stack_depot_trie_alloc_workspace *workspace,
+			void **pool_prealloc, void **side_prealloc,
+			bool can_insert)
+{
+	depot_stack_handle_t handle;
+	const void *tail;
+	u32 leaf_id;
+	int ret;
+
+	handle = trie_find_handle(root, entries, nr_entries);
+	if (!handle && can_insert) {
+		ret = trie_ws_insert(root, entries, nr_entries, pool_prealloc,
+				     side_prealloc, workspace, &tail, &leaf_id);
+		if (!ret)
+			handle = __stack_depot_trie_handle(leaf_id);
+	}
+
+	return handle;
+}
+
+static depot_stack_handle_t
+trie_save_trylocked(struct stack_depot_trie_root *root,
+		    const unsigned long *entries, unsigned int nr_entries,
+		    struct stack_depot_trie_alloc_workspace *workspace,
+		    raw_spinlock_t *workspace_lock, void **pool_prealloc,
+		    void **side_prealloc, bool can_insert)
+{
+	depot_stack_handle_t handle;
+	unsigned long flags;
+
+	if (!raw_spin_trylock_irqsave(workspace_lock, flags))
+		return 0;
+	handle = trie_save_locked_insert(root, entries, nr_entries, workspace,
+					 pool_prealloc, side_prealloc,
+					 can_insert);
+	raw_spin_unlock_irqrestore(workspace_lock, flags);
+	return handle;
+}
+
+static depot_stack_handle_t
+trie_save_spinlocked(struct stack_depot_trie_root *root,
+		     const unsigned long *entries, unsigned int nr_entries,
+		     struct stack_depot_trie_alloc_workspace *workspace,
+		     raw_spinlock_t *workspace_lock, void **pool_prealloc,
+		     void **side_prealloc, bool can_insert)
+{
+	depot_stack_handle_t handle;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(workspace_lock, flags);
+	handle = trie_save_locked_insert(root, entries, nr_entries, workspace,
+					 pool_prealloc, side_prealloc,
+					 can_insert);
+	raw_spin_unlock_irqrestore(workspace_lock, flags);
+	return handle;
+}
+
+depot_stack_handle_t
+__stack_depot_trie_save_locked(struct stack_depot_trie_root *root,
+			       const unsigned long *entries, unsigned int nr_entries,
+			       gfp_t alloc_flags, depot_flags_t depot_flags,
+			       struct stack_depot_trie_alloc_workspace *workspace,
+			       raw_spinlock_t *workspace_lock)
+{
+	depot_stack_handle_t handle = 0;
+	void *pool_prealloc = NULL;
+	void *side_prealloc = NULL;
+	bool can_insert;
+	int ret;
+
+	if (!root || !entries || !nr_entries || !workspace || !workspace_lock)
+		return 0;
+	if (depot_flags & STACK_DEPOT_FLAG_GET)
+		return 0;
+	if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
+		return 0;
+
+	handle = trie_find_handle(root, entries, nr_entries);
+	if (handle)
+		return handle;
+
+	ret = trie_prealloc(alloc_flags, depot_flags, &pool_prealloc,
+			    &side_prealloc);
+	can_insert = !ret;
+
+	if (in_nmi() || !gfpflags_allow_spinning(alloc_flags))
+		handle = trie_save_trylocked(root, entries, nr_entries, workspace,
+					     workspace_lock, &pool_prealloc,
+					     &side_prealloc, can_insert);
+	else
+		handle = trie_save_spinlocked(root, entries, nr_entries, workspace,
+					      workspace_lock, &pool_prealloc,
+					      &side_prealloc, can_insert);
+
+	__stack_depot_trie_pool_free_prealloc(pool_prealloc);
+	__stack_depot_trie_side_table_free_prealloc(side_prealloc);
+	return handle;
 }
 
 u32 __stack_depot_trie_alloc_txn_commit(struct stack_depot_trie_alloc_txn *txn)

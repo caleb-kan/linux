@@ -1545,6 +1545,16 @@ static depot_stack_handle_t tsave(struct stack_depot_trie_root *root,
 				    depot_flags, workspace);
 }
 
+static depot_stack_handle_t
+tsave_locked(struct stack_depot_trie_root *root, const unsigned long *entries,
+	     unsigned int nr_entries, gfp_t gfp_flags, depot_flags_t depot_flags,
+	     struct stack_depot_trie_alloc_workspace *workspace,
+	     raw_spinlock_t *workspace_lock)
+{
+	return __stack_depot_trie_save_locked(root, entries, nr_entries, gfp_flags,
+					   depot_flags, workspace, workspace_lock);
+}
+
 static unsigned int tfetch_handle(depot_stack_handle_t handle,
 				  unsigned long *entries, unsigned int max_entries)
 {
@@ -1755,6 +1765,45 @@ static void stackdepot_trie_save(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, invalid, (depot_stack_handle_t)0);
 	invalid = tsave(NULL, entries, ARRAY_SIZE(entries), GFP_KERNEL, 0, workspace);
 	KUNIT_EXPECT_EQ(test, invalid, (depot_stack_handle_t)0);
+}
+
+static void stackdepot_trie_save_locked(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL };
+	struct stack_depot_trie_alloc_workspace *workspace;
+	struct stack_depot_trie_root root = {};
+	raw_spinlock_t workspace_lock;
+	depot_stack_handle_t first;
+	depot_stack_handle_t get;
+	depot_stack_handle_t second;
+	unsigned long out[ARRAY_SIZE(entries)] = {};
+	unsigned int fetched;
+
+	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	raw_spin_lock_init(&workspace_lock);
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+
+	first = tsave_locked(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+			     STACK_DEPOT_FLAG_CAN_ALLOC, workspace, &workspace_lock);
+	KUNIT_ASSERT_NE(test, first, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 1UL);
+	fetched = tfetch_handle(first, out, ARRAY_SIZE(out));
+	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, out, entries, sizeof(entries));
+
+	second = tsave_locked(&root, entries, ARRAY_SIZE(entries), GFP_NOWAIT, 0,
+			      workspace, &workspace_lock);
+	KUNIT_EXPECT_EQ(test, second, first);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_side_table_entries(), 1UL);
+
+	get = tsave_locked(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+			   STACK_DEPOT_FLAG_GET, workspace, &workspace_lock);
+	KUNIT_EXPECT_EQ(test, get, (depot_stack_handle_t)0);
+	get = tsave_locked(NULL, entries, ARRAY_SIZE(entries), GFP_KERNEL, 0,
+			   workspace, &workspace_lock);
+	KUNIT_EXPECT_EQ(test, get, (depot_stack_handle_t)0);
 }
 
 static void stackdepot_trie_fetch_handle_into(struct kunit *test)
@@ -5710,6 +5759,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_save_miss),
 	KUNIT_CASE(stackdepot_trie_save_miss_noalloc),
 	KUNIT_CASE(stackdepot_trie_save),
+	KUNIT_CASE(stackdepot_trie_save_locked),
 	KUNIT_CASE(stackdepot_trie_fetch_handle_into),
 	KUNIT_CASE(stackdepot_trie_fetch_public),
 	KUNIT_CASE(stackdepot_trie_materialize_cached),
