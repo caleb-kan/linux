@@ -184,6 +184,8 @@ enum depot_counter_id {
 	DEPOT_COUNTER_FREELIST_SIZE,
 	DEPOT_COUNTER_PERSIST_COUNT,
 	DEPOT_COUNTER_PERSIST_BYTES,
+	DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT,
+	DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES,
 	DEPOT_COUNTER_COUNT,
 };
 static long counters[DEPOT_COUNTER_COUNT];
@@ -194,6 +196,8 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_FREELIST_SIZE]	= "freelist_size",
 	[DEPOT_COUNTER_PERSIST_COUNT]	= "persistent_count",
 	[DEPOT_COUNTER_PERSIST_BYTES]	= "persistent_bytes",
+	[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]	= "trie_materialized_count",
+	[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES]	= "trie_materialized_bytes",
 };
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
 /* Count helpers rely on saturated refcounts looking negative. */
@@ -4166,6 +4170,15 @@ unsigned int __stack_depot_trie_materialized_count(const unsigned long *frames)
 	return READ_ONCE(record->nr_entries);
 }
 
+void
+__stack_depot_trie_materialized_stats(unsigned long *count, unsigned long *bytes)
+{
+	if (count)
+		*count = READ_ONCE(counters[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]);
+	if (bytes)
+		*bytes = READ_ONCE(counters[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES]);
+}
+
 unsigned int
 __stack_depot_trie_materialize_record(depot_stack_handle_t handle,
 				      struct stack_depot_trie_materialized *record,
@@ -4240,8 +4253,11 @@ __stack_depot_trie_materialize_cached(depot_stack_handle_t handle,
 	record = pool + offset;
 	pool_offset += record_size;
 	ret = __stack_depot_trie_materialize_record(handle, record, record_size, frames);
-	if (ret && *frames == record->entries)
+	if (ret && *frames == record->entries) {
+		counters[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]++;
+		counters[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES] += record_size;
 		goto out;
+	}
 
 	pool_offset = offset;
 	if (!*frames)
@@ -5058,6 +5074,8 @@ static int stats_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "pools: %d\n", data_race(pools_num));
 	for (int i = 0; i < DEPOT_COUNTER_COUNT; i++)
 		seq_printf(seq, "%s: %ld\n", counter_names[i], data_race(counters[i]));
+	seq_printf(seq, "trie_side_table_bytes: %zu\n",
+		   __stack_depot_trie_side_table_bytes());
 
 	return 0;
 }

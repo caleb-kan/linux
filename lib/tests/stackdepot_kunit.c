@@ -1921,7 +1921,12 @@ static void stackdepot_trie_materialize_cached(struct kunit *test)
 	depot_stack_handle_t handle;
 	const unsigned long *again;
 	const unsigned long *frames;
+	unsigned long bytes_after;
+	unsigned long bytes_before;
+	unsigned long count_after;
+	unsigned long count_before;
 	unsigned int fetched;
+	size_t record_size;
 	u32 leaf_id;
 
 	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
@@ -1935,6 +1940,9 @@ static void stackdepot_trie_materialize_cached(struct kunit *test)
 	leaf_id = __stack_depot_trie_leaf_id(handle);
 	KUNIT_ASSERT_NE(test, leaf_id, 0U);
 	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_frames(leaf_id));
+	record_size = __stack_depot_trie_materialized_size(ARRAY_SIZE(entries));
+	KUNIT_ASSERT_NE(test, record_size, 0UL);
+	__stack_depot_trie_materialized_stats(&count_before, &bytes_before);
 
 	frames = NULL;
 	fetched = tmaterialize_cached(handle, &frames);
@@ -1945,11 +1953,17 @@ static void stackdepot_trie_materialize_cached(struct kunit *test)
 			(unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_PTR_EQ(test, __stack_depot_trie_side_table_frames(leaf_id),
 			    frames);
+	__stack_depot_trie_materialized_stats(&count_after, &bytes_after);
+	KUNIT_EXPECT_EQ(test, count_after, count_before + 1);
+	KUNIT_EXPECT_EQ(test, bytes_after, bytes_before + record_size);
 
 	again = NULL;
 	fetched = tmaterialize_cached(handle, &again);
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_PTR_EQ(test, again, frames);
+	__stack_depot_trie_materialized_stats(&count_after, &bytes_after);
+	KUNIT_EXPECT_EQ(test, count_after, count_before + 1);
+	KUNIT_EXPECT_EQ(test, bytes_after, bytes_before + record_size);
 
 	extra = stack_depot_set_extra_bits(handle,
 					   (1U << STACK_DEPOT_EXTRA_BITS) - 1);
@@ -1957,6 +1971,9 @@ static void stackdepot_trie_materialize_cached(struct kunit *test)
 	fetched = tmaterialize_cached(extra, &again);
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_PTR_EQ(test, again, frames);
+	__stack_depot_trie_materialized_stats(&count_after, &bytes_after);
+	KUNIT_EXPECT_EQ(test, count_after, count_before + 1);
+	KUNIT_EXPECT_EQ(test, bytes_after, bytes_before + record_size);
 
 	frames = (const unsigned long *)0x1UL;
 	fetched = tmaterialize_cached(0, &frames);

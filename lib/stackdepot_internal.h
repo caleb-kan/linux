@@ -331,6 +331,8 @@ size_t __stack_depot_trie_materialize_bytes(depot_stack_handle_t handle, unsigne
 size_t __stack_depot_trie_materialized_size(unsigned int nr_entries);
 unsigned int
 __stack_depot_trie_materialized_count(const unsigned long *frames);
+void
+__stack_depot_trie_materialized_stats(unsigned long *count, unsigned long *bytes);
 unsigned int
 __stack_depot_trie_materialize_record(depot_stack_handle_t handle,
 				      struct stack_depot_trie_materialized *record,
