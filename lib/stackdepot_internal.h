@@ -31,6 +31,7 @@ static_assert(CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(unsigned long) <= U16_MAX);
 
 bool __stack_depot_trie_enabled(void);
 bool __stack_depot_trie_ready(void);
+bool __stack_depot_trie_can_alloc(gfp_t alloc_flags, depot_flags_t depot_flags);
 void __stack_depot_trie_set_enabled(bool enabled);
 
 struct stack_depot_trie_node_slot {

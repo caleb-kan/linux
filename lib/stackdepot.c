@@ -291,6 +291,30 @@ static u32 trie_side_table_next_id;
 static bool trie_side_table_initialized;
 static bool trie_side_table_memblock;
 
+static bool stack_depot_trie_is_ready(void)
+{
+	/* Pairs with stack_depot_trie_publish_ready(). */
+	return smp_load_acquire(&stack_depot_trie_ready);
+}
+
+static bool trie_side_table_is_initialized(void)
+{
+	/* Pairs with trie_side_table_publish_initialized(). */
+	return smp_load_acquire(&trie_side_table_initialized);
+}
+
+static void stack_depot_trie_publish_ready(void)
+{
+	/* Pairs with stack_depot_trie_is_ready(). */
+	smp_store_release(&stack_depot_trie_ready, true);
+}
+
+static void trie_side_table_publish_initialized(void)
+{
+	/* Pairs with trie_side_table_is_initialized(). */
+	smp_store_release(&trie_side_table_initialized, true);
+}
+
 static void stack_depot_trie_mark_not_ready(void)
 {
 	WRITE_ONCE(stack_depot_trie_ready, false);
@@ -299,9 +323,9 @@ static void stack_depot_trie_mark_not_ready(void)
 bool __stack_depot_trie_ready(void)
 {
 	return __stack_depot_trie_enabled() &&
-		READ_ONCE(stack_depot_trie_ready) &&
+		stack_depot_trie_is_ready() &&
 		READ_ONCE(stack_depot_trie_workspace) &&
-		READ_ONCE(trie_side_table_initialized);
+		trie_side_table_is_initialized();
 }
 
 static unsigned int trie_side_table_top_index(u32 id)
@@ -350,7 +374,7 @@ trie_side_table_install(struct stack_depot_trie_side_entry **chunks,
 			struct stack_depot_trie_side_entry *first_chunk,
 			bool memblock)
 {
-	if (READ_ONCE(trie_side_table_initialized))
+	if (trie_side_table_is_initialized())
 		return 0;
 	if (!chunks || !top_size)
 		return -EINVAL;
@@ -366,7 +390,7 @@ trie_side_table_install(struct stack_depot_trie_side_entry **chunks,
 		WRITE_ONCE(trie_side_table_high_water, 1);
 		WRITE_ONCE(trie_side_table_nr_chunks, 1);
 	}
-	WRITE_ONCE(trie_side_table_initialized, true);
+	trie_side_table_publish_initialized();
 	return 0;
 }
 
@@ -384,7 +408,7 @@ static int __init __stack_depot_trie_side_table_init_memblock(void)
 	u32 max_leaf_id;
 	unsigned int top_size;
 
-	if (READ_ONCE(trie_side_table_initialized))
+	if (trie_side_table_is_initialized())
 		return 0;
 
 	max_leaf_id = __stack_depot_trie_max_leaf_id();
@@ -472,7 +496,7 @@ static int __init stack_depot_trie_init_memblock(void)
 	if (ret)
 		return ret;
 
-	WRITE_ONCE(stack_depot_trie_ready, true);
+	stack_depot_trie_publish_ready();
 	return 0;
 }
 
@@ -490,7 +514,7 @@ static int stack_depot_trie_init(gfp_t gfp_flags)
 	if (ret)
 		return ret;
 
-	WRITE_ONCE(stack_depot_trie_ready, true);
+	stack_depot_trie_publish_ready();
 	return 0;
 }
 
@@ -541,7 +565,7 @@ int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 	size_t top_bytes;
 	u32 max_leaf_id;
 
-	if (READ_ONCE(trie_side_table_initialized))
+	if (trie_side_table_is_initialized())
 		return 0;
 
 	max_leaf_id = __stack_depot_trie_max_leaf_id();
@@ -564,7 +588,7 @@ void __stack_depot_trie_side_table_destroy(void)
 	unsigned int high_water;
 	unsigned int i;
 
-	if (!READ_ONCE(trie_side_table_initialized))
+	if (!trie_side_table_is_initialized())
 		return;
 	stack_depot_trie_mark_not_ready();
 
@@ -590,7 +614,7 @@ bool __stack_depot_trie_side_table_prealloc_needed(void)
 	u32 id;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized))
+	if (!trie_side_table_is_initialized())
 		return false;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -612,6 +636,21 @@ out:
 	return needed;
 }
 
+bool __stack_depot_trie_can_alloc(gfp_t alloc_flags, depot_flags_t depot_flags)
+{
+	if (!__stack_depot_trie_ready())
+		return false;
+	if (depot_flags & STACK_DEPOT_FLAG_GET)
+		return false;
+	if (!(depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC))
+		return false;
+	if (!gfpflags_allow_spinning(alloc_flags))
+		return false;
+	if (!__stack_depot_trie_side_table_prealloc_needed())
+		return true;
+	return slab_is_available();
+}
+
 void *__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags)
 {
 	return kcalloc(STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE,
@@ -630,7 +669,7 @@ u32 __stack_depot_trie_side_table_alloc_id(void **prealloc)
 	u32 id;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized))
+	if (!trie_side_table_is_initialized())
 		return 0;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -669,7 +708,7 @@ void __stack_depot_trie_side_table_revoke_latest(u32 id)
 	unsigned int slot;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id ||
+	if (!trie_side_table_is_initialized() || !id ||
 	    id != READ_ONCE(trie_side_table_next_id))
 		return;
 
@@ -697,7 +736,7 @@ void __stack_depot_trie_side_table_restore(u32 id, const void *entry)
 	unsigned long flags;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id)
+	if (!trie_side_table_is_initialized() || !id)
 		return;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -726,7 +765,7 @@ int __stack_depot_trie_side_table_store(u32 id, const void *entry)
 	unsigned int top;
 	int ret = -EINVAL;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id || !entry)
+	if (!trie_side_table_is_initialized() || !id || !entry)
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
@@ -752,7 +791,7 @@ const void *__stack_depot_trie_side_table_lookup(u32 id)
 	struct stack_depot_trie_side_entry *chunk;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id)
+	if (!trie_side_table_is_initialized() || !id)
 		return NULL;
 
 	top = trie_side_table_top_index(id);
@@ -771,7 +810,7 @@ const unsigned long *__stack_depot_trie_side_table_frames(u32 id)
 	struct stack_depot_trie_side_entry *chunk;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id)
+	if (!trie_side_table_is_initialized() || !id)
 		return NULL;
 
 	top = trie_side_table_top_index(id);
@@ -793,7 +832,7 @@ __stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames)
 	unsigned int slot;
 	unsigned int top;
 
-	if (!READ_ONCE(trie_side_table_initialized) || !id || !frames)
+	if (!trie_side_table_is_initialized() || !id || !frames)
 		return -EINVAL;
 
 	if (id > READ_ONCE(trie_side_table_next_id))
@@ -815,7 +854,7 @@ __stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames)
 
 size_t __stack_depot_trie_side_table_entries(void)
 {
-	return READ_ONCE(trie_side_table_initialized) ?
+	return trie_side_table_is_initialized() ?
 		READ_ONCE(trie_side_table_next_id) : 0;
 }
 
@@ -825,7 +864,7 @@ size_t __stack_depot_trie_side_table_bytes(void)
 	size_t bytes;
 	size_t top_bytes;
 
-	if (!READ_ONCE(trie_side_table_initialized))
+	if (!trie_side_table_is_initialized())
 		return 0;
 	top_bytes = trie_side_table_top_bytes(trie_side_table_top_size);
 	if (!top_bytes)

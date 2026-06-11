@@ -603,15 +603,29 @@ static void stackdepot_trie_feature_flag(struct kunit *test)
 
 static void stackdepot_trie_late_init(struct kunit *test)
 {
+	depot_flags_t can_alloc_flag = STACK_DEPOT_FLAG_CAN_ALLOC;
+	gfp_t no_spin = GFP_NOWAIT & ~__GFP_RECLAIM;
+	bool can_alloc;
+
 	stackdepot_trie_add_disable_action(test);
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_ready());
+	can_alloc = __stack_depot_trie_can_alloc(GFP_KERNEL, can_alloc_flag);
+	KUNIT_EXPECT_FALSE(test, can_alloc);
 	if (!__stack_depot_trie_max_leaf_id())
 		kunit_skip(test, "trie handle namespace unavailable");
 
 	__stack_depot_trie_set_enabled(true);
 	KUNIT_EXPECT_EQ(test, stack_depot_init(), 0);
 	KUNIT_EXPECT_TRUE(test, __stack_depot_trie_ready());
+	can_alloc = __stack_depot_trie_can_alloc(GFP_KERNEL, can_alloc_flag);
+	KUNIT_EXPECT_TRUE(test, can_alloc);
+	can_alloc = __stack_depot_trie_can_alloc(GFP_KERNEL, 0);
+	KUNIT_EXPECT_FALSE(test, can_alloc);
+	can_alloc = __stack_depot_trie_can_alloc(no_spin, can_alloc_flag);
+	KUNIT_EXPECT_FALSE(test, can_alloc);
+	can_alloc = __stack_depot_trie_can_alloc(GFP_KERNEL, STACK_DEPOT_FLAG_GET);
+	KUNIT_EXPECT_FALSE(test, can_alloc);
 }
 
 static void stackdepot_trie_side_table_destroy_action(void *data)
