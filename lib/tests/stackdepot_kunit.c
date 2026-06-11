@@ -6,6 +6,7 @@
 #include <linux/gfp.h>
 #include <linux/limits.h>
 #include <linux/stackdepot.h>
+#include <linux/stacktrace.h>
 #include <linux/string.h>
 
 #include "../stackdepot_internal.h"
@@ -1985,6 +1986,40 @@ static void stackdepot_trie_fetch_public(struct kunit *test)
 	fetched = stack_depot_fetch(handle, &again);
 	KUNIT_EXPECT_EQ(test, fetched, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_PTR_EQ(test, again, frames);
+}
+
+static void stackdepot_trie_snprint_public(struct kunit *test)
+{
+	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
+	struct stack_depot_trie_alloc_workspace *workspace;
+	char expected[256];
+	char actual[256];
+	struct stack_depot_trie_root root = {};
+	depot_stack_handle_t extra;
+	depot_stack_handle_t handle;
+	unsigned int expected_len;
+	int actual_len;
+	u32 leaf_id;
+
+	workspace = kunit_kzalloc(test, sizeof(*workspace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, workspace);
+	stackdepot_trie_side_table_init_or_skip(test);
+	stackdepot_trie_pool_seed_current_pool(test);
+
+	handle = tsave(&root, entries, ARRAY_SIZE(entries), GFP_KERNEL,
+		       STACK_DEPOT_FLAG_CAN_ALLOC, workspace);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	KUNIT_ASSERT_NE(test, leaf_id, 0U);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_frames(leaf_id));
+
+	expected_len = stack_trace_snprint(expected, sizeof(expected), entries,
+					   ARRAY_SIZE(entries), 2);
+	extra = stack_depot_set_extra_bits(handle, 7);
+	actual_len = stack_depot_snprint(extra, actual, sizeof(actual), 2);
+	KUNIT_EXPECT_EQ(test, actual_len, (int)expected_len);
+	KUNIT_EXPECT_STREQ(test, actual, expected);
+	KUNIT_EXPECT_NULL(test, __stack_depot_trie_side_table_frames(leaf_id));
 }
 
 static void stackdepot_trie_materialize_cached(struct kunit *test)
@@ -5790,6 +5825,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_save_locked),
 	KUNIT_CASE(stackdepot_trie_fetch_handle_into),
 	KUNIT_CASE(stackdepot_trie_fetch_public),
+	KUNIT_CASE(stackdepot_trie_snprint_public),
 	KUNIT_CASE(stackdepot_trie_materialize_cached),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_plan),
 	KUNIT_CASE(stackdepot_trie_alloc_txn_insert),

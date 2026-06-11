@@ -4326,6 +4326,118 @@ static unsigned int trie_walk_frames(const void *leaf, unsigned int total,
 	return seen == total ? total : 0;
 }
 
+static int trie_frame_at(const void *leaf, unsigned int index,
+			 unsigned long *frame)
+{
+	const struct stack_depot_trie_node *node;
+
+	if (!leaf || !frame)
+		return -EINVAL;
+
+	for (node = leaf; node; node = trie_load_parent(node)) {
+		unsigned int start;
+
+		if (node->run.nr_entries > node->stack_len)
+			return -EINVAL;
+		start = node->stack_len - node->run.nr_entries;
+		if (index < start || index >= node->stack_len)
+			continue;
+		return stack_depot_trie_node_frame(node, index - start, frame);
+	}
+
+	return -EINVAL;
+}
+
+static void trie_print_frames(const void *leaf, unsigned int nr_entries,
+			      int spaces)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr_entries; i++) {
+		unsigned long frame;
+
+		if (trie_frame_at(leaf, i, &frame))
+			return;
+		pr_info("%*c%pS\n", 1 + spaces, ' ', (void *)frame);
+	}
+}
+
+static int
+trie_snprint_frames(char *buf, size_t size, const void *leaf,
+		    unsigned int nr_entries, int spaces)
+{
+	unsigned int generated;
+	unsigned int total = 0;
+	unsigned int i;
+
+	for (i = 0; i < nr_entries && size; i++) {
+		unsigned long frame;
+
+		if (trie_frame_at(leaf, i, &frame))
+			break;
+		generated = snprintf(buf, size, "%*c%pS\n", 1 + spaces, ' ',
+				     (void *)frame);
+		total += generated;
+		if (generated >= size) {
+			buf += size;
+			size = 0;
+		} else {
+			buf += generated;
+			size -= generated;
+		}
+	}
+
+	return total;
+}
+
+static unsigned int trie_handle_leaf(depot_stack_handle_t handle,
+				     const void **leaf)
+{
+	u32 leaf_id;
+
+	if (!leaf)
+		return 0;
+	*leaf = NULL;
+	leaf_id = __stack_depot_trie_leaf_id(handle);
+	if (!leaf_id)
+		return 0;
+	*leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (WARN(!*leaf, "corrupt trie handle %08x\n", handle))
+		return 0;
+	return trie_validate_leaf(*leaf, NULL);
+}
+
+static unsigned int trie_print_handle(depot_stack_handle_t handle, int spaces)
+{
+	unsigned int nr_entries;
+	const void *leaf;
+
+	rcu_read_lock_sched_notrace();
+	nr_entries = trie_handle_leaf(handle, &leaf);
+	if (nr_entries)
+		trie_print_frames(leaf, nr_entries, spaces);
+	rcu_read_unlock_sched_notrace();
+
+	return nr_entries;
+}
+
+static int
+trie_snprint_handle(depot_stack_handle_t handle, char *buf, size_t size,
+		    int spaces)
+{
+	unsigned int nr_entries;
+	const void *leaf;
+	int ret = 0;
+
+	rcu_read_lock_sched_notrace();
+	nr_entries = trie_handle_leaf(handle, &leaf);
+	if (nr_entries)
+		ret = trie_snprint_frames(buf, size, leaf, nr_entries, spaces);
+	rcu_read_unlock_sched_notrace();
+
+	return ret;
+}
+
 static void trie_fetch_frame(unsigned int index, unsigned long frame, void *data)
 {
 	struct stack_depot_trie_fetch_ctx *ctx = data;
@@ -5378,6 +5490,11 @@ void stack_depot_print(depot_stack_handle_t stack)
 	unsigned long *entries;
 	unsigned int nr_entries;
 
+	if (__stack_depot_trie_leaf_id(stack)) {
+		trie_print_handle(stack, 0);
+		return;
+	}
+
 	nr_entries = stack_depot_fetch(stack, &entries);
 	if (nr_entries > 0)
 		stack_trace_print(entries, nr_entries, 0);
@@ -5389,6 +5506,9 @@ int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
 {
 	unsigned long *entries;
 	unsigned int nr_entries;
+
+	if (__stack_depot_trie_leaf_id(handle))
+		return trie_snprint_handle(handle, buf, size, spaces);
 
 	nr_entries = stack_depot_fetch(handle, &entries);
 	return nr_entries ? stack_trace_snprint(buf, size, entries, nr_entries,
