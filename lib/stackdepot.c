@@ -56,6 +56,8 @@ static bool __stack_depot_early_init_requested __initdata = IS_ENABLED(CONFIG_ST
 static bool __stack_depot_early_init_passed __initdata;
 static DEFINE_STATIC_KEY_FALSE(stack_depot_trie_enabled);
 static bool stack_depot_trie_enabled_param;
+static struct stack_depot_trie_alloc_workspace *stack_depot_trie_workspace;
+static bool stack_depot_trie_ready;
 
 bool __stack_depot_trie_enabled(void)
 {
@@ -289,6 +291,19 @@ static u32 trie_side_table_next_id;
 static bool trie_side_table_initialized;
 static bool trie_side_table_memblock;
 
+static void stack_depot_trie_mark_not_ready(void)
+{
+	WRITE_ONCE(stack_depot_trie_ready, false);
+}
+
+bool __stack_depot_trie_ready(void)
+{
+	return __stack_depot_trie_enabled() &&
+		READ_ONCE(stack_depot_trie_ready) &&
+		READ_ONCE(stack_depot_trie_workspace) &&
+		READ_ONCE(trie_side_table_initialized);
+}
+
 static unsigned int trie_side_table_top_index(u32 id)
 {
 	return (id - 1) >> STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS;
@@ -395,6 +410,90 @@ static int __init __stack_depot_trie_side_table_init_memblock(void)
 	return trie_side_table_install(chunks, top_size, first_chunk, true);
 }
 
+static size_t stack_depot_trie_workspace_size(void)
+{
+	return sizeof(*stack_depot_trie_workspace);
+}
+
+static int
+stack_depot_trie_install_workspace(struct stack_depot_trie_alloc_workspace *workspace)
+{
+	if (READ_ONCE(stack_depot_trie_workspace))
+		return 0;
+	if (!workspace)
+		return -EINVAL;
+
+	WRITE_ONCE(stack_depot_trie_workspace, workspace);
+	return 0;
+}
+
+static int __init stack_depot_trie_init_workspace_memblock(void)
+{
+	struct stack_depot_trie_alloc_workspace *workspace;
+	size_t size;
+
+	if (READ_ONCE(stack_depot_trie_workspace))
+		return 0;
+
+	size = stack_depot_trie_workspace_size();
+	workspace = memblock_alloc(size, __alignof__(*workspace));
+	if (!workspace)
+		return -ENOMEM;
+	memset(workspace, 0, size);
+
+	return stack_depot_trie_install_workspace(workspace);
+}
+
+static int stack_depot_trie_init_workspace(gfp_t gfp_flags)
+{
+	struct stack_depot_trie_alloc_workspace *workspace;
+
+	if (READ_ONCE(stack_depot_trie_workspace))
+		return 0;
+
+	workspace = kvzalloc(stack_depot_trie_workspace_size(), gfp_flags);
+	if (!workspace)
+		return -ENOMEM;
+
+	return stack_depot_trie_install_workspace(workspace);
+}
+
+static int __init stack_depot_trie_init_memblock(void)
+{
+	int ret;
+
+	if (!__stack_depot_trie_enabled())
+		return 0;
+
+	ret = stack_depot_trie_init_workspace_memblock();
+	if (ret)
+		return ret;
+	ret = __stack_depot_trie_side_table_init_memblock();
+	if (ret)
+		return ret;
+
+	WRITE_ONCE(stack_depot_trie_ready, true);
+	return 0;
+}
+
+static int stack_depot_trie_init(gfp_t gfp_flags)
+{
+	int ret;
+
+	if (!__stack_depot_trie_enabled())
+		return 0;
+
+	ret = stack_depot_trie_init_workspace(gfp_flags);
+	if (ret)
+		return ret;
+	ret = __stack_depot_trie_side_table_init(gfp_flags);
+	if (ret)
+		return ret;
+
+	WRITE_ONCE(stack_depot_trie_ready, true);
+	return 0;
+}
+
 static const void *
 trie_side_table_load_leaf(struct stack_depot_trie_side_entry *chunk,
 			  unsigned int slot)
@@ -467,6 +566,7 @@ void __stack_depot_trie_side_table_destroy(void)
 
 	if (!READ_ONCE(trie_side_table_initialized))
 		return;
+	stack_depot_trie_mark_not_ready();
 
 	high_water = READ_ONCE(trie_side_table_high_water);
 	if (!READ_ONCE(trie_side_table_memblock)) {
@@ -1597,9 +1697,8 @@ int __init stack_depot_early_init(void)
 		stack_depot_disabled = true;
 		return -ENOMEM;
 	}
-	if (__stack_depot_trie_enabled() &&
-	    __stack_depot_trie_side_table_init_memblock()) {
-		pr_warn("trie side table allocation failed, disabling trie storage\n");
+	if (__stack_depot_trie_enabled() && stack_depot_trie_init_memblock()) {
+		pr_warn("trie storage initialization failed, disabling trie storage\n");
 		__stack_depot_trie_set_enabled(false);
 	}
 
@@ -1615,8 +1714,10 @@ int stack_depot_init(void)
 
 	mutex_lock(&stack_depot_init_mutex);
 
-	if (stack_depot_disabled || stack_table)
+	if (stack_depot_disabled)
 		goto out_unlock;
+	if (stack_table)
+		goto init_trie;
 
 	/*
 	 * Similarly to stack_depot_early_init, use stack_bucket_number_order
@@ -1663,10 +1764,12 @@ int stack_depot_init(void)
 		stack_depot_disabled = true;
 		ret = -ENOMEM;
 	}
+
+init_trie:
 	if (!ret && __stack_depot_trie_enabled()) {
-		ret = __stack_depot_trie_side_table_init(GFP_KERNEL);
+		ret = stack_depot_trie_init(GFP_KERNEL);
 		if (ret) {
-			pr_warn("trie side table allocation failed, disabling trie storage\n");
+			pr_warn("trie storage initialization failed, disabling trie storage\n");
 			__stack_depot_trie_set_enabled(false);
 			ret = 0;
 		}

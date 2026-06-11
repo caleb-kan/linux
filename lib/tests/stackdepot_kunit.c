@@ -601,6 +601,19 @@ static void stackdepot_trie_feature_flag(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_enabled());
 }
 
+static void stackdepot_trie_late_init(struct kunit *test)
+{
+	stackdepot_trie_add_disable_action(test);
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+	KUNIT_EXPECT_FALSE(test, __stack_depot_trie_ready());
+	if (!__stack_depot_trie_max_leaf_id())
+		kunit_skip(test, "trie handle namespace unavailable");
+
+	__stack_depot_trie_set_enabled(true);
+	KUNIT_EXPECT_EQ(test, stack_depot_init(), 0);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_trie_ready());
+}
+
 static void stackdepot_trie_side_table_destroy_action(void *data)
 {
 	__stack_depot_trie_side_table_destroy();
@@ -5726,6 +5739,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_count_helpers),
 	KUNIT_CASE(stackdepot_trie_handle_namespace),
 	KUNIT_CASE(stackdepot_trie_feature_flag),
+	KUNIT_CASE(stackdepot_trie_late_init),
 	KUNIT_CASE(stackdepot_trie_side_table_destroy_uninit),
 	KUNIT_CASE(stackdepot_trie_side_table_alloc_store_lookup),
 	KUNIT_CASE(stackdepot_trie_side_table_rejects_invalid_ids),
