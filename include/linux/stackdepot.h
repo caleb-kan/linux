@@ -47,8 +47,9 @@ typedef u32 depot_flags_t;
  */
 #define STACK_DEPOT_FLAG_CAN_ALLOC	((depot_flags_t)0x0001)
 #define STACK_DEPOT_FLAG_GET		((depot_flags_t)0x0002)
+#define STACK_DEPOT_FLAG_HASH		((depot_flags_t)0x0004)
 
-#define STACK_DEPOT_FLAGS_NUM	2
+#define STACK_DEPOT_FLAGS_NUM	3
 #define STACK_DEPOT_FLAGS_MASK	((depot_flags_t)((1 << STACK_DEPOT_FLAGS_NUM) - 1))
 
 /*
@@ -106,6 +107,11 @@ static inline int stack_depot_early_init(void)	{ return 0; }
  * the refcount on the saved stack trace if it already exists in stack depot.
  * Users of this flag must also call stack_depot_put() when keeping the stack
  * trace is no longer required to avoid overflowing the refcount.
+ *
+ * If STACK_DEPOT_FLAG_HASH is set in @depot_flags, stack depot stores the stack
+ * trace in legacy hash storage even when trie storage is enabled. This is for
+ * internal callers that depend on stackdepot count helpers. This flag does not
+ * imply %STACK_DEPOT_FLAG_CAN_ALLOC.
  *
  * If the provided stack trace comes from the interrupt context, only the part
  * up to the interrupt entry is saved.
@@ -273,7 +279,7 @@ void stack_depot_print(depot_stack_handle_t stack);
  * Return:	Number of bytes printed
  */
 int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
-		       int spaces);
+			int spaces);
 
 /**
  * stack_depot_put - Drop a reference to a stack trace from stack depot
@@ -298,8 +304,8 @@ void stack_depot_put(depot_stack_handle_t handle);
  * Stack depot handles have a few unused bits, which can be used for storing
  * user-specific information. These bits are transparent to the stack depot.
  */
-depot_stack_handle_t __must_check stack_depot_set_extra_bits(
-			depot_stack_handle_t handle, unsigned int extra_bits);
+depot_stack_handle_t __must_check stack_depot_set_extra_bits(depot_stack_handle_t handle,
+							     unsigned int extra_bits);
 
 /**
  * stack_depot_get_extra_bits - Retrieve extra bits from a stack depot handle

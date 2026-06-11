@@ -52,11 +52,14 @@ static unsigned int stack_max_pools __read_mostly =
 	MIN((1LL << DEPOT_POOL_INDEX_BITS) - 1, 8192);
 
 static bool stack_depot_disabled;
-static bool __stack_depot_early_init_requested __initdata = IS_ENABLED(CONFIG_STACKDEPOT_ALWAYS_INIT);
+static bool __stack_depot_early_init_requested __initdata =
+	IS_ENABLED(CONFIG_STACKDEPOT_ALWAYS_INIT);
 static bool __stack_depot_early_init_passed __initdata;
 static DEFINE_STATIC_KEY_FALSE(stack_depot_trie_enabled);
 static bool stack_depot_trie_enabled_param;
+static struct stack_depot_trie_root stack_depot_trie_root;
 static struct stack_depot_trie_alloc_workspace *stack_depot_trie_workspace;
+static DEFINE_RAW_SPINLOCK(stack_depot_trie_workspace_lock);
 static bool stack_depot_trie_ready;
 
 bool __stack_depot_trie_enabled(void)
@@ -190,6 +193,7 @@ enum depot_counter_id {
 	DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES,
 	DEPOT_COUNTER_COUNT,
 };
+
 static long counters[DEPOT_COUNTER_COUNT];
 static const char *const counter_names[] = {
 	[DEPOT_COUNTER_REFD_ALLOCS]	= "refcounted_allocations",
@@ -201,6 +205,7 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]	= "trie_materialized_count",
 	[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES]	= "trie_materialized_bytes",
 };
+
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
 /* Count helpers rely on saturated refcounts looking negative. */
 static_assert(REFCOUNT_SATURATED < 0);
@@ -640,7 +645,7 @@ bool __stack_depot_trie_can_alloc(gfp_t alloc_flags, depot_flags_t depot_flags)
 {
 	if (!__stack_depot_trie_ready())
 		return false;
-	if (depot_flags & STACK_DEPOT_FLAG_GET)
+	if (depot_flags & (STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_HASH))
 		return false;
 	if (!(depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC))
 		return false;
@@ -2165,6 +2170,16 @@ static inline struct stack_record *find_stack(struct list_head *bucket,
 	return ret;
 }
 
+static depot_stack_handle_t
+stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
+		      gfp_t alloc_flags, depot_flags_t depot_flags)
+{
+	return __stack_depot_trie_save_locked(&stack_depot_trie_root, entries,
+					   nr_entries, alloc_flags, depot_flags,
+					   stack_depot_trie_workspace,
+					   &stack_depot_trie_workspace_lock);
+}
+
 depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 					    unsigned int nr_entries,
 					    gfp_t alloc_flags,
@@ -2203,6 +2218,17 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
 	if (found)
 		goto exit;
+	if (__stack_depot_trie_ready() &&
+	    !(depot_flags & (STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_HASH)) &&
+	    nr_entries <= CONFIG_STACKDEPOT_MAX_FRAMES) {
+		handle = trie_find_handle(&stack_depot_trie_root, entries, nr_entries);
+		if (handle)
+			return handle;
+		if (!__stack_depot_trie_can_alloc(alloc_flags, depot_flags))
+			return 0;
+		handle = stack_depot_trie_save(entries, nr_entries, alloc_flags, depot_flags);
+		return handle;
+	}
 
 	/*
 	 * Allocate memory for a new pool if required now:
@@ -5477,7 +5503,7 @@ void stack_depot_put(depot_stack_handle_t handle)
 	 * Should always be able to find the stack record, otherwise this is an
 	 * unbalanced put attempt (or corrupt handle).
 	 */
-	if (WARN(!stack, "corrupt handle or unbalanced stack_depot_put()"))
+	if (WARN(!stack, "corrupt handle or unbalanced %s()", __func__))
 		return;
 
 	if (refcount_dec_and_test(&stack->count))
@@ -5502,7 +5528,7 @@ void stack_depot_print(depot_stack_handle_t stack)
 EXPORT_SYMBOL_GPL(stack_depot_print);
 
 int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
-		       int spaces)
+			int spaces)
 {
 	unsigned long *entries;
 	unsigned int nr_entries;
@@ -5516,8 +5542,8 @@ int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
 }
 EXPORT_SYMBOL_GPL(stack_depot_snprint);
 
-depot_stack_handle_t __must_check stack_depot_set_extra_bits(
-			depot_stack_handle_t handle, unsigned int extra_bits)
+depot_stack_handle_t __must_check stack_depot_set_extra_bits(depot_stack_handle_t handle,
+							     unsigned int extra_bits)
 {
 	union handle_parts parts = { .handle = handle };
 
@@ -5546,7 +5572,7 @@ static int stats_show(struct seq_file *seq, void *v)
 	 */
 	seq_printf(seq, "pools: %d\n", data_race(pools_num));
 	for (int i = 0; i < DEPOT_COUNTER_COUNT; i++)
-		seq_printf(seq, "%s: %ld\n", counter_names[i], data_race(counters[i]));
+		seq_printf(seq, "%s: %ld\n", counter_names[i], READ_ONCE(counters[i]));
 	seq_printf(seq, "trie_side_table_bytes: %zu\n",
 		   __stack_depot_trie_side_table_bytes());
 

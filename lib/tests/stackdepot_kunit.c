@@ -5782,6 +5782,80 @@ static void stackdepot_trie_child_array_insert_empty(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, child_array_find(new_array, 0x1000UL), child);
 }
 
+static void stackdepot_trie_public_save_route(struct kunit *test)
+{
+	unsigned long hash_entries[] = { 0x401000UL, 0x402000UL };
+	unsigned long trie_entries[] = { 0x501000UL, 0x502000UL, 0x503000UL };
+	unsigned long get_entries[] = { 0x601000UL, 0x602000UL };
+	unsigned long noalloc_entries[] = { 0x701000UL, 0x702000UL };
+	unsigned long hash_flag_entries[] = { 0x901000UL, 0x902000UL };
+	unsigned long fetched[ARRAY_SIZE(trie_entries)] = {};
+	depot_stack_handle_t get_handle;
+	depot_stack_handle_t hash_flag;
+	depot_stack_handle_t hash_again;
+	depot_stack_handle_t hash_handle;
+	depot_stack_handle_t noalloc_handle;
+	depot_stack_handle_t overlong_handle;
+	depot_stack_handle_t trie_again;
+	depot_stack_handle_t trie_handle;
+	depot_flags_t get_flags;
+	unsigned int hash_flag_nr = ARRAY_SIZE(hash_flag_entries);
+	gfp_t no_spin = GFP_NOWAIT & ~__GFP_RECLAIM;
+	unsigned int get_nr = ARRAY_SIZE(get_entries);
+	unsigned int noalloc_nr = ARRAY_SIZE(noalloc_entries);
+	unsigned int nr_entries;
+	unsigned long *overlong_entries;
+	unsigned int overlong_nr = CONFIG_STACKDEPOT_MAX_FRAMES + 1;
+	unsigned int i;
+
+	stackdepot_trie_add_disable_action(test);
+	overlong_entries = kunit_kcalloc(test, overlong_nr, sizeof(*overlong_entries),
+					 GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, overlong_entries);
+	for (i = 0; i < overlong_nr; i++)
+		overlong_entries[i] = 0x800000UL + i * 0x1000UL;
+
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+	hash_handle = stack_depot_save(hash_entries, ARRAY_SIZE(hash_entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(hash_handle), 0U);
+	if (!__stack_depot_trie_max_leaf_id())
+		kunit_skip(test, "trie handle namespace unavailable");
+
+	__stack_depot_trie_set_enabled(true);
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+	KUNIT_EXPECT_TRUE(test, __stack_depot_trie_ready());
+	hash_again = stack_depot_save(hash_entries, ARRAY_SIZE(hash_entries), GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, hash_again, hash_handle);
+
+	trie_handle = stack_depot_save(trie_entries, ARRAY_SIZE(trie_entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, trie_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_NE(test, __stack_depot_trie_leaf_id(trie_handle), 0U);
+	trie_again = stack_depot_save(trie_entries, ARRAY_SIZE(trie_entries), GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, trie_again, trie_handle);
+	nr_entries = stack_depot_fetch_into(trie_handle, fetched, ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(trie_entries));
+	KUNIT_EXPECT_MEMEQ(test, fetched, trie_entries, sizeof(trie_entries));
+	noalloc_handle = stack_depot_save_flags(noalloc_entries, noalloc_nr, no_spin, 0);
+	KUNIT_EXPECT_EQ(test, noalloc_handle, (depot_stack_handle_t)0);
+	noalloc_handle = stack_depot_save(noalloc_entries, noalloc_nr, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, noalloc_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_NE(test, __stack_depot_trie_leaf_id(noalloc_handle), 0U);
+
+	get_flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_GET;
+	get_handle = stack_depot_save_flags(get_entries, get_nr, GFP_KERNEL, get_flags);
+	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(get_handle), 0U);
+	stack_depot_put(get_handle);
+	get_flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH;
+	hash_flag = stack_depot_save_flags(hash_flag_entries, hash_flag_nr, GFP_KERNEL, get_flags);
+	KUNIT_ASSERT_NE(test, hash_flag, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(hash_flag), 0U);
+	overlong_handle = stack_depot_save(overlong_entries, overlong_nr, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, overlong_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_EQ(test, __stack_depot_trie_leaf_id(overlong_handle), 0U);
+}
+
 static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
@@ -5945,6 +6019,7 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_trie_split_subtree_prefix_leaf),
 	KUNIT_CASE(stackdepot_trie_split_subtree_preserves_children),
 	KUNIT_CASE(stackdepot_trie_child_array_insert_empty),
+	KUNIT_CASE(stackdepot_trie_public_save_route),
 	{}
 };
 

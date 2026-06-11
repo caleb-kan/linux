@@ -99,7 +99,8 @@ static __always_inline depot_stack_handle_t create_dummy_stack(void)
 	unsigned int nr_entries;
 
 	nr_entries = stack_trace_save(entries, ARRAY_SIZE(entries), 0);
-	return stack_depot_save(entries, nr_entries, GFP_KERNEL);
+	return stack_depot_save_flags(entries, nr_entries, GFP_KERNEL,
+				       STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH);
 }
 
 static noinline void register_dummy_stack(void)
@@ -163,7 +164,8 @@ static noinline depot_stack_handle_t save_stack(gfp_t flags)
 
 	set_current_in_page_owner();
 	nr_entries = stack_trace_save(entries, ARRAY_SIZE(entries), 2);
-	handle = stack_depot_save(entries, nr_entries, flags);
+	handle = stack_depot_save_flags(entries, nr_entries, flags,
+					STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH);
 	if (!handle)
 		handle = failure_handle;
 	unset_current_in_page_owner();
@@ -580,8 +582,8 @@ out_unlock:
 
 static ssize_t
 print_page_owner(char __user *buf, size_t count, unsigned long pfn,
-		struct page *page, struct page_owner *page_owner,
-		depot_stack_handle_t handle)
+		 struct page *page, struct page_owner *page_owner,
+		 depot_stack_handle_t handle)
 {
 	int ret, pageblock_mt, page_mt;
 	char *kbuf;
@@ -680,13 +682,13 @@ void __dump_page_owner(const struct page *page)
 		pr_alert("page_owner free stack trace missing\n");
 	} else {
 		pr_alert("page last free pid %d tgid %d stack trace:\n",
-			  page_owner->free_pid, page_owner->free_tgid);
+			 page_owner->free_pid, page_owner->free_tgid);
 		stack_depot_print(handle);
 	}
 
 	if (page_owner->last_migrate_reason != -1)
 		pr_alert("page has been migrated, last migrate reason: %s\n",
-			migrate_reason_names[page_owner->last_migrate_reason]);
+			 migrate_reason_names[page_owner->last_migrate_reason]);
 	page_ext_put(page_ext);
 }
 
@@ -1013,7 +1015,6 @@ static int page_owner_threshold_set(void *data, u64 val)
 
 DEFINE_SIMPLE_ATTRIBUTE(proc_page_owner_threshold, &page_owner_threshold_get,
 			&page_owner_threshold_set, "%llu");
-
 
 static int __init pageowner_init(void)
 {
