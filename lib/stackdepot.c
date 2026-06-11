@@ -287,6 +287,7 @@ static unsigned int trie_side_table_nr_chunks;
 static unsigned int trie_side_table_top_size;
 static u32 trie_side_table_next_id;
 static bool trie_side_table_initialized;
+static bool trie_side_table_memblock;
 
 static unsigned int trie_side_table_top_index(u32 id)
 {
@@ -310,6 +311,88 @@ trie_side_table_publish_chunk(unsigned int top,
 {
 	/* Pairs with trie_side_table_load_chunk(). */
 	smp_store_release(&trie_side_table_chunks[top], chunk);
+}
+
+static size_t trie_side_table_top_bytes(unsigned int top_size)
+{
+	size_t bytes;
+
+	if (check_mul_overflow((size_t)top_size,
+			       sizeof(*trie_side_table_chunks), &bytes))
+		return 0;
+	return bytes;
+}
+
+static size_t trie_side_table_chunk_bytes(void)
+{
+	return STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE *
+		sizeof(*trie_side_table_chunks[0]);
+}
+
+static int
+trie_side_table_install(struct stack_depot_trie_side_entry **chunks,
+			unsigned int top_size,
+			struct stack_depot_trie_side_entry *first_chunk,
+			bool memblock)
+{
+	if (READ_ONCE(trie_side_table_initialized))
+		return 0;
+	if (!chunks || !top_size)
+		return -EINVAL;
+
+	trie_side_table_chunks = chunks;
+	WRITE_ONCE(trie_side_table_top_size, top_size);
+	WRITE_ONCE(trie_side_table_high_water, 0);
+	WRITE_ONCE(trie_side_table_nr_chunks, 0);
+	WRITE_ONCE(trie_side_table_next_id, 0);
+	WRITE_ONCE(trie_side_table_memblock, memblock);
+	if (first_chunk) {
+		trie_side_table_publish_chunk(0, first_chunk);
+		WRITE_ONCE(trie_side_table_high_water, 1);
+		WRITE_ONCE(trie_side_table_nr_chunks, 1);
+	}
+	WRITE_ONCE(trie_side_table_initialized, true);
+	return 0;
+}
+
+static unsigned int trie_side_table_top_size_for_max_id(u32 max_leaf_id)
+{
+	return DIV_ROUND_UP(max_leaf_id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
+}
+
+static int __init __stack_depot_trie_side_table_init_memblock(void)
+{
+	struct stack_depot_trie_side_entry **chunks;
+	struct stack_depot_trie_side_entry *first_chunk;
+	size_t chunk_bytes;
+	size_t top_bytes;
+	u32 max_leaf_id;
+	unsigned int top_size;
+
+	if (READ_ONCE(trie_side_table_initialized))
+		return 0;
+
+	max_leaf_id = __stack_depot_trie_max_leaf_id();
+	if (!max_leaf_id)
+		return -EINVAL;
+	top_size = trie_side_table_top_size_for_max_id(max_leaf_id);
+	top_bytes = trie_side_table_top_bytes(top_size);
+	chunk_bytes = trie_side_table_chunk_bytes();
+	if (!top_bytes || !chunk_bytes)
+		return -ENOMEM;
+
+	chunks = memblock_alloc(top_bytes, PAGE_SIZE);
+	if (!chunks)
+		return -ENOMEM;
+	memset(chunks, 0, top_bytes);
+	first_chunk = memblock_alloc(chunk_bytes, PAGE_SIZE);
+	if (!first_chunk) {
+		memblock_free(chunks, top_bytes);
+		return -ENOMEM;
+	}
+	memset(first_chunk, 0, chunk_bytes);
+
+	return trie_side_table_install(chunks, top_size, first_chunk, true);
 }
 
 static const void *
@@ -354,6 +437,9 @@ trie_side_table_clear_entry(struct stack_depot_trie_side_entry *chunk,
 
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 {
+	struct stack_depot_trie_side_entry **chunks;
+	unsigned int top_size;
+	size_t top_bytes;
 	u32 max_leaf_id;
 
 	if (READ_ONCE(trie_side_table_initialized))
@@ -363,36 +449,37 @@ int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 	if (!max_leaf_id)
 		return -EINVAL;
 
-	trie_side_table_top_size =
-		DIV_ROUND_UP(max_leaf_id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
-	trie_side_table_chunks =
-		kvcalloc(trie_side_table_top_size, sizeof(*trie_side_table_chunks),
-			 gfp_flags);
-	if (!trie_side_table_chunks)
+	top_size = trie_side_table_top_size_for_max_id(max_leaf_id);
+	top_bytes = trie_side_table_top_bytes(top_size);
+	if (!top_bytes)
+		return -ENOMEM;
+	chunks = kvcalloc(top_size, sizeof(*chunks), gfp_flags);
+	if (!chunks)
 		return -ENOMEM;
 
-	WRITE_ONCE(trie_side_table_high_water, 0);
-	WRITE_ONCE(trie_side_table_nr_chunks, 0);
-	WRITE_ONCE(trie_side_table_next_id, 0);
-	WRITE_ONCE(trie_side_table_initialized, true);
-	return 0;
+	return trie_side_table_install(chunks, top_size, NULL, false);
 }
 
 void __stack_depot_trie_side_table_destroy(void)
 {
+	unsigned int high_water;
 	unsigned int i;
 
 	if (!READ_ONCE(trie_side_table_initialized))
 		return;
 
-	for (i = 0; i < trie_side_table_high_water; i++)
-		kfree(trie_side_table_chunks[i]);
-	kvfree(trie_side_table_chunks);
+	high_water = READ_ONCE(trie_side_table_high_water);
+	if (!READ_ONCE(trie_side_table_memblock)) {
+		for (i = 0; i < high_water; i++)
+			kfree(trie_side_table_chunks[i]);
+		kvfree(trie_side_table_chunks);
+	}
 	trie_side_table_chunks = NULL;
 	WRITE_ONCE(trie_side_table_high_water, 0);
 	WRITE_ONCE(trie_side_table_nr_chunks, 0);
 	WRITE_ONCE(trie_side_table_top_size, 0);
 	WRITE_ONCE(trie_side_table_next_id, 0);
+	WRITE_ONCE(trie_side_table_memblock, false);
 	WRITE_ONCE(trie_side_table_initialized, false);
 }
 
@@ -640,14 +727,13 @@ size_t __stack_depot_trie_side_table_bytes(void)
 
 	if (!READ_ONCE(trie_side_table_initialized))
 		return 0;
-	if (check_mul_overflow((size_t)trie_side_table_top_size,
-			       sizeof(*trie_side_table_chunks), &top_bytes))
+	top_bytes = trie_side_table_top_bytes(trie_side_table_top_size);
+	if (!top_bytes)
 		return SIZE_MAX;
 
 	nr_chunks = READ_ONCE(trie_side_table_nr_chunks);
-	if (check_mul_overflow((size_t)nr_chunks,
-			       STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE *
-			       sizeof(*trie_side_table_chunks[0]), &bytes))
+	if (check_mul_overflow((size_t)nr_chunks, trie_side_table_chunk_bytes(),
+			       &bytes))
 		return SIZE_MAX;
 	if (check_add_overflow(top_bytes, bytes, &bytes))
 		return SIZE_MAX;
@@ -1511,6 +1597,11 @@ int __init stack_depot_early_init(void)
 		stack_depot_disabled = true;
 		return -ENOMEM;
 	}
+	if (__stack_depot_trie_enabled() &&
+	    __stack_depot_trie_side_table_init_memblock()) {
+		pr_warn("trie side table allocation failed, disabling trie storage\n");
+		__stack_depot_trie_set_enabled(false);
+	}
 
 	return 0;
 }
@@ -1571,6 +1662,14 @@ int stack_depot_init(void)
 		stack_hash_mask = 0;
 		stack_depot_disabled = true;
 		ret = -ENOMEM;
+	}
+	if (!ret && __stack_depot_trie_enabled()) {
+		ret = __stack_depot_trie_side_table_init(GFP_KERNEL);
+		if (ret) {
+			pr_warn("trie side table allocation failed, disabling trie storage\n");
+			__stack_depot_trie_set_enabled(false);
+			ret = 0;
+		}
 	}
 
 out_unlock:
