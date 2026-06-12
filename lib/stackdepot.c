@@ -4295,90 +4295,116 @@ static unsigned int trie_walk_frames(const void *leaf, unsigned int total,
 	return seen == total ? total : 0;
 }
 
-static unsigned int
-trie_walk_handle(depot_stack_handle_t handle, trie_frame_fn_t fn, void *data)
+static int trie_frame_at(const void *leaf, unsigned int index,
+			 unsigned long *frame)
 {
-	const void *leaf;
-	unsigned int walked = 0;
-	unsigned int total;
+	const struct stack_depot_trie_node *node;
+
+	if (!leaf || !frame)
+		return -EINVAL;
+
+	for (node = leaf; node; node = trie_load_parent(node)) {
+		unsigned int start;
+
+		if (node->run.nr_entries > node->stack_len)
+			return -EINVAL;
+		start = node->stack_len - node->run.nr_entries;
+		if (index < start || index >= node->stack_len)
+			continue;
+		return stack_depot_trie_node_frame(node, index - start, frame);
+	}
+
+	return -EINVAL;
+}
+
+static unsigned int trie_handle_leaf(depot_stack_handle_t handle,
+				     const void **leaf)
+{
 	u32 leaf_id;
 
+	if (!leaf)
+		return 0;
+	*leaf = NULL;
 	leaf_id = __stack_depot_trie_leaf_id(handle);
 	if (!leaf_id)
 		return 0;
-
-	rcu_read_lock_sched_notrace();
-	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	if (WARN(!leaf, "corrupt trie handle %08x\n", handle))
-		goto out;
-	total = trie_validate_leaf(leaf, NULL);
-	if (total)
-		walked = trie_walk_frames(leaf, total, fn, data);
-out:
-	rcu_read_unlock_sched_notrace();
-
-	return walked;
+	*leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (WARN(!*leaf, "corrupt trie handle %08x\n", handle))
+		return 0;
+	return trie_validate_leaf(*leaf, NULL);
 }
 
-struct trie_print_ctx {
-	int spaces;
-};
-
-static void trie_print_frame(unsigned int index, unsigned long frame, void *data)
+static void trie_print_frames(const void *leaf, unsigned int nr_entries,
+			      int spaces)
 {
-	struct trie_print_ctx *ctx = data;
+	unsigned int i;
 
-	(void)index;
-	pr_info("%*c%pS\n", 1 + ctx->spaces, ' ', (void *)frame);
+	for (i = 0; i < nr_entries; i++) {
+		unsigned long frame;
+
+		if (trie_frame_at(leaf, i, &frame))
+			return;
+		pr_info("%*c%pS\n", 1 + spaces, ' ', (void *)frame);
+	}
 }
 
 static unsigned int trie_print_handle(depot_stack_handle_t handle, int spaces)
 {
-	struct trie_print_ctx ctx = { .spaces = spaces };
+	unsigned int nr_entries;
+	const void *leaf;
 
-	return trie_walk_handle(handle, trie_print_frame, &ctx);
+	rcu_read_lock_sched_notrace();
+	nr_entries = trie_handle_leaf(handle, &leaf);
+	if (nr_entries)
+		trie_print_frames(leaf, nr_entries, spaces);
+	rcu_read_unlock_sched_notrace();
+
+	return nr_entries;
 }
 
-struct trie_snprint_ctx {
-	char *buf;
-	size_t size;
-	unsigned int total;
-	int spaces;
-};
-
-static void trie_snprint_frame(unsigned int index, unsigned long frame, void *data)
+static int
+trie_snprint_frames(char *buf, size_t size, const void *leaf,
+		    unsigned int nr_entries, int spaces)
 {
-	struct trie_snprint_ctx *ctx = data;
 	unsigned int generated;
+	unsigned int total = 0;
+	unsigned int i;
 
-	(void)index;
-	if (!ctx->size)
-		return;
+	for (i = 0; i < nr_entries && size; i++) {
+		unsigned long frame;
 
-	generated = snprintf(ctx->buf, ctx->size, "%*c%pS\n",
-			     1 + ctx->spaces, ' ', (void *)frame);
-	ctx->total += generated;
-	if (generated >= ctx->size) {
-		ctx->buf += ctx->size;
-		ctx->size = 0;
-	} else {
-		ctx->buf += generated;
-		ctx->size -= generated;
+		if (trie_frame_at(leaf, i, &frame))
+			break;
+		generated = snprintf(buf, size, "%*c%pS\n", 1 + spaces, ' ',
+				     (void *)frame);
+		total += generated;
+		if (generated >= size) {
+			buf += size;
+			size = 0;
+		} else {
+			buf += generated;
+			size -= generated;
+		}
 	}
+
+	return total;
 }
 
 static int
 trie_snprint_handle(depot_stack_handle_t handle, char *buf, size_t size,
 		    int spaces)
 {
-	struct trie_snprint_ctx ctx = {
-		.buf = buf,
-		.size = size,
-		.spaces = spaces,
-	};
+	unsigned int nr_entries;
+	const void *leaf;
+	int ret = 0;
 
-	trie_walk_handle(handle, trie_snprint_frame, &ctx);
-	return ctx.total;
+	rcu_read_lock_sched_notrace();
+	nr_entries = trie_handle_leaf(handle, &leaf);
+	if (nr_entries)
+		ret = trie_snprint_frames(buf, size, leaf, nr_entries, spaces);
+	rcu_read_unlock_sched_notrace();
+
+	return ret;
 }
 
 static void trie_fetch_frame(unsigned int index, unsigned long frame, void *data)
