@@ -189,8 +189,6 @@ enum depot_counter_id {
 	DEPOT_COUNTER_FREELIST_SIZE,
 	DEPOT_COUNTER_PERSIST_COUNT,
 	DEPOT_COUNTER_PERSIST_BYTES,
-	DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT,
-	DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES,
 	DEPOT_COUNTER_COUNT,
 };
 
@@ -202,8 +200,6 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_FREELIST_SIZE]	= "freelist_size",
 	[DEPOT_COUNTER_PERSIST_COUNT]	= "persistent_count",
 	[DEPOT_COUNTER_PERSIST_BYTES]	= "persistent_bytes",
-	[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]	= "trie_materialized_count",
-	[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES]	= "trie_materialized_bytes",
 };
 
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
@@ -211,6 +207,7 @@ static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
 static_assert(REFCOUNT_SATURATED < 0);
 
 static bool depot_init_pool(void **prealloc);
+static void depot_try_keep_new_pool(void **prealloc);
 
 static u32 stack_depot_pool_index_mask(void)
 {
@@ -283,7 +280,6 @@ u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 
 struct stack_depot_trie_side_entry {
 	const void *leaf;
-	const unsigned long *frames;
 };
 
 static struct stack_depot_trie_side_entry **trie_side_table_chunks;
@@ -369,8 +365,19 @@ static size_t trie_side_table_top_bytes(unsigned int top_size)
 
 static size_t trie_side_table_chunk_bytes(void)
 {
-	return STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE *
-		sizeof(*trie_side_table_chunks[0]);
+	return PAGE_ALIGN(STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE *
+			  sizeof(*trie_side_table_chunks[0]));
+}
+
+static unsigned int trie_side_table_chunk_order(void)
+{
+	return get_order(trie_side_table_chunk_bytes());
+}
+
+static void trie_side_table_free_chunk(struct stack_depot_trie_side_entry *chunk)
+{
+	if (chunk)
+		free_pages((unsigned long)chunk, trie_side_table_chunk_order());
 }
 
 static int
@@ -539,27 +546,10 @@ trie_side_table_store_leaf(struct stack_depot_trie_side_entry *chunk,
 	smp_store_release(&chunk[slot].leaf, leaf);
 }
 
-static const unsigned long *
-trie_side_table_load_frames(struct stack_depot_trie_side_entry *chunk,
-			    unsigned int slot)
-{
-	/* Pairs with trie_side_table_store_frames(). */
-	return smp_load_acquire(&chunk[slot].frames);
-}
-
-static void
-trie_side_table_store_frames(struct stack_depot_trie_side_entry *chunk,
-			     unsigned int slot, const unsigned long *frames)
-{
-	/* Pairs with trie_side_table_load_frames(). */
-	smp_store_release(&chunk[slot].frames, frames);
-}
-
 static void
 trie_side_table_clear_entry(struct stack_depot_trie_side_entry *chunk,
 			    unsigned int slot)
 {
-	trie_side_table_store_frames(chunk, slot, NULL);
 	trie_side_table_store_leaf(chunk, slot, NULL);
 }
 
@@ -600,7 +590,7 @@ void __stack_depot_trie_side_table_destroy(void)
 	high_water = READ_ONCE(trie_side_table_high_water);
 	if (!READ_ONCE(trie_side_table_memblock)) {
 		for (i = 0; i < high_water; i++)
-			kfree(trie_side_table_chunks[i]);
+			trie_side_table_free_chunk(trie_side_table_chunks[i]);
 		kvfree(trie_side_table_chunks);
 	}
 	trie_side_table_chunks = NULL;
@@ -641,30 +631,18 @@ out:
 	return needed;
 }
 
-bool __stack_depot_trie_can_alloc(gfp_t alloc_flags, depot_flags_t depot_flags)
-{
-	if (!__stack_depot_trie_ready())
-		return false;
-	if (depot_flags & (STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_HASH))
-		return false;
-	if (!(depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC))
-		return false;
-	if (!gfpflags_allow_spinning(alloc_flags))
-		return false;
-	if (!__stack_depot_trie_side_table_prealloc_needed())
-		return true;
-	return slab_is_available();
-}
-
 void *__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags)
 {
-	return kcalloc(STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE,
-		       sizeof(*trie_side_table_chunks[0]), gfp_flags);
+	struct page *page;
+
+	page = alloc_pages(gfp_nested_mask(gfp_flags) | __GFP_ZERO,
+			   trie_side_table_chunk_order());
+	return page ? page_address(page) : NULL;
 }
 
 void __stack_depot_trie_side_table_free_prealloc(void *prealloc)
 {
-	kfree(prealloc);
+	trie_side_table_free_chunk(prealloc);
 }
 
 u32 __stack_depot_trie_side_table_alloc_id(void **prealloc)
@@ -808,53 +786,6 @@ const void *__stack_depot_trie_side_table_lookup(u32 id)
 		return NULL;
 
 	return trie_side_table_load_leaf(chunk, trie_side_table_slot_index(id));
-}
-
-const unsigned long *__stack_depot_trie_side_table_frames(u32 id)
-{
-	struct stack_depot_trie_side_entry *chunk;
-	unsigned int top;
-
-	if (!trie_side_table_is_initialized() || !id)
-		return NULL;
-
-	top = trie_side_table_top_index(id);
-	if (top >= trie_side_table_top_size)
-		return NULL;
-
-	chunk = trie_side_table_load_chunk(top);
-	if (!chunk)
-		return NULL;
-
-	return trie_side_table_load_frames(chunk, trie_side_table_slot_index(id));
-}
-
-int
-__stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames)
-{
-	struct stack_depot_trie_side_entry *chunk;
-	const unsigned long *old;
-	unsigned int slot;
-	unsigned int top;
-
-	if (!trie_side_table_is_initialized() || !id || !frames)
-		return -EINVAL;
-
-	if (id > READ_ONCE(trie_side_table_next_id))
-		return -EINVAL;
-	top = trie_side_table_top_index(id);
-	if (top >= trie_side_table_top_size)
-		return -EINVAL;
-
-	chunk = trie_side_table_load_chunk(top);
-	if (!chunk)
-		return -EINVAL;
-	slot = trie_side_table_slot_index(id);
-	if (!trie_side_table_load_leaf(chunk, slot))
-		return -EINVAL;
-
-	old = cmpxchg_release(&chunk[slot].frames, NULL, frames);
-	return old ? -EEXIST : 0;
 }
 
 size_t __stack_depot_trie_side_table_entries(void)
@@ -1338,6 +1269,7 @@ trie_save_miss(struct stack_depot_trie_root *root, const unsigned long *entries,
 
 	handle = __stack_depot_trie_handle(leaf_id);
 out:
+	depot_try_keep_new_pool(&pool_prealloc);
 	__stack_depot_trie_pool_free_prealloc(pool_prealloc);
 	__stack_depot_trie_side_table_free_prealloc(side_prealloc);
 	return handle;
@@ -1892,6 +1824,19 @@ static void depot_keep_new_pool(void **prealloc)
 	*prealloc = NULL;
 }
 
+static void depot_try_keep_new_pool(void **prealloc)
+{
+	unsigned long flags;
+
+	if (!prealloc || !*prealloc)
+		return;
+
+	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		return;
+	depot_keep_new_pool(prealloc);
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
+}
+
 /*
  * Try to initialize a new stack record from the current pool, a cached pool, or
  * the current pre-allocation.
@@ -2224,8 +2169,6 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		handle = trie_find_handle(&stack_depot_trie_root, entries, nr_entries);
 		if (handle)
 			return handle;
-		if (!__stack_depot_trie_can_alloc(alloc_flags, depot_flags))
-			return 0;
 		handle = stack_depot_trie_save(entries, nr_entries, alloc_flags, depot_flags);
 		return handle;
 	}
@@ -4352,116 +4295,90 @@ static unsigned int trie_walk_frames(const void *leaf, unsigned int total,
 	return seen == total ? total : 0;
 }
 
-static int trie_frame_at(const void *leaf, unsigned int index,
-			 unsigned long *frame)
+static unsigned int
+trie_walk_handle(depot_stack_handle_t handle, trie_frame_fn_t fn, void *data)
 {
-	const struct stack_depot_trie_node *node;
-
-	if (!leaf || !frame)
-		return -EINVAL;
-
-	for (node = leaf; node; node = trie_load_parent(node)) {
-		unsigned int start;
-
-		if (node->run.nr_entries > node->stack_len)
-			return -EINVAL;
-		start = node->stack_len - node->run.nr_entries;
-		if (index < start || index >= node->stack_len)
-			continue;
-		return stack_depot_trie_node_frame(node, index - start, frame);
-	}
-
-	return -EINVAL;
-}
-
-static void trie_print_frames(const void *leaf, unsigned int nr_entries,
-			      int spaces)
-{
-	unsigned int i;
-
-	for (i = 0; i < nr_entries; i++) {
-		unsigned long frame;
-
-		if (trie_frame_at(leaf, i, &frame))
-			return;
-		pr_info("%*c%pS\n", 1 + spaces, ' ', (void *)frame);
-	}
-}
-
-static int
-trie_snprint_frames(char *buf, size_t size, const void *leaf,
-		    unsigned int nr_entries, int spaces)
-{
-	unsigned int generated;
-	unsigned int total = 0;
-	unsigned int i;
-
-	for (i = 0; i < nr_entries && size; i++) {
-		unsigned long frame;
-
-		if (trie_frame_at(leaf, i, &frame))
-			break;
-		generated = snprintf(buf, size, "%*c%pS\n", 1 + spaces, ' ',
-				     (void *)frame);
-		total += generated;
-		if (generated >= size) {
-			buf += size;
-			size = 0;
-		} else {
-			buf += generated;
-			size -= generated;
-		}
-	}
-
-	return total;
-}
-
-static unsigned int trie_handle_leaf(depot_stack_handle_t handle,
-				     const void **leaf)
-{
+	const void *leaf;
+	unsigned int walked = 0;
+	unsigned int total;
 	u32 leaf_id;
 
-	if (!leaf)
-		return 0;
-	*leaf = NULL;
 	leaf_id = __stack_depot_trie_leaf_id(handle);
 	if (!leaf_id)
 		return 0;
-	*leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	if (WARN(!*leaf, "corrupt trie handle %08x\n", handle))
-		return 0;
-	return trie_validate_leaf(*leaf, NULL);
+
+	rcu_read_lock_sched_notrace();
+	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
+	if (WARN(!leaf, "corrupt trie handle %08x\n", handle))
+		goto out;
+	total = trie_validate_leaf(leaf, NULL);
+	if (total)
+		walked = trie_walk_frames(leaf, total, fn, data);
+out:
+	rcu_read_unlock_sched_notrace();
+
+	return walked;
+}
+
+struct trie_print_ctx {
+	int spaces;
+};
+
+static void trie_print_frame(unsigned int index, unsigned long frame, void *data)
+{
+	struct trie_print_ctx *ctx = data;
+
+	(void)index;
+	pr_info("%*c%pS\n", 1 + ctx->spaces, ' ', (void *)frame);
 }
 
 static unsigned int trie_print_handle(depot_stack_handle_t handle, int spaces)
 {
-	unsigned int nr_entries;
-	const void *leaf;
+	struct trie_print_ctx ctx = { .spaces = spaces };
 
-	rcu_read_lock_sched_notrace();
-	nr_entries = trie_handle_leaf(handle, &leaf);
-	if (nr_entries)
-		trie_print_frames(leaf, nr_entries, spaces);
-	rcu_read_unlock_sched_notrace();
+	return trie_walk_handle(handle, trie_print_frame, &ctx);
+}
 
-	return nr_entries;
+struct trie_snprint_ctx {
+	char *buf;
+	size_t size;
+	unsigned int total;
+	int spaces;
+};
+
+static void trie_snprint_frame(unsigned int index, unsigned long frame, void *data)
+{
+	struct trie_snprint_ctx *ctx = data;
+	unsigned int generated;
+
+	(void)index;
+	if (!ctx->size)
+		return;
+
+	generated = snprintf(ctx->buf, ctx->size, "%*c%pS\n",
+			     1 + ctx->spaces, ' ', (void *)frame);
+	ctx->total += generated;
+	if (generated >= ctx->size) {
+		ctx->buf += ctx->size;
+		ctx->size = 0;
+	} else {
+		ctx->buf += generated;
+		ctx->size -= generated;
+	}
 }
 
 static int
 trie_snprint_handle(depot_stack_handle_t handle, char *buf, size_t size,
 		    int spaces)
 {
-	unsigned int nr_entries;
-	const void *leaf;
-	int ret = 0;
+	struct trie_snprint_ctx ctx = {
+		.buf = buf,
+		.size = size,
+		.spaces = spaces,
+	};
 
-	rcu_read_lock_sched_notrace();
-	nr_entries = trie_handle_leaf(handle, &leaf);
-	if (nr_entries)
-		ret = trie_snprint_frames(buf, size, leaf, nr_entries, spaces);
-	rcu_read_unlock_sched_notrace();
-
-	return ret;
+	trie_walk_handle(handle, trie_snprint_frame, &ctx);
+	return ctx.total;
 }
 
 static void trie_fetch_frame(unsigned int index, unsigned long frame, void *data)
@@ -4540,223 +4457,6 @@ __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 	rcu_read_unlock_sched_notrace();
 
 	return nr_entries;
-}
-
-unsigned int
-__stack_depot_trie_materialize_handle(depot_stack_handle_t handle,
-				      unsigned long *storage,
-				      unsigned int max_entries,
-				      const unsigned long **frames)
-{
-	const unsigned long *cached;
-	const void *leaf;
-	unsigned int nr_entries;
-	u32 leaf_id;
-	int ret;
-
-	if (!frames)
-		return 0;
-	*frames = NULL;
-
-	leaf_id = __stack_depot_trie_leaf_id(handle);
-	if (!leaf_id)
-		return 0;
-
-	rcu_read_lock_sched_notrace();
-	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	if (WARN(!leaf, "corrupt trie handle %08x\n", handle)) {
-		rcu_read_unlock_sched_notrace();
-		return 0;
-	}
-	nr_entries = trie_validate_leaf(leaf, NULL);
-	if (!nr_entries) {
-		rcu_read_unlock_sched_notrace();
-		return 0;
-	}
-	cached = __stack_depot_trie_side_table_frames(leaf_id);
-	if (cached) {
-		*frames = cached;
-		rcu_read_unlock_sched_notrace();
-		return nr_entries;
-	}
-	if (!storage || max_entries < nr_entries) {
-		rcu_read_unlock_sched_notrace();
-		return 0;
-	}
-
-	nr_entries = trie_fetch_leaf(leaf, storage, max_entries);
-	if (!nr_entries) {
-		rcu_read_unlock_sched_notrace();
-		return 0;
-	}
-
-	ret = __stack_depot_trie_side_table_store_frames(leaf_id, storage);
-	if (!ret) {
-		*frames = storage;
-		rcu_read_unlock_sched_notrace();
-		return nr_entries;
-	}
-	if (ret == -EEXIST) {
-		cached = __stack_depot_trie_side_table_frames(leaf_id);
-		if (cached)
-			*frames = cached;
-	}
-	rcu_read_unlock_sched_notrace();
-
-	return *frames ? nr_entries : 0;
-}
-
-size_t __stack_depot_trie_materialize_bytes(depot_stack_handle_t handle, unsigned int *nr_entries)
-{
-	const void *leaf;
-	unsigned int total;
-	u32 leaf_id;
-	size_t size;
-
-	if (nr_entries)
-		*nr_entries = 0;
-
-	leaf_id = __stack_depot_trie_leaf_id(handle);
-	if (!leaf_id)
-		return 0;
-
-	rcu_read_lock_sched_notrace();
-	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	if (!leaf)
-		goto out;
-	total = trie_validate_leaf(leaf, NULL);
-	if (!total)
-		goto out;
-	if (check_mul_overflow((size_t)total, sizeof(unsigned long), &size))
-		goto out;
-
-	if (nr_entries)
-		*nr_entries = total;
-	rcu_read_unlock_sched_notrace();
-	return size;
-out:
-	rcu_read_unlock_sched_notrace();
-	return 0;
-}
-
-size_t __stack_depot_trie_materialized_size(unsigned int nr_entries)
-{
-	struct stack_depot_trie_materialized *record = NULL;
-	size_t size;
-
-	if (!nr_entries || nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
-		return 0;
-	size = struct_size(record, entries, nr_entries);
-	return size <= DEPOT_POOL_SIZE ? __stack_depot_trie_pool_alloc_size(size) : 0;
-}
-
-unsigned int __stack_depot_trie_materialized_count(const unsigned long *frames)
-{
-	const struct stack_depot_trie_materialized *record;
-
-	if (!frames)
-		return 0;
-	record = (const void *)((const char *)frames -
-				 offsetof(struct stack_depot_trie_materialized, entries));
-	return READ_ONCE(record->nr_entries);
-}
-
-void
-__stack_depot_trie_materialized_stats(unsigned long *count, unsigned long *bytes)
-{
-	if (count)
-		*count = READ_ONCE(counters[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]);
-	if (bytes)
-		*bytes = READ_ONCE(counters[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES]);
-}
-
-unsigned int
-__stack_depot_trie_materialize_record(depot_stack_handle_t handle,
-				      struct stack_depot_trie_materialized *record,
-				      size_t record_size,
-				      const unsigned long **frames)
-{
-	unsigned int nr_entries;
-	size_t size;
-
-	if (!frames)
-		return 0;
-	*frames = NULL;
-	size = __stack_depot_trie_materialize_bytes(handle, &nr_entries);
-	if (!size)
-		return 0;
-	if (!record || record_size < __stack_depot_trie_materialized_size(nr_entries))
-		return 0;
-
-	WRITE_ONCE(record->nr_entries, nr_entries);
-	return __stack_depot_trie_materialize_handle(handle, record->entries,
-					      nr_entries, frames);
-}
-
-unsigned int
-__stack_depot_trie_materialize_cached(depot_stack_handle_t handle,
-				      const unsigned long **frames)
-{
-	struct stack_depot_trie_materialized *record;
-	unsigned int nr_entries;
-	unsigned long flags;
-	size_t record_size;
-	size_t offset;
-	void *pool;
-	int ret;
-
-	if (!frames)
-		return 0;
-	*frames = NULL;
-
-	nr_entries = __stack_depot_trie_materialize_handle(handle, NULL, 0,
-							   frames);
-	if (nr_entries)
-		return nr_entries;
-
-	record_size = __stack_depot_trie_materialize_bytes(handle, &nr_entries);
-	if (!record_size)
-		return 0;
-	record_size = __stack_depot_trie_materialized_size(nr_entries);
-	if (!record_size)
-		return 0;
-
-	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
-		return 0;
-	printk_deferred_enter();
-
-	ret = __stack_depot_trie_materialize_handle(handle, NULL, 0, frames);
-	if (ret)
-		goto out;
-
-	if (!stack_pools || pools_num < 1)
-		goto out;
-	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
-		goto out;
-	if (record_size > DEPOT_POOL_SIZE - pool_offset)
-		goto out;
-
-	pool = stack_pools[pools_num - 1];
-	if (WARN_ON_ONCE(!pool))
-		goto out;
-
-	offset = pool_offset;
-	record = pool + offset;
-	pool_offset += record_size;
-	ret = __stack_depot_trie_materialize_record(handle, record, record_size, frames);
-	if (ret && *frames == record->entries) {
-		counters[DEPOT_COUNTER_TRIE_MATERIALIZED_COUNT]++;
-		counters[DEPOT_COUNTER_TRIE_MATERIALIZED_BYTES] += record_size;
-		goto out;
-	}
-
-	pool_offset = offset;
-	if (!*frames)
-		ret = 0;
-out:
-	printk_deferred_exit();
-	raw_spin_unlock_irqrestore(&pool_lock, flags);
-	return ret;
 }
 
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children)
@@ -5419,9 +5119,7 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 			       unsigned long **entries)
 {
-	const unsigned long *trie_entries;
 	struct stack_record *stack;
-	unsigned int nr_entries;
 
 	*entries = NULL;
 	/*
@@ -5432,13 +5130,8 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 
 	if (!handle || stack_depot_disabled)
 		return 0;
-	if (__stack_depot_trie_leaf_id(handle)) {
-		nr_entries = __stack_depot_trie_materialize_cached(handle, &trie_entries);
-		if (!nr_entries)
-			return 0;
-		*entries = (unsigned long *)trie_entries;
-		return nr_entries;
-	}
+	if (__stack_depot_trie_leaf_id(handle))
+		return 0;
 
 	stack = depot_fetch_stack(handle);
 	/*

@@ -94,7 +94,7 @@ static noinline depot_stack_handle_t __drm_stack_depot_save(void)
 static void __drm_stack_depot_print(depot_stack_handle_t stack_depot)
 {
 	struct drm_printer p = drm_dbg_printer(NULL, DRM_UT_KMS, "drm_modeset_lock");
-	unsigned long *entries;
+	unsigned long entries[8];
 	unsigned int nr_entries;
 	char *buf;
 
@@ -102,7 +102,7 @@ static void __drm_stack_depot_print(depot_stack_handle_t stack_depot)
 	if (!buf)
 		return;
 
-	nr_entries = stack_depot_fetch(stack_depot, &entries);
+	nr_entries = stack_depot_fetch_into(stack_depot, entries, ARRAY_SIZE(entries));
 	stack_trace_snprint(buf, PAGE_SIZE, entries, nr_entries, 2);
 
 	drm_printf(&p, "attempting to lock a contended lock without backoff:\n%s", buf);

@@ -31,7 +31,6 @@ static_assert(CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(unsigned long) <= U16_MAX);
 
 bool __stack_depot_trie_enabled(void);
 bool __stack_depot_trie_ready(void);
-bool __stack_depot_trie_can_alloc(gfp_t alloc_flags, depot_flags_t depot_flags);
 void __stack_depot_trie_set_enabled(bool enabled);
 
 struct stack_depot_trie_node_slot {
@@ -48,11 +47,6 @@ struct stack_depot_trie_child_array;
 
 struct stack_depot_trie_root {
 	const struct stack_depot_trie_child_array *children;
-};
-
-struct stack_depot_trie_materialized {
-	unsigned int nr_entries;
-	unsigned long entries[];
 };
 
 struct stack_depot_trie_lookup {
@@ -147,11 +141,9 @@ u32 __stack_depot_trie_max_leaf_id(void);
 
 /*
  * Private trie side table. Writers serialize internally; lookups are lockless.
- * Leaf slots are populated before trie publication, while frame slots are for
- * future stable materialization of trie handles. The side table reserves the
- * frame pointer per handle, but the backing materialized frame array is
- * allocated lazily only for the rare fetch path. Init and destroy are controlled
- * setup/teardown operations and must not race with readers or writers.
+ * Leaf slots are populated before trie publication. Init and destroy are
+ * controlled setup/teardown operations and must not race with readers or
+ * writers.
  */
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
 void __stack_depot_trie_side_table_destroy(void);
@@ -163,9 +155,6 @@ void __stack_depot_trie_side_table_revoke_latest(u32 id);
 void __stack_depot_trie_side_table_restore(u32 id, const void *entry);
 int __stack_depot_trie_side_table_store(u32 id, const void *entry);
 const void *__stack_depot_trie_side_table_lookup(u32 id);
-const unsigned long *__stack_depot_trie_side_table_frames(u32 id);
-int
-__stack_depot_trie_side_table_store_frames(u32 id, const unsigned long *frames);
 size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
 size_t __stack_depot_trie_pool_alloc_size(size_t size);
@@ -331,25 +320,6 @@ __stack_depot_trie_walk_frames(const void *leaf, trie_frame_fn_t fn, void *data)
 unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 						  unsigned long *entries,
 						  unsigned int max_entries);
-unsigned int
-__stack_depot_trie_materialize_handle(depot_stack_handle_t handle,
-				      unsigned long *storage,
-				      unsigned int max_entries,
-				      const unsigned long **frames);
-size_t __stack_depot_trie_materialize_bytes(depot_stack_handle_t handle, unsigned int *nr_entries);
-size_t __stack_depot_trie_materialized_size(unsigned int nr_entries);
-unsigned int
-__stack_depot_trie_materialized_count(const unsigned long *frames);
-void
-__stack_depot_trie_materialized_stats(unsigned long *count, unsigned long *bytes);
-unsigned int
-__stack_depot_trie_materialize_record(depot_stack_handle_t handle,
-				      struct stack_depot_trie_materialized *record,
-				      size_t record_size,
-				      const unsigned long **frames);
-unsigned int
-__stack_depot_trie_materialize_cached(depot_stack_handle_t handle,
-				      const unsigned long **frames);
 size_t __stack_depot_trie_child_array_size(unsigned int nr_children);
 int __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 					const void * const *children,

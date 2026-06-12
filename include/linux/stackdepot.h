@@ -227,6 +227,11 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
  * @handle:	Stack depot handle returned from stack_depot_save()
  * @entries:	Pointer to store the address of the stack trace
  *
+ * This helper returns a pointer to stackdepot-owned contiguous storage for
+ * legacy hash-backed handles. Callers that need backend-independent access to
+ * stack contents should use stack_depot_fetch_into(), stack_depot_print(), or
+ * stack_depot_snprint().
+ *
  * Return: Number of frames for the fetched stack
  */
 unsigned int stack_depot_fetch(depot_stack_handle_t handle,
