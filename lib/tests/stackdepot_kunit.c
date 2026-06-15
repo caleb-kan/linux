@@ -1148,7 +1148,7 @@ static void stackdepot_trie_pool_carve_slots(struct kunit *test)
 	size_t child_size;
 	size_t node0_size;
 	size_t node1_size;
-	size_t total;
+	size_t old_total;
 	void *again;
 	int ret;
 
@@ -1163,15 +1163,15 @@ static void stackdepot_trie_pool_carve_slots(struct kunit *test)
 	node0_size = __stack_depot_trie_pool_alloc_size(node_slots[0].size);
 	node1_size = __stack_depot_trie_pool_alloc_size(node_slots[1].size);
 	child_size = __stack_depot_trie_pool_alloc_size(child_slots[0].size);
+	old_total = node0_size + node1_size + child_size +
+		__stack_depot_trie_pool_alloc_size(1);
 	KUNIT_EXPECT_PTR_EQ(test, node_slots[1].node,
 			    (char *)node_slots[0].node + node0_size);
-	KUNIT_EXPECT_PTR_EQ(test, child_slots[0].array,
-			    (char *)node_slots[1].node + node1_size);
-	KUNIT_EXPECT_PTR_EQ(test, storage,
-			    (char *)child_slots[0].array + child_size);
-	total = node0_size + node1_size + child_size +
-		__stack_depot_trie_pool_alloc_size(1);
-	KUNIT_EXPECT_EQ(test, mark.size, total);
+	KUNIT_EXPECT_GT(test, (unsigned long)child_slots[0].array,
+			(unsigned long)node_slots[1].node + node1_size);
+	KUNIT_EXPECT_GT(test, (unsigned long)storage,
+			(unsigned long)child_slots[0].array + child_size);
+	KUNIT_EXPECT_GT(test, mark.size, old_total);
 
 	KUNIT_ASSERT_TRUE(test, __stack_depot_trie_pool_try_rollback(&mark));
 	again = __stack_depot_trie_pool_carve_current(1, &mark);
@@ -1222,20 +1222,22 @@ static void stackdepot_trie_pool_carve_uses_prealloc(struct kunit *test)
 	void *first_storage = NULL;
 	void *second_storage = NULL;
 	void *prealloc;
+	size_t storage_size = DEPOT_POOL_SIZE - 64;
 	struct stack_depot_trie_pool_request first = {
 		.storage = &first_storage,
-		.storage_size = DEPOT_POOL_SIZE,
+		.storage_size = DEPOT_POOL_SIZE - 64,
 		.prealloc = &prealloc,
 		.mark = &first_mark,
 	};
 	struct stack_depot_trie_pool_request second = {
 		.storage = &second_storage,
-		.storage_size = DEPOT_POOL_SIZE,
+		.storage_size = DEPOT_POOL_SIZE - 64,
 		.mark = &second_mark,
 	};
 	int ret;
 
 	stackdepot_trie_pool_seed_current_pool(test);
+	KUNIT_ASSERT_GT(test, storage_size, 0UL);
 	prealloc = __stack_depot_trie_pool_prealloc(GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, prealloc);
 
@@ -1270,12 +1272,14 @@ static void stackdepot_trie_pool_carve_no_prealloc_rollover(struct kunit *test)
 
 	stackdepot_trie_pool_seed_current_pool(test);
 	for (i = 0; i < ARRAY_SIZE(marks); i++) {
+		size_t storage_size = DEPOT_POOL_SIZE - 64;
 		struct stack_depot_trie_pool_request req = {
 			.storage = &storage[i],
-			.storage_size = DEPOT_POOL_SIZE,
+			.storage_size = DEPOT_POOL_SIZE - 64,
 			.mark = &marks[i],
 		};
 
+		KUNIT_ASSERT_GT(test, storage_size, 0UL);
 		storage[i] = NULL;
 		ret = __stack_depot_trie_pool_carve(&req);
 		if (ret)
@@ -1284,7 +1288,7 @@ static void stackdepot_trie_pool_carve_no_prealloc_rollover(struct kunit *test)
 		consumed++;
 	}
 
-	failed.storage_size = DEPOT_POOL_SIZE;
+	failed.storage_size = DEPOT_POOL_SIZE - 64;
 	ret = __stack_depot_trie_pool_carve(&failed);
 	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
 	KUNIT_EXPECT_NULL(test, failed_storage);

@@ -20,6 +20,7 @@
 #include <linux/jhash.h>
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
+#include <linux/log2.h>
 #include <linux/kmsan.h>
 #include <linux/list.h>
 #include <linux/mm.h>
@@ -161,6 +162,12 @@ struct stack_depot_trie_child_array {
 	const struct stack_depot_trie_node *children[];
 };
 
+struct stack_depot_trie_free_object {
+	struct list_head list;
+	unsigned long rcu_state;
+	size_t size;
+};
+
 /* Hash table of stored stack records. */
 static struct list_head *stack_table;
 /* Fixed order of the number of table buckets. Used when KASAN is enabled. */
@@ -178,6 +185,11 @@ static int pools_num;
 static size_t pool_offset = DEPOT_POOL_SIZE;
 /* Freelist of stack records within stack_pools. */
 static LIST_HEAD(free_stacks);
+
+#define STACK_DEPOT_TRIE_FREE_OBJECT_BUCKETS (DEPOT_POOL_ORDER + PAGE_SHIFT + 1)
+
+static struct list_head free_trie_objects[STACK_DEPOT_TRIE_FREE_OBJECT_BUCKETS];
+static bool free_trie_objects_initialized;
 /* The lock must be held when performing pool or freelist modifications. */
 static DEFINE_RAW_SPINLOCK(pool_lock);
 
@@ -1015,6 +1027,169 @@ size_t __stack_depot_trie_pool_alloc_size(size_t size)
 	return aligned <= DEPOT_POOL_SIZE ? aligned : 0;
 }
 
+static size_t trie_object_header_size(void)
+{
+	return ALIGN(sizeof(struct stack_depot_trie_free_object),
+		     1UL << DEPOT_STACK_ALIGN);
+}
+
+static size_t trie_object_alloc_size(size_t size)
+{
+	size_t alloc_size;
+
+	size = __stack_depot_trie_pool_alloc_size(size);
+	if (!size)
+		return 0;
+	if (check_add_overflow(trie_object_header_size(), size,
+			       &alloc_size))
+		return 0;
+	return alloc_size <= DEPOT_POOL_SIZE ? alloc_size : 0;
+}
+
+static struct stack_depot_trie_free_object *trie_object_header(const void *ptr)
+{
+	return (void *)ptr - trie_object_header_size();
+}
+
+static void *trie_object_payload(struct stack_depot_trie_free_object *free)
+{
+	return (void *)free + trie_object_header_size();
+}
+
+static void trie_free_object_buckets_init_locked(void)
+{
+	unsigned int i;
+
+	lockdep_assert_held(&pool_lock);
+
+	if (free_trie_objects_initialized)
+		return;
+	for (i = 0; i < ARRAY_SIZE(free_trie_objects); i++)
+		INIT_LIST_HEAD(&free_trie_objects[i]);
+	free_trie_objects_initialized = true;
+}
+
+static unsigned int trie_free_object_bucket(size_t size)
+{
+	size = __stack_depot_trie_pool_alloc_size(size);
+	if (!size)
+		return 0;
+	return min_t(unsigned int, order_base_2(size),
+		     ARRAY_SIZE(free_trie_objects) - 1);
+}
+
+static void *trie_object_init_fresh(void *ptr, size_t size)
+{
+	struct stack_depot_trie_free_object *free = ptr;
+
+	free->size = __stack_depot_trie_pool_alloc_size(size);
+	free->rcu_state = 0;
+	INIT_LIST_HEAD(&free->list);
+	return trie_object_payload(free);
+}
+
+static bool trie_pool_contains_locked(const void *ptr)
+{
+	unsigned int pools = READ_ONCE(pools_num);
+	unsigned int i;
+
+	lockdep_assert_held(&pool_lock);
+
+	if (!stack_pools)
+		return false;
+	for (i = 0; i < pools; i++) {
+		void *pool = stack_pools[i];
+
+		if (!pool)
+			continue;
+		if (ptr >= pool && ptr < pool + DEPOT_POOL_SIZE)
+			return true;
+	}
+
+	return false;
+}
+
+static bool trie_pool_mark_contains(const struct stack_depot_trie_pool_mark *mark,
+				    const void *ptr)
+{
+	const void *start;
+	const void *end;
+
+	if (!mark || !mark->pool)
+		return false;
+	start = mark->pool + mark->offset;
+	end = start + mark->size;
+	return ptr >= start && ptr < end;
+}
+
+static void trie_free_object_locked(const void *ptr, unsigned long rcu_state)
+{
+	struct stack_depot_trie_free_object *free;
+	unsigned int bucket;
+
+	lockdep_assert_held(&pool_lock);
+
+	if (!ptr)
+		return;
+	trie_free_object_buckets_init_locked();
+	free = trie_object_header(ptr);
+	if (!trie_pool_contains_locked(free))
+		return;
+	free->rcu_state = rcu_state;
+	bucket = trie_free_object_bucket(free->size);
+	if (poll_state_synchronize_rcu(rcu_state))
+		list_add(&free->list, &free_trie_objects[bucket]);
+	else
+		list_add_tail(&free->list, &free_trie_objects[bucket]);
+}
+
+static void trie_retire_object(const void *ptr)
+{
+	struct stack_depot_trie_free_object *free;
+	unsigned long flags;
+
+	if (!ptr)
+		return;
+
+	raw_spin_lock_irqsave(&pool_lock, flags);
+	trie_free_object_buckets_init_locked();
+	free = trie_object_header(ptr);
+	if (trie_pool_contains_locked(free)) {
+		free->rcu_state = get_state_synchronize_rcu();
+		list_add_tail(&free->list,
+			      &free_trie_objects[trie_free_object_bucket(free->size)]);
+	}
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
+}
+
+static void *trie_pop_free_object(size_t size)
+{
+	struct stack_depot_trie_free_object *free;
+	unsigned int bucket;
+	unsigned int i;
+
+	lockdep_assert_held(&pool_lock);
+
+	size = __stack_depot_trie_pool_alloc_size(size);
+	if (!size)
+		return NULL;
+	trie_free_object_buckets_init_locked();
+	bucket = trie_free_object_bucket(size);
+	for (i = bucket; i < ARRAY_SIZE(free_trie_objects); i++) {
+		list_for_each_entry(free, &free_trie_objects[i], list) {
+			if (free->size < size)
+				continue;
+			if (!poll_state_synchronize_rcu(free->rcu_state))
+				break;
+			list_del_init(&free->list);
+			free->rcu_state = 0;
+			return trie_object_payload(free);
+		}
+	}
+
+	return NULL;
+}
+
 void *__stack_depot_trie_pool_prealloc(gfp_t gfp_flags)
 {
 	struct page *page;
@@ -1137,6 +1312,18 @@ out:
 	return ret;
 }
 
+static int trie_pool_add_object_size(size_t size, size_t *total)
+{
+	size_t alloc_size;
+
+	alloc_size = trie_object_alloc_size(size);
+	if (!alloc_size)
+		return -EINVAL;
+	if (check_add_overflow(*total, alloc_size, total))
+		return -EINVAL;
+	return *total <= DEPOT_POOL_SIZE ? 0 : -EINVAL;
+}
+
 static int trie_pool_add_size(size_t size, size_t *total)
 {
 	size_t alloc_size;
@@ -1147,6 +1334,43 @@ static int trie_pool_add_size(size_t size, size_t *total)
 	if (check_add_overflow(*total, alloc_size, total))
 		return -EINVAL;
 	return *total <= DEPOT_POOL_SIZE ? 0 : -EINVAL;
+}
+
+static void trie_pool_release_reused_objects_locked(struct stack_depot_trie_pool_request *req)
+{
+	unsigned long completed;
+	unsigned int i;
+
+	lockdep_assert_held(&pool_lock);
+
+	if (!req)
+		return;
+	completed = get_completed_synchronize_rcu();
+	for (i = 0; req->child_slots && i < req->nr_child_slots; i++) {
+		void *array = req->child_slots[i].array;
+
+		if (array &&
+		    !trie_pool_mark_contains(req->mark,
+					     trie_object_header(array))) {
+			trie_free_object_locked(array, completed);
+			req->child_slots[i].array = NULL;
+		}
+	}
+	if (req->storage && *req->storage &&
+	    !trie_pool_mark_contains(req->mark,
+				      trie_object_header(*req->storage))) {
+		trie_free_object_locked(*req->storage, completed);
+		*req->storage = NULL;
+	}
+}
+
+static void trie_pool_release_reused_objects(struct stack_depot_trie_pool_request *req)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&pool_lock, flags);
+	trie_pool_release_reused_objects_locked(req);
+	raw_spin_unlock_irqrestore(&pool_lock, flags);
 }
 
 int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
@@ -1173,10 +1397,10 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 	}
 	for (i = 0; i < req->nr_child_slots; i++) {
 		if (req->child_slots[i].array ||
-		    trie_pool_add_size(req->child_slots[i].size, &total))
+		    !trie_object_alloc_size(req->child_slots[i].size))
 			return -EINVAL;
 	}
-	if (trie_pool_add_size(req->storage_size, &total))
+	if (!trie_object_alloc_size(req->storage_size))
 		return -EINVAL;
 
 	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
@@ -1186,21 +1410,32 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 		ret = -ENOSPC;
 		goto out;
 	}
+	for (i = 0; i < req->nr_child_slots; i++) {
+		req->child_slots[i].array =
+			trie_pop_free_object(req->child_slots[i].size);
+		if (!req->child_slots[i].array &&
+		    trie_pool_add_object_size(req->child_slots[i].size, &total))
+			goto out_release_reused;
+	}
+	*req->storage = trie_pop_free_object(req->storage_size);
+	if (!*req->storage && trie_pool_add_object_size(req->storage_size, &total))
+		goto out_release_reused;
+
 	if (pools_num < 1) {
 		req->mark->prev_offset = pool_offset;
 		if (!depot_init_pool(req->prealloc)) {
 			ret = -ENOSPC;
-			goto out;
+			goto out_release_reused;
 		}
 		req->mark->added_pool = true;
 	}
 	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
-		goto out;
+		goto out_release_reused;
 	if (total > DEPOT_POOL_SIZE - pool_offset) {
 		req->mark->prev_offset = pool_offset;
 		if (!depot_init_pool(req->prealloc)) {
 			ret = -ENOSPC;
-			goto out;
+			goto out_release_reused;
 		}
 		req->mark->added_pool = true;
 	}
@@ -1208,7 +1443,7 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 	req->mark->pool_index = pools_num - 1;
 	pool = stack_pools[req->mark->pool_index];
 	if (WARN_ON_ONCE(!pool))
-		goto out;
+		goto out_release_reused;
 
 	req->mark->offset = pool_offset;
 	req->mark->pool = pool;
@@ -1219,12 +1454,21 @@ int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 		offset += __stack_depot_trie_pool_alloc_size(req->node_slots[i].size);
 	}
 	for (i = 0; i < req->nr_child_slots; i++) {
-		req->child_slots[i].array = pool + offset;
-		offset += __stack_depot_trie_pool_alloc_size(req->child_slots[i].size);
+		if (req->child_slots[i].array)
+			continue;
+		req->child_slots[i].array =
+			trie_object_init_fresh(pool + offset,
+					       req->child_slots[i].size);
+		offset += trie_object_alloc_size(req->child_slots[i].size);
 	}
-	*req->storage = pool + offset;
+	if (!*req->storage)
+		*req->storage =
+			trie_object_init_fresh(pool + offset, req->storage_size);
 	pool_offset += total;
 	ret = 0;
+	goto out;
+out_release_reused:
+	trie_pool_release_reused_objects_locked(req);
 out:
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
@@ -1269,6 +1513,19 @@ static void trie_alloc_request_clear_outputs(struct stack_depot_trie_alloc_reque
 		req->child_slots[i].array = NULL;
 }
 
+static void trie_alloc_request_release_reused_objects(struct stack_depot_trie_alloc_request *req)
+{
+	struct stack_depot_trie_pool_request pool_req = {};
+
+	if (!req || !req->txn)
+		return;
+	pool_req.child_slots = req->child_slots;
+	pool_req.nr_child_slots = req->nr_child_slots;
+	pool_req.storage = req->storage;
+	pool_req.mark = &req->txn->pool;
+	trie_pool_release_reused_objects(&pool_req);
+}
+
 int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req)
 {
 	struct stack_depot_trie_pool_request pool_req = {};
@@ -1294,6 +1551,7 @@ int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *
 
 	ret = __stack_depot_trie_alloc_txn_id(req->txn, req->side_prealloc);
 	if (ret) {
+		trie_alloc_request_release_reused_objects(req);
 		__stack_depot_trie_alloc_txn_rollback(req->txn);
 		trie_alloc_request_clear_outputs(req);
 		return ret;
@@ -1664,6 +1922,7 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 	goto out_unlock;
 
 rollback:
+	trie_alloc_request_release_reused_objects(req);
 	__stack_depot_trie_alloc_txn_rollback(req->txn);
 	trie_alloc_request_clear_outputs(req);
 	*tail = NULL;
@@ -3643,6 +3902,7 @@ trie_promote_child(struct stack_depot_trie_root *root,
 	publish_slot = trie_publish_slot(root, parent);
 	/* Publish the fully initialized replacement array last. */
 	smp_store_release(publish_slot, new_storage);
+	trie_retire_object(old_array);
 	return 0;
 }
 
@@ -3859,6 +4119,7 @@ static int trie_publish_append_prepare(struct stack_depot_trie_root *root,
 
 	/* Publish the fully initialized replacement array last. */
 	smp_store_release(slot, new_array);
+	trie_retire_object(old_array);
 	return 0;
 }
 
@@ -5226,6 +5487,7 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 	trie_child_array_replace_at(old_array, prefix, new_storage, pos);
 	/* Publish the fully initialized replacement array last. */
 	smp_store_release(publish_slot, new_storage);
+	trie_retire_object(old_array);
 	*nr_used = used;
 	return 0;
 }
