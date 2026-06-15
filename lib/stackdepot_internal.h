@@ -84,6 +84,11 @@ struct stack_depot_trie_side_prepare {
 	unsigned int nr_updates;
 };
 
+struct stack_depot_trie_side_prealloc {
+	void *dir;
+	void *chunk;
+};
+
 struct stack_depot_trie_pool_mark {
 	void *pool;
 	size_t prev_offset;
@@ -116,7 +121,7 @@ struct stack_depot_trie_alloc_request {
 	struct stack_depot_trie_child_array_slot *child_slots;
 	void **storage;
 	void **pool_prealloc;
-	void **side_prealloc;
+	struct stack_depot_trie_side_prealloc *side_prealloc;
 	size_t storage_size;
 	unsigned int nr_node_slots;
 	unsigned int nr_child_slots;
@@ -148,9 +153,13 @@ u32 __stack_depot_trie_max_leaf_id(void);
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
 void __stack_depot_trie_side_table_destroy(void);
 bool __stack_depot_trie_side_table_prealloc_needed(void);
-void *__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags);
-void __stack_depot_trie_side_table_free_prealloc(void *prealloc);
-u32 __stack_depot_trie_side_table_alloc_id(void **prealloc);
+int
+__stack_depot_trie_side_table_prealloc(gfp_t gfp_flags,
+				       struct stack_depot_trie_side_prealloc *prealloc);
+void
+__stack_depot_trie_side_table_free_prealloc(struct stack_depot_trie_side_prealloc *prealloc);
+u32
+__stack_depot_trie_side_table_alloc_id(struct stack_depot_trie_side_prealloc *prealloc);
 void __stack_depot_trie_side_table_revoke_latest(u32 id);
 void __stack_depot_trie_side_table_restore(u32 id, const void *entry);
 int __stack_depot_trie_side_table_store(u32 id, const void *entry);
@@ -163,7 +172,7 @@ void __stack_depot_trie_pool_free_prealloc(void *prealloc);
 int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 				      depot_flags_t depot_flags,
 				      void **pool_prealloc,
-				      void **side_prealloc);
+				      struct stack_depot_trie_side_prealloc *side_prealloc);
 /*
  * Best-effort current-pool helpers. They never allocate or roll over to a new
  * pool, and they use trylock so constrained contexts fail instead of blocking.
@@ -175,7 +184,8 @@ bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mar
 int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
 void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 int
-__stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn, void **prealloc);
+__stack_depot_trie_alloc_txn_id(struct stack_depot_trie_alloc_txn *txn,
+				struct stack_depot_trie_side_prealloc *prealloc);
 int
 __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  const unsigned long *entries,
@@ -186,17 +196,17 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  unsigned int nr_child_slots,
 				  struct stack_depot_trie_alloc_txn *txn,
 				  void **storage, void **pool_prealloc,
-				  void **side_prealloc,
+				  struct stack_depot_trie_side_prealloc *side_prealloc,
 				  struct stack_depot_trie_alloc_request *req);
 int __stack_depot_trie_workspace_plan(const struct stack_depot_trie_root *root,
 				      const unsigned long *entries,
 				      unsigned int nr_entries, void **pool_prealloc,
-				      void **side_prealloc,
+				      struct stack_depot_trie_side_prealloc *side_prealloc,
 				      struct stack_depot_trie_alloc_workspace *workspace);
 int __stack_depot_trie_workspace_insert(struct stack_depot_trie_root *root,
 					const unsigned long *entries,
 					unsigned int nr_entries, void **pool_prealloc,
-					void **side_prealloc,
+					struct stack_depot_trie_side_prealloc *side_prealloc,
 					struct stack_depot_trie_alloc_workspace *workspace,
 					const void **tail, u32 *leaf_id);
 depot_stack_handle_t
