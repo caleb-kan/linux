@@ -21,8 +21,8 @@ enum stack_depot_trie_lookup_status {
 };
 
 struct stack_depot_frame_run {
-	unsigned int nr_entries;
 	u16 bytes;
+	u16 nr_entries;
 	u8 mode;
 	u8 prefix_id;
 };
