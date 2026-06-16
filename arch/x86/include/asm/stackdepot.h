@@ -2,11 +2,14 @@
 #ifndef _ASM_X86_STACKDEPOT_H
 #define _ASM_X86_STACKDEPOT_H
 
+#include <linux/build_bug.h>
 #include <linux/types.h>
 
 #ifdef CONFIG_X86_64
 #define STACK_DEPOT_X86_64_FRAME_PREFIX	0xffffffff00000000UL
 #define STACK_DEPOT_X86_64_FRAME_LOW_MASK	0x00000000ffffffffUL
+
+static_assert(STACK_DEPOT_X86_64_FRAME_PREFIX != 0);
 
 static inline bool arch_stack_depot_frame_try_compress(unsigned long frame,
 						       u8 *prefix_id, u32 *low)
