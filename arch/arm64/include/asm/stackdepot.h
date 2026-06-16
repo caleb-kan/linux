@@ -59,7 +59,7 @@ static inline bool arch_stack_depot_frame_try_compress(unsigned long frame,
 {
 	unsigned long prefix = frame & STACK_DEPOT_ARM64_FRAME_PREFIX_MASK;
 	unsigned long candidate;
-	u8 i;
+	unsigned int i;
 
 	if (!prefix_id || !low)
 		return false;
