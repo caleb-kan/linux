@@ -6010,7 +6010,7 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
 
 	if (!handle || stack_depot_disabled)
 		return 0;
-	if (__stack_depot_trie_leaf_id(handle))
+	if (WARN_ON_ONCE(__stack_depot_trie_leaf_id(handle)))
 		return 0;
 
 	stack = depot_fetch_stack(handle);
