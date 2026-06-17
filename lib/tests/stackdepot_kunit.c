@@ -5623,6 +5623,8 @@ static void stackdepot_trie_public_save_route(struct kunit *test)
 	nr_entries = stack_depot_fetch_into(trie_handle, fetched, ARRAY_SIZE(fetched));
 	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(trie_entries));
 	KUNIT_EXPECT_MEMEQ(test, fetched, trie_entries, sizeof(trie_entries));
+	noalloc_handle = stack_depot_save_flags(trie_entries, ARRAY_SIZE(trie_entries), no_spin, 0);
+	KUNIT_EXPECT_EQ(test, noalloc_handle, trie_handle);
 	noalloc_handle = stack_depot_save_flags(noalloc_entries, noalloc_nr, no_spin, 0);
 	KUNIT_ASSERT_NE(test, noalloc_handle, (depot_stack_handle_t)0);
 	KUNIT_EXPECT_NE(test, __stack_depot_trie_leaf_id(noalloc_handle), 0U);

@@ -68,6 +68,7 @@ struct stack_depot_trie_publish_prepare {
 	int (*fn)(const struct stack_depot_trie_leaf_update *updates,
 		  unsigned int nr_updates, void *ctx);
 	void *ctx;
+	bool retire_locked;
 };
 
 #define STACK_DEPOT_TRIE_MAX_LEAF_UPDATES 2
