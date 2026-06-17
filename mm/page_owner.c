@@ -229,12 +229,8 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 
 	/* Snapshot only avoids allocation when the stack is already counted. */
 	/* If this races a final decrement to zero, inc_count() fails safely. */
-	if (!__stack_depot_get_count(handle, &count)) {
+	if (!__stack_depot_get_count(handle, &count))
 		stack = alloc_stack_record(gfp_mask);
-		/* Leave saturated stacks retryable for future tracked allocations. */
-		if (!stack)
-			return false;
-	}
 
 	/* Racing transition losers free their unused list node below. */
 	if (!__stack_depot_inc_count(handle, nr_base_pages, &new_count)) {
@@ -242,13 +238,13 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 			free_stack_record(stack);
 		return false;
 	}
-	/* new_count includes the list marker, and requires the node allocated above. */
+	/*
+	 * new_count includes the list marker. If list allocation failed, keep
+	 * the count and handle anyway; show_stacks remains best effort.
+	 */
 	if (new_count) {
-		if (WARN_ON_ONCE(!stack)) {
-			__stack_depot_dec_count_and_test(handle, nr_base_pages + 1);
-			return false;
-		}
-		add_stack_record_to_list(handle, stack);
+		if (stack)
+			add_stack_record_to_list(handle, stack);
 	} else if (stack) {
 		free_stack_record(stack);
 	}
@@ -345,6 +341,7 @@ void __reset_page_owner(struct page *page, unsigned short order)
 	__update_page_owner_free_handle(page, handle, order, current->pid,
 					current->tgid, free_ts_nsec);
 
+	/* A zero handle means no allocation stack count was applied. */
 	if (alloc_handle && alloc_handle != early_handle)
 		/*
 		 * early_handle is being set as a handle for all those
