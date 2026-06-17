@@ -2856,12 +2856,53 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 					   &stack_depot_trie_workspace_lock);
 }
 
+struct stack_depot_hash_save {
+	struct list_head *bucket;
+	unsigned long *entries;
+	unsigned int nr_entries;
+	u32 hash;
+	depot_flags_t depot_flags;
+	void **prealloc;
+	bool normal_persistent;
+};
+
+static depot_stack_handle_t
+depot_save_stack_locked(struct stack_depot_hash_save *save)
+{
+	struct stack_record *found;
+	struct stack_record *new;
+
+	lockdep_assert_held(&pool_lock);
+
+	/* Try to find again, to avoid concurrently inserting duplicates. */
+	found = find_stack(save->bucket, save->entries, save->nr_entries,
+			   save->hash, save->depot_flags);
+	if (found)
+		return found->handle.handle;
+
+	new = depot_alloc_stack(save->entries, save->nr_entries, save->hash,
+				save->depot_flags, save->prealloc);
+	if (!new)
+		return 0;
+
+	/*
+	 * This releases the stack record into the bucket and makes it visible to
+	 * readers in find_stack().
+	 */
+	list_add_rcu(&new->hash_list, save->bucket);
+	if (save->normal_persistent)
+		WRITE_ONCE(stack_depot_persistent_hash_record_seen, true);
+
+	return new->handle.handle;
+}
+
 depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 					    unsigned int nr_entries,
 					    gfp_t alloc_flags,
 					    depot_flags_t depot_flags)
 {
 	struct list_head *bucket;
+	struct stack_depot_hash_save save;
 	struct stack_record *found = NULL;
 	depot_stack_handle_t handle = 0;
 	struct page *page = NULL;
@@ -2894,21 +2935,17 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	trie_candidate = __stack_depot_trie_ready() &&
 		normal_persistent;
 	if (trie_candidate) {
-		handle = trie_find_handle(&stack_depot_trie_root, entries, nr_entries);
-		if (handle)
-			return handle;
-
 		if (READ_ONCE(stack_depot_persistent_hash_record_seen)) {
 			/*
 			 * Trie storage may be enabled after stack depot has already saved
 			 * hash records. Preserve the same-handle contract by checking hash
-			 * only on trie misses and only when hash records may exist.
+			 * only when such records may exist.
 			 */
 			hash = hash_stack(entries, nr_entries);
 			bucket = &stack_table[hash & stack_hash_mask];
 			found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
 			if (found)
-				goto exit;
+				return found->handle.handle;
 		}
 
 		handle = stack_depot_trie_save(entries, nr_entries, alloc_flags,
@@ -2920,11 +2957,20 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 
 	hash = hash_stack(entries, nr_entries);
 	bucket = &stack_table[hash & stack_hash_mask];
+	save = (struct stack_depot_hash_save) {
+		.bucket = bucket,
+		.entries = entries,
+		.nr_entries = nr_entries,
+		.hash = hash,
+		.depot_flags = depot_flags,
+		.prealloc = &prealloc,
+		.normal_persistent = normal_persistent,
+	};
 
 	/* Fast path: look the stack trace up without locking. */
 	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
 	if (found)
-		goto exit;
+		return found->handle.handle;
 	/*
 	 * Allocate memory for a new pool if required now:
 	 * we won't be able to do that under the lock.
@@ -2941,30 +2987,25 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		WARN_ON_ONCE(can_alloc);
 		/* Best effort; bail if we fail to take the lock. */
 		if (!raw_spin_trylock_irqsave(&pool_lock, flags))
-			goto exit;
-	} else {
-		raw_spin_lock_irqsave(&pool_lock, flags);
-	}
-	printk_deferred_enter();
-
-	/* Try to find again, to avoid concurrently inserting duplicates. */
-	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
-	if (!found) {
-		struct stack_record *new =
-			depot_alloc_stack(entries, nr_entries, hash, depot_flags, &prealloc);
-
-		if (new) {
+			goto out_free;
+		printk_deferred_enter();
+		handle = depot_save_stack_locked(&save);
+		if (prealloc) {
 			/*
-			 * This releases the stack record into the bucket and
-			 * makes it visible to readers in find_stack().
+			 * Either stack depot already contains this stack trace, or
+			 * depot_alloc_stack() did not consume the preallocated memory.
+			 * Try to keep the preallocated memory for future.
 			 */
-			list_add_rcu(&new->hash_list, bucket);
-			if (normal_persistent)
-				WRITE_ONCE(stack_depot_persistent_hash_record_seen, true);
-			found = new;
+			depot_keep_new_pool(&prealloc);
 		}
+		printk_deferred_exit();
+		raw_spin_unlock_irqrestore(&pool_lock, flags);
+		goto out_free;
 	}
 
+	raw_spin_lock_irqsave(&pool_lock, flags);
+	printk_deferred_enter();
+	handle = depot_save_stack_locked(&save);
 	if (prealloc) {
 		/*
 		 * Either stack depot already contains this stack trace, or
@@ -2973,16 +3014,14 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		 */
 		depot_keep_new_pool(&prealloc);
 	}
-
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
-exit:
+
+out_free:
 	if (prealloc) {
 		/* Stack depot didn't use this memory, free it. */
 		free_pages((unsigned long)prealloc, DEPOT_POOL_ORDER);
 	}
-	if (found)
-		handle = found->handle.handle;
 	return handle;
 }
 EXPORT_SYMBOL_GPL(stack_depot_save_flags);
