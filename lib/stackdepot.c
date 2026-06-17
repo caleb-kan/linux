@@ -98,11 +98,21 @@ static int stack_depot_trie_enabled_param_set(const char *val,
 	return 0;
 }
 
+static int stack_depot_trie_enabled_param_get(char *buffer,
+					      const struct kernel_param *kp)
+{
+	struct kernel_param tmp = *kp;
+	bool enabled = READ_ONCE(*(bool *)kp->arg);
+
+	tmp.arg = &enabled;
+	return param_get_bool(buffer, &tmp);
+}
+
 static const struct kernel_param_ops stack_depot_trie_enabled_param_ops = {
 	/* param_set_bool() treats a missing value as true. */
 	.flags = KERNEL_PARAM_OPS_FL_NOARG,
 	.set = stack_depot_trie_enabled_param_set,
-	.get = param_get_bool,
+	.get = stack_depot_trie_enabled_param_get,
 };
 module_param_cb(trie_enabled, &stack_depot_trie_enabled_param_ops,
 		&stack_depot_trie_enabled_param, 0644);
@@ -371,7 +381,8 @@ static void trie_side_table_publish_initialized(void)
 
 static void stack_depot_trie_mark_not_ready(void)
 {
-	WRITE_ONCE(stack_depot_trie_ready, false);
+	/* Pairs with stack_depot_trie_is_ready(). */
+	smp_store_release(&stack_depot_trie_ready, false);
 }
 
 static int stack_pool_addr_cmp(const void *a, const void *b)
@@ -918,7 +929,9 @@ void __stack_depot_trie_side_table_destroy(void)
 	if (!trie_side_table_is_initialized())
 		return;
 	stack_depot_trie_mark_not_ready();
-	WRITE_ONCE(trie_side_table_initialized, false);
+	/* Pairs with trie_side_table_is_initialized(). */
+	smp_store_release(&trie_side_table_initialized, false);
+	synchronize_rcu();
 
 	high_water = READ_ONCE(trie_side_table_high_water);
 	if (!READ_ONCE(trie_side_table_memblock)) {
