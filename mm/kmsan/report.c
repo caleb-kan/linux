@@ -86,7 +86,7 @@ static char *pretty_descr(char *descr)
 void kmsan_print_origin(depot_stack_handle_t origin)
 {
 	unsigned long entries[KMSAN_STACK_DEPTH];
-	unsigned long chain[KMSAN_STACK_DEPTH];
+	const unsigned int max_entries = ARRAY_SIZE(entries);
 	unsigned int nr_entries, chained_nr_entries, skipnr;
 	void *pc1 = NULL, *pc2 = NULL;
 	depot_stack_handle_t head;
@@ -98,7 +98,7 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 		return;
 
 	while (true) {
-		nr_entries = stack_depot_fetch_into(origin, entries, ARRAY_SIZE(entries));
+		nr_entries = stack_depot_fetch_into(origin, entries, max_entries);
 		depth = kmsan_depth_from_eb(stack_depot_get_extra_bits(origin));
 		magic = nr_entries ? entries[0] : 0;
 		if ((nr_entries == 4) && (magic == KMSAN_ALLOCA_MAGIC_ORIGIN)) {
@@ -123,13 +123,14 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 			head = entries[1];
 			origin = entries[2];
 			pr_err("Uninit was stored to memory at:\n");
-			chained_nr_entries = stack_depot_fetch_into(head, chain, ARRAY_SIZE(chain));
+			chained_nr_entries =
+				stack_depot_fetch_into(head, entries, max_entries);
 			kmsan_internal_unpoison_memory(
-				chain,
-				chained_nr_entries * sizeof(*chain),
+				entries,
+				chained_nr_entries * sizeof(*entries),
 				/*checked*/ false);
-			skipnr = get_stack_skipnr(chain, chained_nr_entries);
-			stack_trace_print(chain + skipnr,
+			skipnr = get_stack_skipnr(entries, chained_nr_entries);
+			stack_trace_print(entries + skipnr,
 					  chained_nr_entries - skipnr, 0);
 			pr_err("\n");
 			continue;
