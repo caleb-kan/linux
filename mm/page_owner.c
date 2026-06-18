@@ -255,7 +255,7 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 static void dec_stack_record_count(depot_stack_handle_t handle,
 				   unsigned int nr_base_pages)
 {
-	/* Successful list insertion leaves a marker; zero means it was decremented. */
+	/* Counted handles keep a marker unit; zero means it was decremented. */
 	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);
