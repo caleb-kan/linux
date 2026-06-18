@@ -95,6 +95,13 @@ static int stack_depot_trie_enabled_param_set(const char *val,
 		return ret;
 
 	__stack_depot_trie_set_enabled(enabled);
+	if (enabled && system_state >= SYSTEM_RUNNING) {
+		ret = stack_depot_init();
+		if (ret || !__stack_depot_trie_ready()) {
+			__stack_depot_trie_set_enabled(false);
+			return ret ?: -ENOMEM;
+		}
+	}
 	return 0;
 }
 
