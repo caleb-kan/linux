@@ -253,6 +253,10 @@ unsigned int stack_depot_fetch(depot_stack_handle_t handle,
  * is returned. If more frames are stored than @max_entries, the copy is skipped
  * entirely and 0 is returned.
  *
+ * Callers should size @entries to match the save-side stack depth cap (for
+ * example, %CONFIG_STACKDEPOT_MAX_FRAMES or the local stack_trace_save() limit)
+ * when losing diagnostics on an undersized buffer would be surprising.
+ *
  * A non-zero invalid or post-put @handle is treated like stack_depot_fetch(): it
  * returns 0 and may WARN because such handles indicate a corrupt caller state.
  *

@@ -72,6 +72,7 @@ struct stack_depot_trie_publish_prepare {
 	bool retire_locked;
 };
 
+/* A split can repoint the old leaf and publish one new leaf. */
 #define STACK_DEPOT_TRIE_MAX_LEAF_UPDATES 2
 #define STACK_DEPOT_TRIE_MAX_NODE_SLOTS (CONFIG_STACKDEPOT_MAX_FRAMES + 1)
 #define STACK_DEPOT_TRIE_MAX_CHILD_SLOTS CONFIG_STACKDEPOT_MAX_FRAMES
