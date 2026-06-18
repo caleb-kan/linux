@@ -2,6 +2,7 @@
 #ifndef _STACKDEPOT_INTERNAL_H
 #define _STACKDEPOT_INTERNAL_H
 
+#include <linux/build_bug.h>
 #include <linux/limits.h>
 #include <linux/spinlock_types.h>
 #include <linux/stackdepot.h>

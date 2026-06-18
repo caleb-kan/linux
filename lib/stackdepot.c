@@ -3437,6 +3437,7 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 					       depot_flags);
 		if (handle)
 			return handle;
+		/* Keep trie failures visible; hash fallback hides trie pool pressure. */
 		return 0;
 	}
 
