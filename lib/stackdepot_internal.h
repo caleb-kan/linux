@@ -176,13 +176,6 @@ int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 				      depot_flags_t depot_flags,
 				      void **pool_prealloc,
 				      struct stack_depot_trie_side_prealloc *side_prealloc);
-/*
- * Best-effort current-pool helpers. They never allocate or roll over to a new
- * pool, and they use trylock so constrained contexts fail instead of blocking.
- */
-void *
-__stack_depot_trie_pool_carve_current(size_t size,
-				      struct stack_depot_trie_pool_mark *mark);
 bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark);
 int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
 void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);

@@ -1784,48 +1784,6 @@ int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 	return 0;
 }
 
-void *
-__stack_depot_trie_pool_carve_current(size_t size,
-				      struct stack_depot_trie_pool_mark *mark)
-{
-	unsigned long flags;
-	size_t alloc_size;
-	void *pool;
-	void *ptr = NULL;
-
-	if (!mark)
-		return NULL;
-	memset(mark, 0, sizeof(*mark));
-
-	alloc_size = __stack_depot_trie_pool_alloc_size(size);
-	if (!alloc_size)
-		return NULL;
-
-	if (!raw_spin_trylock_irqsave(&pool_lock, flags))
-		return NULL;
-	printk_deferred_enter();
-	if (!stack_pools || pools_num < 1)
-		goto out;
-	if (WARN_ON_ONCE(pool_offset > DEPOT_POOL_SIZE))
-		goto out;
-	if (alloc_size > DEPOT_POOL_SIZE - pool_offset)
-		goto out;
-
-	mark->pool_index = pools_num - 1;
-	pool = stack_pools[mark->pool_index];
-	if (WARN_ON_ONCE(!pool))
-		goto out;
-
-	mark->offset = pool_offset;
-	mark->size = alloc_size;
-	ptr = pool + pool_offset;
-	pool_offset += alloc_size;
-out:
-	printk_deferred_exit();
-	raw_spin_unlock_irqrestore(&pool_lock, flags);
-	return ptr;
-}
-
 bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark)
 {
 	unsigned long flags;
