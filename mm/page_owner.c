@@ -954,7 +954,7 @@ static int stack_print(struct seq_file *m, void *v)
 	nr_base_pages--;
 
 	/* Drop the list marker before applying the page-count threshold. */
-	if (nr_base_pages < page_owner_pages_threshold)
+	if (nr_base_pages < READ_ONCE(page_owner_pages_threshold))
 		return 0;
 
 	/* Keep show_stacks independent of stackdepot's internal storage layout. */
