@@ -81,9 +81,12 @@
 static DEFINE_WW_CLASS(crtc_ww_class);
 
 #if IS_ENABLED(CONFIG_DRM_DEBUG_MODESET_LOCK)
+/* Save and fetch use the same cap so fetch_into() cannot reject saved stacks. */
+#define DRM_STACK_DEPOT_MAX_FRAMES 8
+
 static noinline depot_stack_handle_t __drm_stack_depot_save(void)
 {
-	unsigned long entries[8];
+	unsigned long entries[DRM_STACK_DEPOT_MAX_FRAMES];
 	unsigned int n;
 
 	n = stack_trace_save(entries, ARRAY_SIZE(entries), 1);
@@ -94,7 +97,7 @@ static noinline depot_stack_handle_t __drm_stack_depot_save(void)
 static void __drm_stack_depot_print(depot_stack_handle_t stack_depot)
 {
 	struct drm_printer p = drm_dbg_printer(NULL, DRM_UT_KMS, "drm_modeset_lock");
-	unsigned long entries[8];
+	unsigned long entries[DRM_STACK_DEPOT_MAX_FRAMES];
 	unsigned int nr_entries;
 	char *buf;
 

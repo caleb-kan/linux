@@ -232,6 +232,7 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 	if (!__stack_depot_get_count(handle, &count))
 		stack = alloc_stack_record(gfp_mask);
 
+	/* Only one caller can win the saturated-to-counted cmpxchg transition. */
 	/* Racing transition losers free their unused list node below. */
 	if (!__stack_depot_inc_count(handle, nr_base_pages, &new_count)) {
 		if (stack)
