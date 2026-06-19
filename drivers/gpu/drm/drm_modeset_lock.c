@@ -81,7 +81,7 @@
 static DEFINE_WW_CLASS(crtc_ww_class);
 
 #if IS_ENABLED(CONFIG_DRM_DEBUG_MODESET_LOCK)
-/* Save and fetch use the same cap so fetch_into() cannot reject saved stacks. */
+/* Existing debug output only records a short caller chain; keep save/fetch caps in sync. */
 #define DRM_STACK_DEPOT_MAX_FRAMES 8
 
 static noinline depot_stack_handle_t __drm_stack_depot_save(void)

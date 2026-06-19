@@ -227,13 +227,17 @@ static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 	if (!handle || !nr_base_pages)
 		return false;
 
-	/* Snapshot only avoids allocation when the stack is already counted. */
-	/* If this races a final decrement to zero, inc_count() fails safely. */
+	/*
+	 * Snapshot only avoids allocation when the stack is already counted. If this
+	 * races a final decrement to zero, inc_count() fails safely.
+	 */
 	if (!__stack_depot_get_count(handle, &count))
 		stack = alloc_stack_record(gfp_mask);
 
-	/* Only one caller can win the saturated-to-counted cmpxchg transition. */
-	/* Racing transition losers free their unused list node below. */
+	/*
+	 * Only one caller can win the saturated-to-counted cmpxchg transition.
+	 * Racing transition losers free their unused list node below.
+	 */
 	if (!__stack_depot_inc_count(handle, nr_base_pages, &new_count)) {
 		if (stack)
 			free_stack_record(stack);
@@ -365,7 +369,7 @@ noinline void __set_page_owner(struct page *page, unsigned short order,
 	handle = save_stack(gfp_mask);
 	counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
 	if (!counted && handle != failure_handle) {
-		/* Attribute to failure_handle only if it can be symmetrically counted. */
+		/* Store failure_handle only if the matching count was applied. */
 		handle = failure_handle;
 		counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
 	}
