@@ -16,6 +16,9 @@
  * each frame. If that window crosses a 4 GB high-bit boundary, module text
  * may have the previous or next prefix even though it is still within
  * relocation range of _text.
+ *
+ * Prefix IDs are arch-local metadata; trie storage is per boot and is never
+ * interpreted by another architecture's decompressor.
  */
 #define STACK_DEPOT_ARM64_PREV_PREFIX_ID	0
 #define STACK_DEPOT_ARM64_TEXT_PREFIX_ID	1

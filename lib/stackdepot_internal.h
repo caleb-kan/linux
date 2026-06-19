@@ -62,9 +62,6 @@ struct stack_depot_trie_leaf_update {
 	const void *leaf;
 };
 
-typedef void (*trie_frame_fn_t)(unsigned int index, unsigned long frame,
-				void *data);
-
 struct stack_depot_trie_publish_prepare {
 	int (*fn)(const struct stack_depot_trie_leaf_update *updates,
 		  unsigned int nr_updates, void *ctx);
@@ -194,27 +191,12 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  void **storage, void **pool_prealloc,
 				  struct stack_depot_trie_side_prealloc *side_prealloc,
 				  struct stack_depot_trie_alloc_request *req);
-int __stack_depot_trie_workspace_plan(const struct stack_depot_trie_root *root,
-				      const unsigned long *entries,
-				      unsigned int nr_entries, void **pool_prealloc,
-				      struct stack_depot_trie_side_prealloc *side_prealloc,
-				      struct stack_depot_trie_alloc_workspace *workspace);
 int __stack_depot_trie_workspace_insert(struct stack_depot_trie_root *root,
 					const unsigned long *entries,
 					unsigned int nr_entries, void **pool_prealloc,
 					struct stack_depot_trie_side_prealloc *side_prealloc,
 					struct stack_depot_trie_alloc_workspace *workspace,
 					const void **tail, u32 *leaf_id);
-depot_stack_handle_t
-__stack_depot_trie_save_miss(struct stack_depot_trie_root *root,
-			     const unsigned long *entries, unsigned int nr_entries,
-			     gfp_t alloc_flags, depot_flags_t depot_flags,
-			     struct stack_depot_trie_alloc_workspace *workspace);
-depot_stack_handle_t
-__stack_depot_trie_save(struct stack_depot_trie_root *root,
-			const unsigned long *entries, unsigned int nr_entries,
-			gfp_t alloc_flags, depot_flags_t depot_flags,
-			struct stack_depot_trie_alloc_workspace *workspace);
 depot_stack_handle_t
 __stack_depot_trie_save_locked(struct stack_depot_trie_root *root,
 			       const unsigned long *entries, unsigned int nr_entries,
@@ -236,10 +218,6 @@ int
 __stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
 				unsigned int nr_updates, void *ctx);
 void __stack_depot_trie_side_rollback(struct stack_depot_trie_side_prepare *state);
-bool __stack_depot_frame_try_compress(unsigned long frame, u8 *prefix_id,
-				      u32 *low);
-bool __stack_depot_frame_decompress(u8 prefix_id, u32 low,
-				    unsigned long *frame);
 int __stack_depot_frame_run_init(const unsigned long *entries,
 				 unsigned int nr_entries,
 				 struct stack_depot_frame_run *run);
@@ -321,8 +299,6 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 unsigned int __stack_depot_trie_fetch_into(const void *leaf,
 					   unsigned long *entries,
 					   unsigned int max_entries);
-unsigned int
-__stack_depot_trie_walk_frames(const void *leaf, trie_frame_fn_t fn, void *data);
 unsigned int __stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
 						  unsigned long *entries,
 						  unsigned int max_entries);
