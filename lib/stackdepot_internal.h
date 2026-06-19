@@ -25,7 +25,6 @@ struct stack_depot_frame_run {
 	u16 bytes;
 	u16 nr_entries;
 	u8 mode;
-	u8 prefix_id;
 };
 
 static_assert(CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(unsigned long) <= U16_MAX);
@@ -34,11 +33,13 @@ bool __stack_depot_trie_enabled(void);
 bool __stack_depot_trie_ready(void);
 void __stack_depot_trie_set_enabled(bool enabled);
 
+/* Opaque trie node storage; node layout stays private to stackdepot.c. */
 struct stack_depot_trie_node_slot {
 	void *node;
 	size_t size;
 };
 
+/* Opaque child-array storage; child array layout stays private. */
 struct stack_depot_trie_child_array_slot {
 	void *array;
 	size_t size;
@@ -51,7 +52,9 @@ struct stack_depot_trie_root {
 };
 
 struct stack_depot_trie_lookup {
+	/* Opaque parent trie node for the current lookup step. */
 	const void *parent;
+	/* Opaque trie node matched at this step, if any. */
 	const void *node;
 	enum stack_depot_trie_lookup_status status;
 	unsigned int matched;
@@ -59,12 +62,14 @@ struct stack_depot_trie_lookup {
 
 struct stack_depot_trie_leaf_update {
 	u32 leaf_id;
+	/* Opaque trie leaf that should become visible for leaf_id. */
 	const void *leaf;
 };
 
 struct stack_depot_trie_publish_prepare {
 	int (*fn)(const struct stack_depot_trie_leaf_update *updates,
 		  unsigned int nr_updates, void *ctx);
+	/* Caller-owned state passed to fn. */
 	void *ctx;
 	bool retire_locked;
 };
@@ -85,11 +90,14 @@ struct stack_depot_trie_side_prepare {
 };
 
 struct stack_depot_trie_side_prealloc {
+	/* Preallocated side-table directory page for sparse growth. */
 	void *dir;
+	/* Preallocated side-table leaf chunk for sparse growth. */
 	void *chunk;
 };
 
 struct stack_depot_trie_pool_mark {
+	/* Stackdepot pool backing this transactional reservation. */
 	void *pool;
 	size_t prev_offset;
 	size_t offset;
@@ -101,7 +109,9 @@ struct stack_depot_trie_pool_mark {
 struct stack_depot_trie_pool_request {
 	struct stack_depot_trie_node_slot *node_slots;
 	struct stack_depot_trie_child_array_slot *child_slots;
+	/* Optional opaque object storage reserved with the node/child slots. */
 	void **storage;
+	/* Optional fresh stackdepot pool page, preallocated outside pool_lock. */
 	void **prealloc;
 	struct stack_depot_trie_pool_mark *mark;
 	size_t storage_size;
@@ -119,7 +129,9 @@ struct stack_depot_trie_alloc_request {
 	struct stack_depot_trie_alloc_txn *txn;
 	struct stack_depot_trie_node_slot *node_slots;
 	struct stack_depot_trie_child_array_slot *child_slots;
+	/* Optional opaque replacement child-array storage. */
 	void **storage;
+	/* Optional fresh stackdepot pool page, preallocated before insertion. */
 	void **pool_prealloc;
 	struct stack_depot_trie_side_prealloc *side_prealloc;
 	size_t storage_size;
@@ -146,12 +158,10 @@ u32 __stack_depot_trie_max_leaf_id(void);
 
 /*
  * Private trie side table. Writers serialize internally; lookups are lockless.
- * Leaf slots are populated before trie publication. Init and destroy are
- * controlled setup/teardown operations and must not race with readers or
- * writers.
+ * Leaf slots are populated before trie publication. Initialization is one-way
+ * because trie handles can outlive runtime disabling of new trie saves.
  */
 int __stack_depot_trie_side_table_init(gfp_t gfp_flags);
-void __stack_depot_trie_side_table_destroy(void);
 bool __stack_depot_trie_side_table_prealloc_needed(void);
 int
 __stack_depot_trie_side_table_prealloc(gfp_t gfp_flags,
@@ -162,9 +172,7 @@ u32
 __stack_depot_trie_side_table_alloc_id(struct stack_depot_trie_side_prealloc *prealloc);
 void __stack_depot_trie_side_table_revoke_latest(u32 id);
 void __stack_depot_trie_side_table_restore(u32 id, const void *entry);
-int __stack_depot_trie_side_table_store(u32 id, const void *entry);
 const void *__stack_depot_trie_side_table_lookup(u32 id);
-size_t __stack_depot_trie_side_table_entries(void);
 size_t __stack_depot_trie_side_table_bytes(void);
 size_t __stack_depot_trie_pool_alloc_size(size_t size);
 void *__stack_depot_trie_pool_prealloc(gfp_t gfp_flags);
@@ -173,7 +181,6 @@ int __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 				      depot_flags_t depot_flags,
 				      void **pool_prealloc,
 				      struct stack_depot_trie_side_prealloc *side_prealloc);
-bool __stack_depot_trie_pool_try_rollback(const struct stack_depot_trie_pool_mark *mark);
 int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req);
 void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 int
@@ -213,7 +220,6 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 				    unsigned int nr_scratch, const void **tail,
 				    u32 *leaf_id);
 void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn);
-void __stack_depot_trie_side_prepare_init(struct stack_depot_trie_side_prepare *state);
 int
 __stack_depot_trie_side_prepare(const struct stack_depot_trie_leaf_update *updates,
 				unsigned int nr_updates, void *ctx);
@@ -221,15 +227,6 @@ void __stack_depot_trie_side_rollback(struct stack_depot_trie_side_prepare *stat
 int __stack_depot_frame_run_init(const unsigned long *entries,
 				 unsigned int nr_entries,
 				 struct stack_depot_frame_run *run);
-int __stack_depot_frame_run_write(const struct stack_depot_frame_run *run,
-				  const unsigned long *entries, void *dst,
-				  size_t dst_size, u32 *scratch,
-				  unsigned int nr_scratch);
-int __stack_depot_frame_run_read(const struct stack_depot_frame_run *run,
-				 const void *src, size_t src_size,
-				 unsigned long *entries, unsigned int max_entries,
-				 unsigned long *scratch,
-				 unsigned int nr_scratch);
 size_t __stack_depot_trie_node_size(const struct stack_depot_frame_run *run);
 int __stack_depot_trie_node_init(void *storage, size_t storage_size,
 				 const void *parent, u32 leaf_id,
@@ -252,9 +249,6 @@ int __stack_depot_trie_append_chain(const void *parent, u32 leaf_id,
 				    unsigned int nr_child_slots, u32 *scratch,
 				    unsigned int nr_scratch, const void **head,
 				    const void **tail, unsigned int *nr_used);
-int __stack_depot_trie_publish_append(struct stack_depot_trie_root *root,
-				      void *parent, const void *head,
-				      void *new_storage, size_t new_storage_size);
 int __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 				   const void *parent, const unsigned long *entries,
 				   unsigned int nr_entries,
@@ -262,17 +256,6 @@ int __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 const void *
 __stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
 			     const unsigned long *entries, unsigned int nr_entries);
-int __stack_depot_trie_insert_append(struct stack_depot_trie_root *root,
-				     void *parent, u32 leaf_id,
-				     const unsigned long *entries,
-				     unsigned int nr_entries,
-				     const struct stack_depot_trie_node_slot *node_slots,
-				     unsigned int nr_node_slots,
-				     const struct stack_depot_trie_child_array_slot *child_slots,
-				     unsigned int nr_child_slots, u32 *scratch,
-				     unsigned int nr_scratch, void *new_storage,
-				     size_t new_storage_size, const void **tail,
-				     unsigned int *nr_used);
 int
 __stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
 					 void *parent, u32 leaf_id,
@@ -323,17 +306,6 @@ int __stack_depot_trie_split_precheck(struct stack_depot_trie_root *root,
 				      const struct stack_depot_trie_child_array_slot *child_slots,
 				      unsigned int nr_child_slots,
 				      void *new_storage, size_t new_storage_size);
-int __stack_depot_trie_split_subtree(const void *child, unsigned int matched,
-				     u32 leaf_id, const unsigned long *entries,
-				     unsigned int nr_entries,
-				     const struct stack_depot_trie_node_slot *node_slots,
-				     unsigned int nr_node_slots,
-				     const struct stack_depot_trie_child_array_slot *child_slots,
-				     unsigned int nr_child_slots, u32 *scratch,
-				     unsigned int nr_scratch, const void **prefix,
-				     const void **tail, unsigned int *nr_used);
-const void *__stack_depot_trie_child_array_find(const void *storage,
-						unsigned long frame);
 int __stack_depot_trie_child_array_insert(const void *old_storage,
 					  const void *child, void *new_storage,
 					  size_t new_storage_size);

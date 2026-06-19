@@ -2,98 +2,38 @@
 #ifndef __ASM_STACKDEPOT_H
 #define __ASM_STACKDEPOT_H
 
-#include <linux/sizes.h>
 #include <linux/types.h>
 #include <linux/limits.h>
 #include <asm/sections.h>
 
-#define STACK_DEPOT_ARM64_FRAME_LOW_MASK	0x00000000ffffffffUL
-#define STACK_DEPOT_ARM64_FRAME_PREFIX_MASK	(~STACK_DEPOT_ARM64_FRAME_LOW_MASK)
-
 /*
  * Modules are allocated inside a 2 GB relocation window containing the
- * kernel image, but stackdepot compression stores only the low 32 bits of
- * each frame. If that window crosses a 4 GB high-bit boundary, module text
- * may have the previous or next prefix even though it is still within
- * relocation range of _text.
- *
- * Prefix IDs are arch-local metadata; trie storage is per boot and is never
- * interpreted by another architecture's decompressor.
+ * kernel image. Store a signed 32-bit offset from _text so compression is
+ * independent of 4 GB high-bit boundaries crossed by that window.
  */
-#define STACK_DEPOT_ARM64_PREV_PREFIX_ID	0
-#define STACK_DEPOT_ARM64_TEXT_PREFIX_ID	1
-#define STACK_DEPOT_ARM64_NEXT_PREFIX_ID	2
-
-static inline unsigned long arch_stack_depot_frame_text_prefix(void)
+static inline bool
+arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 {
-	return (unsigned long)_text & STACK_DEPOT_ARM64_FRAME_PREFIX_MASK;
-}
+	long offset;
 
-static inline bool arch_stack_depot_frame_prefix(u8 prefix_id,
-						 unsigned long *prefix)
-{
-	unsigned long text_prefix = arch_stack_depot_frame_text_prefix();
-
-	switch (prefix_id) {
-	case STACK_DEPOT_ARM64_PREV_PREFIX_ID:
-		/* Reject < SZ_4G for underflow and == SZ_4G for prefix value 0. */
-		if (text_prefix <= SZ_4G)
-			return false;
-		*prefix = text_prefix - SZ_4G;
-		return true;
-	case STACK_DEPOT_ARM64_TEXT_PREFIX_ID:
-		/* Prefix zero is reserved for the raw fallback. */
-		if (!text_prefix)
-			return false;
-		*prefix = text_prefix;
-		return true;
-	case STACK_DEPOT_ARM64_NEXT_PREFIX_ID:
-		if (text_prefix > ULONG_MAX - SZ_4G)
-			return false;
-		*prefix = text_prefix + SZ_4G;
-		return true;
-	default:
-		return false;
-	}
-}
-
-static inline bool arch_stack_depot_frame_try_compress(unsigned long frame,
-						       u8 *prefix_id, u32 *low)
-{
-	unsigned long prefix = frame & STACK_DEPOT_ARM64_FRAME_PREFIX_MASK;
-	unsigned long candidate;
-	unsigned int i;
-
-	if (!prefix_id || !low)
+	if (!low)
 		return false;
 
-	for (i = STACK_DEPOT_ARM64_PREV_PREFIX_ID;
-	     i <= STACK_DEPOT_ARM64_NEXT_PREFIX_ID; i++) {
-		if (!arch_stack_depot_frame_prefix(i, &candidate))
-			continue;
-		if (prefix != candidate)
-			continue;
+	offset = (long)frame - (long)_text;
+	if (offset < S32_MIN || offset > S32_MAX)
+		return false;
 
-		*prefix_id = i;
-		*low = (u32)frame;
-		return true;
-	}
-
-	return false;
+	*low = (u32)(s32)offset;
+	return true;
 }
 
-static inline bool arch_stack_depot_frame_decompress(u8 prefix_id, u32 low,
-						     unsigned long *frame)
+static inline bool
+arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
-	unsigned long prefix;
-
 	if (!frame)
 		return false;
 
-	if (!arch_stack_depot_frame_prefix(prefix_id, &prefix))
-		return false;
-
-	*frame = prefix | low;
+	*frame = (unsigned long)((long)_text + (s32)low);
 	return true;
 }
 
