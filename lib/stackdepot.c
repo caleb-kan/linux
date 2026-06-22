@@ -618,7 +618,7 @@ static bool stack_depot_trie_namespace_available(void)
  * pool-index values above stack_max_pools and reinterpret the offset bits as a
  * dense leaf_id, which the side table maps to a trie leaf. Init treats an
  * unavailable namespace as a hard trie failure; the checks below are defensive
- * because handle helpers can be reached from tests and disabled configurations.
+ * for disabled and failed-initialization configurations.
  */
 static u32 __stack_depot_trie_max_leaf_id(void)
 {
