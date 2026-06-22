@@ -2,9 +2,11 @@
 /*
  * Stack depot - a stack trace storage that avoids duplication.
  *
- * Internally, stack depot maintains a hash table of unique stacktraces. The
- * stack traces themselves are stored contiguously one after another in a set
- * of separate page allocations.
+ * Internally, stack depot has two storage backends. Refcounted entries and
+ * callers that request STACK_DEPOT_FLAG_HASH use the legacy hash table with
+ * contiguous stack records in stack pools. Persistent non-refcounted entries
+ * can use trie storage when enabled; trie nodes share common frame prefixes and
+ * are published through RCU/COW child arrays.
  *
  * Author: Alexander Potapenko <glider@google.com>
  * Copyright (C) 2016 Google, Inc.
@@ -60,6 +62,12 @@ enum stack_depot_trie_lookup_status {
 	STACK_DEPOT_TRIE_LOOKUP_SPLIT,
 };
 
+/*
+ * A trie node stores one run of frames that all use the same payload format.
+ * Architectures may compress some frames to 32-bit payloads; mixed raw and
+ * compressed input is split across multiple trie nodes so each node has one
+ * decoding mode.
+ */
 struct stack_depot_frame_run {
 	u16 bytes;
 	u16 nr_entries;
@@ -106,6 +114,7 @@ struct stack_depot_trie_publish_prepare {
 		  unsigned int nr_updates, void *ctx);
 	/* Caller-owned state passed to fn. */
 	void *ctx;
+	/* Use when the publish path already holds pool_lock for retirement. */
 	bool retire_locked;
 };
 
@@ -477,8 +486,14 @@ struct stack_depot_trie_node {
 	unsigned char data[];
 };
 
+/*
+ * Children are sorted by first frame and searched with lower_bound().
+ * nr_children is the published element count. It can grow in place only when
+ * capacity has spare room; otherwise writers build a replacement array and
+ * publish that pointer. Readers use acquire loads for both the array pointer
+ * and nr_children.
+ */
 struct stack_depot_trie_child_array {
-	/* nr_children/capacity must live with the pointer array readers index. */
 	unsigned int nr_children;
 	unsigned int capacity;
 	const struct stack_depot_trie_node *children[];
@@ -1035,7 +1050,12 @@ trie_side_table_install(struct stack_depot_trie_side_dir **dirs,
 			struct stack_depot_trie_side_entry *first_chunk,
 			bool memblock)
 {
-	/* Init installs only the root and first chunk; later chunks grow lazily. */
+	/*
+	 * Early init installs the first directory and chunk so early leaf ID
+	 * allocation cannot fail immediately. Runtime init installs only the root
+	 * vector; sparse directories and chunks are preallocated outside
+	 * trie_side_table_lock and published lazily as IDs grow.
+	 */
 	if (trie_side_table_is_initialized())
 		return 0;
 	if (!dirs || !root_size || !max_id)
@@ -1967,6 +1987,15 @@ static void __stack_depot_trie_pool_free_prealloc(void *prealloc)
 		free_pages((unsigned long)prealloc, DEPOT_POOL_ORDER);
 }
 
+/*
+ * Preallocate resources that cannot be allocated while trie writers hold raw
+ * spinlocks. Side-table growth is mandatory before a new leaf ID can be
+ * reserved, so side-table preallocation failure disables insertion for this
+ * save. Pool preallocation is opportunistic: reusable trie storage or active
+ * pool space may still satisfy the reservation, and pool_carve() reports
+ * -ENOSPC if they do not. Callers without spinning allocation context skip
+ * insertion and perform only best-effort lookup.
+ */
 static int
 __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags, depot_flags_t depot_flags,
 				  void **pool_prealloc,
@@ -2116,6 +2145,15 @@ static void trie_pool_release_reused_objects(struct stack_depot_trie_pool_reques
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 }
 
+/*
+ * Reserve all pool-backed storage for one trie insertion transaction. The
+ * request may be satisfied by reusable retired fragments or by carving one
+ * contiguous mark from the current stackdepot pool, possibly after installing
+ * @prealloc as a new pool. @mark records only the newly carved range so
+ * rollback can rewind pool_offset; reused fragments are returned to their
+ * freelists separately on failure. The caller must not publish any returned
+ * storage until the trie and side-table transaction commits.
+ */
 static int __stack_depot_trie_pool_carve(struct stack_depot_trie_pool_request *req)
 {
 	unsigned long flags;
@@ -2501,6 +2539,12 @@ __stack_depot_trie_save_locked(struct stack_depot_trie_root *root,
 	if (handle)
 		return handle;
 	no_spin = in_nmi() || !gfpflags_allow_spinning(alloc_flags);
+	/*
+	 * No-spin callers cannot wait for the workspace lock or allocate side-table
+	 * or pool storage. After the lockless lookup misses, trylock and recheck: a
+	 * concurrent writer may have inserted the stack. Otherwise fail instead of
+	 * spinning or publishing a new leaf.
+	 */
 	if (no_spin)
 		return trie_save_trylocked(root, entries, nr_entries, workspace,
 					   workspace_lock);

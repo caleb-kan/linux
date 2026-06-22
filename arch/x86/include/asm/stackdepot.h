@@ -6,6 +6,11 @@
 #include <linux/types.h>
 
 #ifdef CONFIG_X86_64
+/*
+ * Compress canonical kernel text/module addresses whose upper 32 bits are all
+ * ones. Other kernel virtual addresses stay raw, so decompression reconstructs
+ * the original frame by restoring this prefix.
+ */
 #define STACK_DEPOT_X86_64_FRAME_PREFIX	0xffffffff00000000UL
 #define STACK_DEPOT_X86_64_FRAME_LOW_MASK	0x00000000ffffffffUL
 
