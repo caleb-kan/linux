@@ -2142,13 +2142,12 @@ static int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_re
 	pool_req.prealloc = req->pool_prealloc;
 	pool_req.mark = &req->txn->pool;
 
-	ret = __stack_depot_trie_pool_carve(&pool_req);
+	ret = __stack_depot_trie_alloc_txn_id(req->txn, req->side_prealloc);
 	if (ret)
 		return ret;
 
-	ret = __stack_depot_trie_alloc_txn_id(req->txn, req->side_prealloc);
+	ret = __stack_depot_trie_pool_carve(&pool_req);
 	if (ret) {
-		trie_alloc_request_release_reused_objects(req);
 		__stack_depot_trie_alloc_txn_rollback(req->txn);
 		trie_alloc_request_clear_outputs(req);
 		return ret;
