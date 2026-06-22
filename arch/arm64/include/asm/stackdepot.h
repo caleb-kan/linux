@@ -11,19 +11,29 @@
  * kernel image. Store a signed 32-bit offset from _text so compression is
  * independent of 4 GB high-bit boundaries crossed by that window.
  */
+static inline unsigned long arch_stack_depot_frame_from_low(u32 low)
+{
+	long offset;
+
+	offset = (s32)low;
+	if (offset < 0)
+		return (unsigned long)_text - (unsigned long)(-offset);
+	return (unsigned long)_text + (unsigned long)offset;
+}
+
 static inline bool
 arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 {
-	long offset;
+	u32 candidate;
 
 	if (!low)
 		return false;
 
-	offset = (long)frame - (long)_text;
-	if (offset < S32_MIN || offset > S32_MAX)
+	candidate = (u32)(frame - (unsigned long)_text);
+	if (arch_stack_depot_frame_from_low(candidate) != frame)
 		return false;
 
-	*low = (u32)(s32)offset;
+	*low = candidate;
 	return true;
 }
 
@@ -33,7 +43,7 @@ arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 	if (!frame)
 		return false;
 
-	*frame = (unsigned long)((long)_text + (s32)low);
+	*frame = arch_stack_depot_frame_from_low(low);
 	return true;
 }
 
