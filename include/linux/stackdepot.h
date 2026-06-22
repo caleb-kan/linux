@@ -49,8 +49,8 @@ typedef u32 depot_flags_t;
 #define STACK_DEPOT_FLAG_GET		((depot_flags_t)0x0002)
 #define STACK_DEPOT_FLAG_HASH		((depot_flags_t)0x0004)
 
-#define STACK_DEPOT_FLAGS_NUM	3
-#define STACK_DEPOT_FLAGS_MASK	((depot_flags_t)((1 << STACK_DEPOT_FLAGS_NUM) - 1))
+#define STACK_DEPOT_FLAGS_MASK	(STACK_DEPOT_FLAG_CAN_ALLOC | \
+				 STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_HASH)
 
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
