@@ -137,22 +137,29 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	unsigned long noalloc_entries[] = { 0x701000UL, 0x702000UL };
 	unsigned long fetched[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t noalloc_handle;
+	depot_stack_handle_t truncated_handle;
 	depot_stack_handle_t overlong_handle;
 	depot_stack_handle_t hash_handle;
 	depot_stack_handle_t get_handle;
 	depot_stack_handle_t again;
 	depot_stack_handle_t extra;
 	depot_flags_t flags;
+	unsigned long *overlong_fetched;
 	unsigned long *overlong_entries;
 	unsigned int noalloc_nr = ARRAY_SIZE(noalloc_entries);
 	unsigned int overlong_nr = CONFIG_STACKDEPOT_MAX_FRAMES + 1;
+	unsigned int truncated_nr = CONFIG_STACKDEPOT_MAX_FRAMES;
 	unsigned int nr_entries;
+	size_t overlong_size;
 	unsigned int i;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 	overlong_entries = kunit_kcalloc(test, overlong_nr,
 					 sizeof(*overlong_entries), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, overlong_entries);
+	overlong_fetched = kunit_kcalloc(test, CONFIG_STACKDEPOT_MAX_FRAMES,
+					 sizeof(*overlong_fetched), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, overlong_fetched);
 	for (i = 0; i < overlong_nr; i++)
 		overlong_entries[i] = 0x800000UL + i * 0x1000UL;
 
@@ -193,6 +200,13 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	overlong_handle = stack_depot_save(overlong_entries, overlong_nr,
 					   GFP_KERNEL);
 	KUNIT_ASSERT_NE(test, overlong_handle, (depot_stack_handle_t)0);
+	nr_entries = stack_depot_fetch_into(overlong_handle, overlong_fetched,
+					    CONFIG_STACKDEPOT_MAX_FRAMES);
+	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)CONFIG_STACKDEPOT_MAX_FRAMES);
+	overlong_size = CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(*overlong_entries);
+	KUNIT_EXPECT_MEMEQ(test, overlong_fetched, overlong_entries, overlong_size);
+	truncated_handle = stack_depot_save(overlong_entries, truncated_nr, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, truncated_handle, overlong_handle);
 
 	extra = stack_depot_set_extra_bits(hash_handle, 7);
 	KUNIT_ASSERT_NE(test, extra, (depot_stack_handle_t)0);
