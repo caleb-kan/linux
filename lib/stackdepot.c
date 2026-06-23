@@ -4234,6 +4234,8 @@ trie_child_array_replace_at(const struct stack_depot_trie_child_array *old_array
 	for (i = 0; i < old_array->nr_children; i++)
 		new_array->children[i] = old_array->children[i];
 	new_array->children[pos] = new_child;
+	for (i = old_array->nr_children; i < new_array->capacity; i++)
+		new_array->children[i] = NULL;
 }
 
 static int
@@ -5181,11 +5183,6 @@ __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
 	}
 }
 
-struct stack_depot_trie_fetch_ctx {
-	unsigned long *entries;
-	unsigned int nr_entries;
-};
-
 static unsigned int trie_validate_leaf(const void *leaf,
 				       const unsigned long *entries)
 {
@@ -5368,17 +5365,15 @@ trie_snprint_handle(depot_stack_handle_t handle, char *buf, size_t size,
 
 static void trie_fetch_frame(unsigned int index, unsigned long frame, void *data)
 {
-	struct stack_depot_trie_fetch_ctx *ctx = data;
+	unsigned long *entries = data;
 
-	ctx->entries[index] = frame;
-	ctx->nr_entries++;
+	entries[index] = frame;
 }
 
 static unsigned int
 __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 			      unsigned int max_entries)
 {
-	struct stack_depot_trie_fetch_ctx ctx;
 	unsigned int total;
 
 	if (!entries)
@@ -5389,9 +5384,7 @@ __stack_depot_trie_fetch_into(const void *leaf, unsigned long *entries,
 	if (max_entries < total)
 		return 0;
 
-	ctx.entries = entries;
-	ctx.nr_entries = 0;
-	if (trie_walk_frames(leaf, total, trie_fetch_frame, &ctx) != total)
+	if (trie_walk_frames(leaf, total, trie_fetch_frame, entries) != total)
 		return 0;
 
 	kmsan_unpoison_memory(entries, total * sizeof(*entries));
@@ -5503,6 +5496,8 @@ __stack_depot_trie_child_array_init(void *storage, size_t storage_size,
 	array->capacity = capacity;
 	for (i = 0; i < nr_children; i++)
 		array->children[i] = nodes[i];
+	for (i = nr_children; i < capacity; i++)
+		array->children[i] = NULL;
 
 	return 0;
 }
@@ -6089,6 +6084,8 @@ __stack_depot_trie_child_array_insert(const void *old_storage, const void *child
 		for (i = pos; i < nr_old; i++)
 			new_array->children[i + 1] = old_array->children[i];
 	}
+	for (i = nr_old + 1; i < new_array->capacity; i++)
+		new_array->children[i] = NULL;
 
 	return 0;
 }
