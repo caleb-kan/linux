@@ -97,7 +97,7 @@ static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
 
 static depot_stack_handle_t save_hash(unsigned long *entries, unsigned int nr)
 {
-	depot_flags_t flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH;
+	depot_flags_t flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE;
 
 	return stack_depot_save_flags(entries, nr, GFP_KERNEL, flags);
 }
@@ -191,11 +191,16 @@ static void stackdepot_save_flags_public(struct kunit *test)
 					    GFP_KERNEL, flags);
 	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
 	stack_depot_put(get_handle);
+	get_handle = stack_depot_save_flags(entries, ARRAY_SIZE(entries), GFP_KERNEL,
+					    flags);
+	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
 
-	flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH;
+	flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE;
 	hash_handle = stack_depot_save_flags(entries, ARRAY_SIZE(entries),
 					     GFP_KERNEL, flags);
 	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
+	KUNIT_EXPECT_NE(test, hash_handle, get_handle);
+	stack_depot_put(get_handle);
 
 	overlong_handle = stack_depot_save(overlong_entries, overlong_nr,
 					   GFP_KERNEL);
@@ -255,12 +260,6 @@ static void stackdepot_count_helpers(struct kunit *test)
 	bool new_count;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
-
-	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(0, &count));
-	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(0, NULL));
-	__stack_depot_set_count(0, 1);
-	KUNIT_EXPECT_FALSE(test, __stack_depot_inc_count(0, 1, &new_count));
-	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(0, 1));
 
 	handle = save_hash(entries, ARRAY_SIZE(entries));
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);

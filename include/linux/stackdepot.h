@@ -47,10 +47,10 @@ typedef u32 depot_flags_t;
  */
 #define STACK_DEPOT_FLAG_CAN_ALLOC	((depot_flags_t)0x0001)
 #define STACK_DEPOT_FLAG_GET		((depot_flags_t)0x0002)
-#define STACK_DEPOT_FLAG_HASH		((depot_flags_t)0x0004)
+#define STACK_DEPOT_FLAG_COUNTABLE	((depot_flags_t)0x0004)
 
 #define STACK_DEPOT_FLAGS_MASK	(STACK_DEPOT_FLAG_CAN_ALLOC | \
-				 STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_HASH)
+				 STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_COUNTABLE)
 
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
@@ -108,10 +108,10 @@ static inline int stack_depot_early_init(void)	{ return 0; }
  * Users of this flag must also call stack_depot_put() when keeping the stack
  * trace is no longer required to avoid overflowing the refcount.
  *
- * If STACK_DEPOT_FLAG_HASH is set in @depot_flags, stack depot stores the stack
- * trace in legacy hash storage even when trie storage is enabled. This is for
- * internal callers that depend on stackdepot count helpers. This flag does not
- * imply %STACK_DEPOT_FLAG_CAN_ALLOC.
+ * If STACK_DEPOT_FLAG_COUNTABLE is set in @depot_flags, stack depot stores the
+ * stack in a distinct hash-backed record mode that supports the internal count
+ * helpers. This flag does not imply %STACK_DEPOT_FLAG_CAN_ALLOC and is mutually
+ * exclusive with %STACK_DEPOT_FLAG_GET.
  *
  * When trie storage is enabled, persistent non-refcounted saves use trie
  * storage. Constrained contexts remain best effort and can return 0 if a
@@ -158,9 +158,9 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
  *
  * This function is only for internal purposes.
  * The returned count is an unsynchronized snapshot for diagnostics.
+ * @handle must be hash-backed and @count must be valid.
  *
- * Return: true on success, false if @handle is invalid, @count is NULL, or the
- * stack record is not in counted mode.
+ * Return: true on success, false if the stack record is not in counted mode.
  */
 bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
 
@@ -171,8 +171,8 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
  * @count: Count to set
  *
  * This function is only for internal purposes.
- * If @handle is invalid, @count is 0, or @count is greater than %INT_MAX,
- * this function is a no-op.
+ * @handle must be hash-backed, and @count must be greater than 0 and less than
+ * or equal to %INT_MAX.
  * Callers that use this to switch a saturated record to counted mode must
  * separately make the record discoverable by their own tracking structure.
  * Callers must have exclusive access to the stack record count.
@@ -188,8 +188,8 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
  * counted increment
  *
  * This function is only for internal purposes.
- * If @count is 0, this function is a no-op. Otherwise @count must be less
- * than or equal to %INT_MAX - 1 so the saturated-to-counted transition can
+ * @handle must be hash-backed. @count must be greater than 0 and less than or
+ * equal to %INT_MAX - 1 so the saturated-to-counted transition can
  * store the stack_list marker plus @count without overflowing.
  *
  * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
@@ -214,13 +214,14 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle,
  * @count: Count to subtract
  *
  * This function is only for internal purposes.
- * @count must be greater than 0 and less than or equal to %INT_MAX.
+ * @handle must be hash-backed. @count must be greater than 0 and less than or
+ * equal to %INT_MAX.
  *
  * Return: true if the resulting count is 0, false if the resulting count is
- * non-zero, @handle is invalid, the stack record is not in counted mode, or
- * @count is greater than the current count. Saturated persistent records are
- * not in counted mode and fail closed without changing the record. Underflow
- * attempts warn and leave the count unchanged.
+ * non-zero, the stack record is not in counted mode, or @count is greater than
+ * the current count. Saturated persistent records are not in counted mode and
+ * fail closed without changing the record. Underflow attempts warn and leave the
+ * count unchanged.
  */
 bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 				      unsigned int count);

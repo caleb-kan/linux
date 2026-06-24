@@ -100,7 +100,7 @@ static __always_inline depot_stack_handle_t create_dummy_stack(void)
 
 	nr_entries = stack_trace_save(entries, ARRAY_SIZE(entries), 0);
 	return stack_depot_save_flags(entries, nr_entries, GFP_KERNEL,
-				       STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH);
+				       STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE);
 }
 
 static noinline void register_dummy_stack(void)
@@ -165,7 +165,7 @@ static noinline depot_stack_handle_t save_stack(gfp_t flags)
 	set_current_in_page_owner();
 	nr_entries = stack_trace_save(entries, ARRAY_SIZE(entries), 2);
 	handle = stack_depot_save_flags(entries, nr_entries, flags,
-					STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_HASH);
+					STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE);
 	if (!handle)
 		handle = failure_handle;
 	unset_current_in_page_owner();
@@ -207,13 +207,7 @@ static void add_stack_record_to_list(depot_stack_handle_t handle,
 
 	spin_lock_irqsave(&stack_list_lock, flags);
 	stack->next = stack_list;
-	/*
-	 * This pairs with smp_load_acquire() from function
-	 * stack_start(). This guarantees that stack_start()
-	 * will see an updated stack_list before starting to
-	 * traverse the list.
-	 */
-	smp_store_release(&stack_list, stack);
+	stack_list = stack;
 	spin_unlock_irqrestore(&stack_list_lock, flags);
 }
 
@@ -906,18 +900,16 @@ static const struct file_operations proc_page_owner_operations = {
 static void *stack_start(struct seq_file *m, loff_t *ppos)
 {
 	struct page_owner_stack_seq *priv = m->private;
+	unsigned long flags;
 	struct stack *stack;
 
 	if (*ppos == -1UL)
 		return NULL;
 
 	if (!*ppos) {
-		/*
-		 * This pairs with smp_store_release() from function
-		 * add_stack_record_to_list(), so we get a consistent
-		 * value of stack_list.
-		 */
-		stack = smp_load_acquire(&stack_list);
+		spin_lock_irqsave(&stack_list_lock, flags);
+		stack = stack_list;
+		spin_unlock_irqrestore(&stack_list_lock, flags);
 	} else {
 		stack = priv->stack;
 	}
