@@ -16,6 +16,7 @@
 
 #define pr_fmt(fmt) "stackdepot: " fmt
 
+#include <linux/atomic.h>
 #include <linux/bitmap.h>
 #include <linux/build_bug.h>
 #include <linux/debugfs.h>
@@ -374,7 +375,10 @@ struct stack_record {
 	u16 size;			/* Number of stored frames */
 	u16 flags;
 	union handle_parts handle;	/* Constant after initialization */
-	refcount_t count;
+	union {
+		refcount_t count;
+		atomic_t page_count;
+	};
 	union {
 		unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];	/* Frames */
 		struct {
@@ -598,7 +602,6 @@ static unsigned int trie_side_table_nr_dirs;
 static unsigned int trie_side_table_nr_chunks;
 static unsigned int trie_side_table_root_size;
 static u32 trie_side_table_next_id;
-static bool trie_side_table_memblock;
 
 /* Lock order: workspace_lock -> pool_lock -> trie_side_table_lock. */
 
@@ -802,8 +805,7 @@ static int
 trie_side_table_install(struct stack_depot_trie_side_root *root_vec,
 			unsigned int root_size, u32 max_id,
 			struct stack_depot_trie_side_dir *first_dir,
-			struct stack_depot_trie_side_entry *first_chunk,
-			bool memblock)
+			struct stack_depot_trie_side_entry *first_chunk)
 {
 	/*
 	 * Early init installs the first directory and chunk so early leaf ID
@@ -822,7 +824,6 @@ trie_side_table_install(struct stack_depot_trie_side_root *root_vec,
 	WRITE_ONCE(trie_side_table_nr_chunks, 0);
 	WRITE_ONCE(trie_side_table_max_id, max_id);
 	WRITE_ONCE(trie_side_table_next_id, 0);
-	WRITE_ONCE(trie_side_table_memblock, memblock);
 	if (first_dir) {
 		RCU_INIT_POINTER(root_vec->dirs[0], first_dir);
 		WRITE_ONCE(trie_side_table_nr_dirs, 1);
@@ -886,7 +887,7 @@ static int __init __stack_depot_trie_side_table_init_memblock(void)
 	memset(first_chunk, 0, chunk_bytes);
 
 	return trie_side_table_install(root_vec, root_size, max_leaf_id, first_dir,
-				       first_chunk, true);
+				       first_chunk);
 }
 
 static int
@@ -994,8 +995,7 @@ static int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
 	if (!root_vec)
 		return -ENOMEM;
 
-	return trie_side_table_install(root_vec, root_size, max_leaf_id, NULL, NULL,
-				       false);
+	return trie_side_table_install(root_vec, root_size, max_leaf_id, NULL, NULL);
 }
 
 static bool __stack_depot_trie_side_table_prealloc_needed(void)
@@ -1898,21 +1898,18 @@ static int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_re
 	if (req->txn->leaf_id || req->txn->pool.size)
 		return -EINVAL;
 
+	leaf_id = __stack_depot_trie_side_table_prepare_id(req->side_prealloc);
+	if (!leaf_id)
+		return -ENOSPC;
+	req->txn->leaf_id = leaf_id;
+
 	ret = __stack_depot_trie_pool_carve(req);
 	if (ret) {
+		req->txn->leaf_id = 0;
 		__stack_depot_trie_alloc_txn_rollback(req->txn);
 		trie_alloc_request_clear_outputs(req);
 		return ret;
 	}
-
-	leaf_id = __stack_depot_trie_side_table_prepare_id(req->side_prealloc);
-	if (!leaf_id) {
-		trie_pool_release_reused_objects(req);
-		__stack_depot_trie_alloc_txn_rollback(req->txn);
-		trie_alloc_request_clear_outputs(req);
-		return -ENOSPC;
-	}
-	req->txn->leaf_id = leaf_id;
 
 	return 0;
 }
@@ -2541,6 +2538,10 @@ depot_alloc_stack(unsigned long *entries, unsigned int nr_entries, u32 hash,
 		refcount_set(&stack->count, 1);
 		counters[DEPOT_COUNTER_REFD_ALLOCS]++;
 		counters[DEPOT_COUNTER_REFD_INUSE]++;
+	} else if (flags & STACK_DEPOT_FLAG_COUNTABLE) {
+		atomic_set(&stack->page_count, REFCOUNT_SATURATED);
+		counters[DEPOT_COUNTER_PERSIST_COUNT]++;
+		counters[DEPOT_COUNTER_PERSIST_BYTES] += record_size;
 	} else {
 		/* Warn on attempts to switch to refcounting this entry. */
 		refcount_set(&stack->count, REFCOUNT_SATURATED);
@@ -2940,7 +2941,7 @@ bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count)
 	if (WARN_ON_ONCE(!(stack->flags & STACK_RECORD_FLAG_COUNTABLE)))
 		return false;
 
-	raw = refcount_read(&stack->count);
+	raw = atomic_read(&stack->page_count);
 	if (raw == REFCOUNT_SATURATED)
 		return false;
 	if (WARN_ON_ONCE(raw <= 0))
@@ -2964,7 +2965,7 @@ void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count)
 	if (WARN_ON_ONCE(!(stack->flags & STACK_RECORD_FLAG_COUNTABLE)))
 		return;
 
-	refcount_set(&stack->count, (int)count);
+	atomic_set(&stack->page_count, (int)count);
 }
 
 bool __stack_depot_inc_count(depot_stack_handle_t handle,
@@ -2990,13 +2991,11 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle,
 
 	new = 1 + (int)count;
 	/*
-	 * Intentional refcount_t internals use: no helper conditionally
-	 * converts the persistent REFCOUNT_SATURATED sentinel to a positive
-	 * page_owner count. The first cmpxchg only performs that one-way
-	 * transition; normal counted records continue through a checked cmpxchg
-	 * loop so overflow cannot recreate the saturated sentinel.
+	 * The first cmpxchg only performs the one-way transition from the persistent
+	 * sentinel to a page_owner count. Normal counted records continue through a
+	 * checked cmpxchg loop so overflow cannot recreate the saturated sentinel.
 	 */
-	if (atomic_try_cmpxchg(&stack->count.refs, &old, new)) {
+	if (atomic_try_cmpxchg(&stack->page_count, &old, new)) {
 		was_saturated = true;
 	} else {
 		/* cmpxchg reloads @old before each retry check. */
@@ -3008,7 +3007,7 @@ bool __stack_depot_inc_count(depot_stack_handle_t handle,
 			if (count > (unsigned int)INT_MAX - (unsigned int)old)
 				return false;
 			new = old + (int)count;
-		} while (!atomic_try_cmpxchg(&stack->count.refs, &old, new));
+		} while (!atomic_try_cmpxchg(&stack->page_count, &old, new));
 	}
 
 	if (new_count)
@@ -3034,9 +3033,8 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 		return false;
 
 	/*
-	 * Intentional refcount_t internals use: refcount_sub_and_test() would
-	 * saturate on underflow, but page_owner accounting must warn and leave
-	 * the existing count unchanged.
+	 * refcount_sub_and_test() would saturate on underflow, but page_owner
+	 * accounting must warn and leave the existing count unchanged.
 	 */
 	/* The first cmpxchg failure reloads @old before retry checks. */
 	old = INT_MAX;
@@ -3060,7 +3058,7 @@ bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
 		}
 
 		new = old - (int)count;
-	} while (!atomic_try_cmpxchg(&stack->count.refs, &old, new));
+	} while (!atomic_try_cmpxchg(&stack->page_count, &old, new));
 
 	return !new;
 }

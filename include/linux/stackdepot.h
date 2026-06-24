@@ -111,7 +111,8 @@ static inline int stack_depot_early_init(void)	{ return 0; }
  * If STACK_DEPOT_FLAG_COUNTABLE is set in @depot_flags, stack depot stores the
  * stack in a distinct hash-backed record mode that supports the internal count
  * helpers. This flag does not imply %STACK_DEPOT_FLAG_CAN_ALLOC and is mutually
- * exclusive with %STACK_DEPOT_FLAG_GET.
+ * exclusive with %STACK_DEPOT_FLAG_GET. Countable records do not deduplicate
+ * with non-countable records that have the same frames.
  *
  * When trie storage is enabled, persistent non-refcounted saves use trie
  * storage. Constrained contexts remain best effort and can return 0 if a
