@@ -438,8 +438,8 @@ static const char *const counter_names[] = {
 	[DEPOT_COUNTER_REFD_FREES]	= "refcounted_frees",
 	[DEPOT_COUNTER_REFD_INUSE]	= "refcounted_in_use",
 	[DEPOT_COUNTER_FREELIST_SIZE]	= "freelist_size",
-	[DEPOT_COUNTER_PERSIST_COUNT]	= "persistent_count",
-	[DEPOT_COUNTER_PERSIST_BYTES]	= "persistent_bytes",
+	[DEPOT_COUNTER_PERSIST_COUNT]	= "hash_persistent_count",
+	[DEPOT_COUNTER_PERSIST_BYTES]	= "hash_persistent_bytes",
 };
 
 static_assert(ARRAY_SIZE(counter_names) == DEPOT_COUNTER_COUNT);
