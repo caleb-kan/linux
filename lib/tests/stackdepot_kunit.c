@@ -306,7 +306,6 @@ static void stackdepot_countable_does_not_alias_other_modes(struct kunit *test)
 static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
-	unsigned long out = 0x12345678UL;
 	bool compressed;
 	u32 low = 0xfeedbeef;
 
@@ -320,7 +319,6 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_FALSE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)0xfeedbeef);
-	KUNIT_EXPECT_EQ(test, out, 0x12345678UL);
 }
 
 #ifdef CONFIG_X86_64

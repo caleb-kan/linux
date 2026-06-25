@@ -181,7 +181,6 @@ __stack_depot_trie_alloc_prealloc(gfp_t alloc_flags,
 				  depot_flags_t depot_flags, void **pool_prealloc,
 				  struct stack_depot_trie_side_prealloc *side_prealloc);
 static int __stack_depot_trie_pool_carve(struct stack_depot_trie_alloc_request *req);
-static void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn);
 static int
 __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  const unsigned long *entries,
@@ -417,7 +416,6 @@ static struct list_head free_trie_nodes[STACK_DEPOT_TRIE_FREE_CLASSES];
 static DECLARE_BITMAP(free_trie_object_map, STACK_DEPOT_TRIE_FREE_CLASSES);
 static DECLARE_BITMAP(pending_trie_object_map, STACK_DEPOT_TRIE_FREE_CLASSES);
 static DECLARE_BITMAP(free_trie_node_map, STACK_DEPOT_TRIE_FREE_CLASSES);
-static bool free_trie_objects_initialized;
 /* The lock must be held when performing pool or freelist modifications. */
 static DEFINE_RAW_SPINLOCK(pool_lock);
 
@@ -692,12 +690,8 @@ static void __stack_depot_trie_side_table_commit_id(u32 id)
 
 	raw_spin_lock_irqsave(&trie_side_table_lock, flags);
 	next = trie_side_table_next_id;
-	if (WARN_ON_ONCE(id != next + 1)) {
-		if (id > next)
-			WRITE_ONCE(trie_side_table_next_id, id);
-	} else {
+	if (!WARN_ON_ONCE(id != next + 1))
 		WRITE_ONCE(trie_side_table_next_id, id);
-	}
 	raw_spin_unlock_irqrestore(&trie_side_table_lock, flags);
 }
 
@@ -869,9 +863,23 @@ static int stack_depot_trie_init_workspace(gfp_t gfp_flags)
 	return stack_depot_trie_install_workspace(workspace);
 }
 
+static void trie_free_object_buckets_init(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(free_trie_objects); i++) {
+		INIT_LIST_HEAD(&free_trie_objects[i]);
+		INIT_LIST_HEAD(&pending_trie_objects[i]);
+		INIT_LIST_HEAD(&free_trie_nodes[i]);
+	}
+}
+
 static int __init stack_depot_trie_init_memblock(void)
 {
 	int ret;
+
+	if (__stack_depot_trie_enabled())
+		return 0;
 
 	ret = stack_depot_trie_init_workspace_memblock();
 	if (ret)
@@ -880,6 +888,7 @@ static int __init stack_depot_trie_init_memblock(void)
 	if (ret)
 		return ret;
 
+	trie_free_object_buckets_init();
 	stack_depot_trie_enable();
 	return 0;
 }
@@ -888,6 +897,9 @@ static int stack_depot_trie_init(gfp_t gfp_flags)
 {
 	int ret;
 
+	if (__stack_depot_trie_enabled())
+		return 0;
+
 	ret = stack_depot_trie_init_workspace(gfp_flags);
 	if (ret)
 		return ret;
@@ -895,6 +907,7 @@ static int stack_depot_trie_init(gfp_t gfp_flags)
 	if (ret)
 		return ret;
 
+	trie_free_object_buckets_init();
 	stack_depot_trie_enable();
 	return 0;
 }
@@ -1143,22 +1156,6 @@ static inline void *trie_object_payload(struct stack_depot_trie_free_object *fre
 	return (void *)free + trie_object_header_size();
 }
 
-static void trie_free_object_buckets_init_locked(void)
-{
-	unsigned int i;
-
-	lockdep_assert_held(&pool_lock);
-
-	if (free_trie_objects_initialized)
-		return;
-	for (i = 0; i < ARRAY_SIZE(free_trie_objects); i++) {
-		INIT_LIST_HEAD(&free_trie_objects[i]);
-		INIT_LIST_HEAD(&pending_trie_objects[i]);
-		INIT_LIST_HEAD(&free_trie_nodes[i]);
-	}
-	free_trie_objects_initialized = true;
-}
-
 static unsigned int trie_free_class(size_t size)
 {
 	size = __stack_depot_trie_pool_alloc_size(size);
@@ -1228,7 +1225,6 @@ static void trie_free_object_locked(const void *ptr, unsigned long rcu_state)
 
 	if (!ptr)
 		return;
-	trie_free_object_buckets_init_locked();
 	free = trie_object_header(ptr);
 	free->rcu_state = rcu_state;
 	class = trie_free_class(free->size);
@@ -1378,7 +1374,6 @@ trie_retire_object_node_locked(const void *ptr,
 	if (!ptr)
 		return;
 
-	trie_free_object_buckets_init_locked();
 	free = trie_object_header(ptr);
 	free->pending_node = NULL;
 	free->pending_node_size = 0;
@@ -1630,7 +1625,6 @@ static int __stack_depot_trie_pool_carve(struct stack_depot_trie_alloc_request *
 		ret = -ENOSPC;
 		goto out;
 	}
-	trie_free_object_buckets_init_locked();
 	trie_drain_pending_objects_locked();
 	for (i = 0; i < req->nr_node_slots; i++) {
 		req->node_slots[i].node = trie_pop_free_node(req->node_slots[i].size);
@@ -1707,12 +1701,6 @@ out:
 	return ret;
 }
 
-static void __stack_depot_trie_alloc_txn_init(struct stack_depot_trie_alloc_txn *txn)
-{
-	if (txn)
-		memset(txn, 0, sizeof(*txn));
-}
-
 static int __stack_depot_trie_alloc_txn_reserve(struct stack_depot_trie_alloc_request *req)
 {
 	u32 leaf_id;
@@ -1768,7 +1756,7 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 	if (ret)
 		return ret;
 
-	__stack_depot_trie_alloc_txn_init(txn);
+	memset(txn, 0, sizeof(*txn));
 	*storage = NULL;
 	*req = (struct stack_depot_trie_alloc_request) {
 		.txn = txn,
@@ -1881,7 +1869,7 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 		goto rollback;
 
 	__stack_depot_trie_side_table_commit_id(id);
-	__stack_depot_trie_alloc_txn_init(txn);
+	memset(txn, 0, sizeof(*txn));
 	*leaf_id = id;
 	return 0;
 
@@ -2530,12 +2518,6 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 	int ret;
 
 	workspace = stack_depot_trie_load_workspace();
-	if (!entries || !nr_entries || !workspace)
-		return 0;
-	if (depot_flags & STACK_DEPOT_FLAG_GET)
-		return 0;
-	if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
-		nr_entries = CONFIG_STACKDEPOT_MAX_FRAMES;
 
 	handle = trie_find_handle(&stack_depot_trie_root, entries, nr_entries);
 	if (handle)
