@@ -183,6 +183,10 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
  * Does not increment the refcount on the saved stack trace; see
  * stack_depot_save_flags() for more details.
  *
+ * When trie storage is enabled, this can return trie-backed handles. Use
+ * stack_depot_fetch_into(), stack_depot_print(), or stack_depot_snprint() for
+ * backend-independent access to the stack contents.
+ *
  * Context: Contexts where allocations via alloc_pages() are allowed;
  *          see stack_depot_save_flags() for more details.
  *
@@ -206,7 +210,7 @@ struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle)
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot
  *
- * @handle:	Stack depot handle returned from stack_depot_save()
+ * @handle:	Hash-backed stack depot handle
  * @entries:	Pointer to store the address of the stack trace
  *
  * This helper returns a pointer to stackdepot-owned contiguous storage for
