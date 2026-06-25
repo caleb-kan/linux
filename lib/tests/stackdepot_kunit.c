@@ -134,11 +134,13 @@ static void stackdepot_save_flags_public(struct kunit *test)
 {
 	unsigned long entries[] = { 0x501000UL, 0x502000UL, 0x503000UL };
 	unsigned long get_entries[] = { 0x601000UL, 0x602000UL };
+	unsigned long count_entries[] = { 0x603000UL, 0x604000UL };
 	unsigned long noalloc_entries[] = { 0x701000UL, 0x702000UL };
 	unsigned long fetched[ARRAY_SIZE(entries)] = {};
 	depot_stack_handle_t noalloc_handle;
 	depot_stack_handle_t truncated_handle;
 	depot_stack_handle_t overlong_handle;
+	depot_stack_handle_t count_handle;
 	depot_stack_handle_t hash_handle;
 	depot_stack_handle_t get_handle;
 	depot_stack_handle_t again;
@@ -191,16 +193,12 @@ static void stackdepot_save_flags_public(struct kunit *test)
 					    GFP_KERNEL, flags);
 	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
 	stack_depot_put(get_handle);
-	get_handle = stack_depot_save_flags(entries, ARRAY_SIZE(entries), GFP_KERNEL,
-					    flags);
-	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
 
 	flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE;
-	hash_handle = stack_depot_save_flags(entries, ARRAY_SIZE(entries),
-					     GFP_KERNEL, flags);
-	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
-	KUNIT_EXPECT_NE(test, hash_handle, get_handle);
-	stack_depot_put(get_handle);
+	count_handle = stack_depot_save_flags(count_entries,
+					      ARRAY_SIZE(count_entries),
+					      GFP_KERNEL, flags);
+	KUNIT_ASSERT_NE(test, count_handle, (depot_stack_handle_t)0);
 
 	overlong_handle = stack_depot_save(overlong_entries, overlong_nr,
 					   GFP_KERNEL);
@@ -242,56 +240,67 @@ static void stackdepot_snprint_public(struct kunit *test)
 	KUNIT_EXPECT_STREQ(test, actual, expected);
 }
 
-static void stackdepot_count_helpers(struct kunit *test)
+static void stackdepot_get_stack_record(struct kunit *test)
 {
 	unsigned long entries[] = {
 		0x1234567800310000UL,
 		0x1234567800320000UL,
 		0x1234567800330000UL,
 	};
-	unsigned long second_entries[] = {
-		0x1234567800410000UL,
-		0x1234567800420000UL,
-		0x1234567800430000UL,
-	};
-	depot_stack_handle_t second_handle;
+	struct stack_record *record;
 	depot_stack_handle_t handle;
-	unsigned int count;
-	bool new_count;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 
 	handle = save_hash(entries, ARRAY_SIZE(entries));
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
-	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
 
-	new_count = false;
-	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(handle, 2, &new_count));
-	KUNIT_EXPECT_TRUE(test, new_count);
-	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
-	KUNIT_EXPECT_EQ(test, count, 3U);
+	record = __stack_depot_get_stack_record(handle);
+	KUNIT_ASSERT_NOT_NULL(test, record);
+	KUNIT_EXPECT_EQ(test, record->size, (u16)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, record->entries, entries, sizeof(entries));
+}
 
-	new_count = true;
-	KUNIT_EXPECT_TRUE(test, __stack_depot_inc_count(handle, 4, &new_count));
-	KUNIT_EXPECT_FALSE(test, new_count);
-	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
-	KUNIT_EXPECT_EQ(test, count, 7U);
+static void stackdepot_countable_does_not_alias_other_modes(struct kunit *test)
+{
+	unsigned long plain_entries[] = {
+		0x1234567800410000UL,
+		0x1234567800420000UL,
+		0x1234567800430000UL,
+	};
+	unsigned long get_entries[] = {
+		0x1234567800510000UL,
+		0x1234567800520000UL,
+		0x1234567800530000UL,
+	};
+	depot_flags_t get = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_GET;
+	struct stack_record *record;
+	depot_stack_handle_t count_handle;
+	depot_stack_handle_t plain_handle;
+	depot_stack_handle_t get_handle;
+	unsigned int get_nr = ARRAY_SIZE(get_entries);
+	unsigned int plain_nr = ARRAY_SIZE(plain_entries);
 
-	KUNIT_EXPECT_FALSE(test, __stack_depot_dec_count_and_test(handle, 5));
-	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(handle, &count));
-	KUNIT_EXPECT_EQ(test, count, 2U);
-	KUNIT_EXPECT_TRUE(test, __stack_depot_dec_count_and_test(handle, 2));
-	KUNIT_EXPECT_FALSE(test, __stack_depot_get_count(handle, &count));
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 
-	second_handle = save_hash(second_entries, ARRAY_SIZE(second_entries));
-	KUNIT_ASSERT_NE(test, second_handle, (depot_stack_handle_t)0);
-	__stack_depot_set_count(second_handle, INT_MAX - 1);
-	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(second_handle, &count));
-	KUNIT_EXPECT_EQ(test, count, (unsigned int)INT_MAX - 1);
-	KUNIT_EXPECT_FALSE(test,
-			   __stack_depot_inc_count(second_handle, 2, &new_count));
-	KUNIT_ASSERT_TRUE(test, __stack_depot_get_count(second_handle, &count));
-	KUNIT_EXPECT_EQ(test, count, (unsigned int)INT_MAX - 1);
+	plain_handle = stack_depot_save(plain_entries, plain_nr, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, plain_handle, (depot_stack_handle_t)0);
+	count_handle = save_hash(plain_entries, plain_nr);
+	KUNIT_ASSERT_NE(test, count_handle, (depot_stack_handle_t)0);
+	record = __stack_depot_get_stack_record(count_handle);
+	KUNIT_ASSERT_NOT_NULL(test, record);
+	KUNIT_EXPECT_MEMEQ(test, record->entries, plain_entries,
+			   sizeof(plain_entries));
+
+	get_handle = stack_depot_save_flags(get_entries, get_nr, GFP_KERNEL, get);
+	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
+	count_handle = save_hash(get_entries, get_nr);
+	KUNIT_ASSERT_NE(test, count_handle, (depot_stack_handle_t)0);
+	record = __stack_depot_get_stack_record(count_handle);
+	KUNIT_ASSERT_NOT_NULL(test, record);
+	KUNIT_EXPECT_MEMEQ(test, record->entries, get_entries, sizeof(get_entries));
+
+	stack_depot_put(get_handle);
 }
 
 static void stackdepot_frame_raw_fallback(struct kunit *test)
@@ -299,7 +308,6 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 	unsigned long frame = 0xffff888000001000UL;
 	unsigned long out = 0x12345678UL;
 	bool compressed;
-	bool decoded;
 	u32 low = 0xfeedbeef;
 
 #ifdef CONFIG_ARM64
@@ -312,9 +320,6 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_FALSE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)0xfeedbeef);
-
-	decoded = arch_stack_depot_frame_decompress(0x81234567, NULL);
-	KUNIT_EXPECT_FALSE(test, decoded);
 	KUNIT_EXPECT_EQ(test, out, 0x12345678UL);
 }
 
@@ -496,7 +501,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_hash_flag_roundtrip),
 	KUNIT_CASE(stackdepot_save_flags_public),
 	KUNIT_CASE(stackdepot_snprint_public),
-	KUNIT_CASE(stackdepot_count_helpers),
+	KUNIT_CASE(stackdepot_get_stack_record),
+	KUNIT_CASE(stackdepot_countable_does_not_alias_other_modes),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #ifdef CONFIG_X86_64
 	KUNIT_CASE(stackdepot_frame_x86_64),

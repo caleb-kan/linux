@@ -88,7 +88,6 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 	unsigned long entries[KMSAN_STACK_DEPTH];
 	const unsigned int max_entries = ARRAY_SIZE(entries);
 	unsigned int nr_entries, chained_nr_entries, skipnr;
-	size_t chained_size;
 	void *pc1 = NULL, *pc2 = NULL;
 	depot_stack_handle_t head;
 	unsigned long magic;
@@ -124,11 +123,9 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 			head = entries[1];
 			origin = entries[2];
 			pr_err("Uninit was stored to memory at:\n");
-			/* Save head/origin locally before reusing entries below. */
+			/* Reuse entries after saving head and origin above. */
 			chained_nr_entries =
 				stack_depot_fetch_into(head, entries, max_entries);
-			chained_size = chained_nr_entries * sizeof(*entries);
-			kmsan_internal_unpoison_memory(entries, chained_size, false);
 			if (chained_nr_entries) {
 				skipnr = get_stack_skipnr(entries, chained_nr_entries);
 				stack_trace_print(entries + skipnr,

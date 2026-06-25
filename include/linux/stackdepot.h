@@ -21,6 +21,8 @@
 #define _LINUX_STACKDEPOT_H
 
 #include <linux/gfp.h>
+#include <linux/list.h>
+#include <linux/refcount.h>
 
 typedef u32 depot_stack_handle_t;
 
@@ -39,6 +41,44 @@ typedef u32 depot_stack_handle_t;
 #define DEPOT_POOL_INDEX_BITS (DEPOT_HANDLE_BITS - DEPOT_OFFSET_BITS - \
 			       STACK_DEPOT_EXTRA_BITS)
 
+#ifdef CONFIG_STACKDEPOT
+/* Compact structure that stores a reference to a stack. */
+union handle_parts {
+	depot_stack_handle_t handle;
+	struct {
+		u32 pool_index_plus_1	: DEPOT_POOL_INDEX_BITS;
+		u32 offset		: DEPOT_OFFSET_BITS;
+		u32 extra		: STACK_DEPOT_EXTRA_BITS;
+	};
+};
+
+struct stack_record {
+	struct list_head hash_list;	/* Links in the hash table */
+	u32 hash;			/* Hash in hash table */
+	u16 size;			/* Number of stored frames */
+	u16 flags;
+	union handle_parts handle;	/* Constant after initialization */
+	refcount_t count;
+	union {
+		unsigned long entries[CONFIG_STACKDEPOT_MAX_FRAMES];	/* Frames */
+		struct {
+			/*
+			 * An important invariant of the implementation is to
+			 * only place a stack record onto the freelist iff its
+			 * refcount is zero. Because stack records with a zero
+			 * refcount are never considered as valid, it is safe to
+			 * union @entries and freelist management state below.
+			 * Conversely, as soon as an entry is off the freelist
+			 * and its refcount becomes non-zero, the below must not
+			 * be accessed until being placed back on the freelist.
+			 */
+			struct list_head free_list;	/* Links in the freelist */
+			unsigned long rcu_state;	/* RCU cookie */
+		};
+	};
+};
+#endif
+
 typedef u32 depot_flags_t;
 
 /*
@@ -49,8 +89,8 @@ typedef u32 depot_flags_t;
 #define STACK_DEPOT_FLAG_GET		((depot_flags_t)0x0002)
 #define STACK_DEPOT_FLAG_COUNTABLE	((depot_flags_t)0x0004)
 
-#define STACK_DEPOT_FLAGS_MASK	(STACK_DEPOT_FLAG_CAN_ALLOC | \
-				 STACK_DEPOT_FLAG_GET | STACK_DEPOT_FLAG_COUNTABLE)
+#define STACK_DEPOT_FLAGS_NUM	3
+#define STACK_DEPOT_FLAGS_MASK	((depot_flags_t)((1 << STACK_DEPOT_FLAGS_NUM) - 1))
 
 /*
  * Using stack depot requires its initialization, which can be done in 3 ways:
@@ -109,10 +149,9 @@ static inline int stack_depot_early_init(void)	{ return 0; }
  * trace is no longer required to avoid overflowing the refcount.
  *
  * If STACK_DEPOT_FLAG_COUNTABLE is set in @depot_flags, stack depot stores the
- * stack in a distinct hash-backed record mode that supports the internal count
- * helpers. This flag does not imply %STACK_DEPOT_FLAG_CAN_ALLOC and is mutually
- * exclusive with %STACK_DEPOT_FLAG_GET. Countable records do not deduplicate
- * with non-countable records that have the same frames.
+ * stack in hash-backed storage for callers that need direct stack_record count
+ * access. This flag does not imply %STACK_DEPOT_FLAG_CAN_ALLOC and is mutually
+ * exclusive with %STACK_DEPOT_FLAG_GET.
  *
  * When trie storage is enabled, persistent non-refcounted saves use trie
  * storage. Constrained contexts remain best effort and can return 0 if a
@@ -152,80 +191,16 @@ depot_stack_handle_t stack_depot_save(unsigned long *entries,
 				      unsigned int nr_entries, gfp_t alloc_flags);
 
 /**
- * __stack_depot_get_count - Get a counted stack record count
+ * __stack_depot_get_stack_record - Get a hash-backed stack record
  *
  * @handle: Stack depot handle
- * @count:  Pointer to store the count
  *
- * This function is only for internal purposes.
- * The returned count is an unsynchronized snapshot for diagnostics.
- * @handle must be hash-backed and @count must be valid.
+ * This function is only for internal purposes. @handle must have been saved
+ * with %STACK_DEPOT_FLAG_COUNTABLE.
  *
- * Return: true on success, false if the stack record is not in counted mode.
+ * Return: Returns a pointer to a stack_record struct.
  */
-bool __stack_depot_get_count(depot_stack_handle_t handle, unsigned int *count);
-
-/**
- * __stack_depot_set_count - Set a stack record count
- *
- * @handle: Stack depot handle
- * @count: Count to set
- *
- * This function is only for internal purposes.
- * @handle must be hash-backed, and @count must be greater than 0 and less than
- * or equal to %INT_MAX.
- * Callers that use this to switch a saturated record to counted mode must
- * separately make the record discoverable by their own tracking structure.
- * Callers must have exclusive access to the stack record count.
- */
-void __stack_depot_set_count(depot_stack_handle_t handle, unsigned int count);
-
-/**
- * __stack_depot_inc_count - Increment a stack record count
- *
- * @handle: Stack depot handle
- * @count: Count to add
- * @new_count: Optional storage for whether this call performed the first
- * counted increment
- *
- * This function is only for internal purposes.
- * @handle must be hash-backed. @count must be greater than 0 and less than or
- * equal to %INT_MAX - 1 so the saturated-to-counted transition can
- * store the stack_list marker plus @count without overflowing.
- *
- * Persistent stack records start with refcount set to %REFCOUNT_SATURATED. If
- * this helper switches a saturated record to counted mode, it stores @count + 1.
- * For records already in counted mode, cumulative overflow is rejected and
- * leaves the count unchanged. If @new_count is non-NULL, it is set to true when
- * this call switches the record from saturated to counted and false otherwise.
- * If a racing decrement brings an already-counted diagnostic record to zero,
- * this helper does not resurrect it.
- * Callers must ensure @handle remains valid for the duration of this call.
- *
- * Return: true if @count was applied, false otherwise.
- */
-bool __stack_depot_inc_count(depot_stack_handle_t handle,
-			     unsigned int count,
-			     bool *new_count);
-
-/**
- * __stack_depot_dec_count_and_test - Decrement a stack record count
- *
- * @handle: Stack depot handle
- * @count: Count to subtract
- *
- * This function is only for internal purposes.
- * @handle must be hash-backed. @count must be greater than 0 and less than or
- * equal to %INT_MAX.
- *
- * Return: true if the resulting count is 0, false if the resulting count is
- * non-zero, the stack record is not in counted mode, or @count is greater than
- * the current count. Saturated persistent records are not in counted mode and
- * fail closed without changing the record. Underflow attempts warn and leave the
- * count unchanged.
- */
-bool __stack_depot_dec_count_and_test(depot_stack_handle_t handle,
-				      unsigned int count);
+struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle);
 
 /**
  * stack_depot_fetch - Fetch a stack trace from stack depot

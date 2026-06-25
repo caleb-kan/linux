@@ -19,9 +19,6 @@ static_assert(STACK_DEPOT_X86_64_FRAME_PREFIX != 0);
 static inline bool
 arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 {
-	if (!low)
-		return false;
-
 	if ((frame & ~STACK_DEPOT_X86_64_FRAME_LOW_MASK) !=
 	    STACK_DEPOT_X86_64_FRAME_PREFIX)
 		return false;
@@ -33,9 +30,6 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 static inline bool
 arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
-	if (!frame)
-		return false;
-
 	*frame = STACK_DEPOT_X86_64_FRAME_PREFIX | low;
 	return true;
 }

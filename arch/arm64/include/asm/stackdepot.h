@@ -26,9 +26,6 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 {
 	u32 candidate;
 
-	if (!low)
-		return false;
-
 	candidate = (u32)(frame - (unsigned long)_text);
 	if (arch_stack_depot_frame_from_low(candidate) != frame)
 		return false;
@@ -40,9 +37,6 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 static inline bool
 arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
-	if (!frame)
-		return false;
-
 	*frame = arch_stack_depot_frame_from_low(low);
 	return true;
 }

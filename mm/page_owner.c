@@ -38,13 +38,8 @@ struct page_owner {
 };
 
 struct stack {
-	depot_stack_handle_t handle;
+	struct stack_record *stack_record;
 	struct stack *next;
-};
-
-struct page_owner_stack_seq {
-	struct stack *stack;
-	unsigned long entries[PAGE_OWNER_STACK_DEPTH];
 };
 
 static struct stack dummy_stack;
@@ -128,14 +123,12 @@ static __init void init_page_owner(void)
 	register_early_stack();
 	init_early_allocated_pages();
 	/* Initialize dummy and failure stacks and link them to stack_list. */
-	dummy_stack.handle = dummy_handle;
-	failure_stack.handle = failure_handle;
-	/* These counts are the stack_list membership markers. */
-	/* No page_owner count updates can race before page_owner_inited flips. */
-	if (dummy_handle)
-		__stack_depot_set_count(dummy_handle, 1);
-	if (failure_handle)
-		__stack_depot_set_count(failure_handle, 1);
+	dummy_stack.stack_record = __stack_depot_get_stack_record(dummy_handle);
+	failure_stack.stack_record = __stack_depot_get_stack_record(failure_handle);
+	if (dummy_stack.stack_record)
+		refcount_set(&dummy_stack.stack_record->count, 1);
+	if (failure_stack.stack_record)
+		refcount_set(&failure_stack.stack_record->count, 1);
 	dummy_stack.next = &failure_stack;
 	stack_list = &dummy_stack;
 	static_branch_enable(&page_owner_inited);
@@ -173,89 +166,72 @@ static noinline depot_stack_handle_t save_stack(gfp_t flags)
 	return handle;
 }
 
-static struct stack *alloc_stack_record(gfp_t gfp_mask)
+static void add_stack_record_to_list(struct stack_record *stack_record,
+				     gfp_t gfp_mask)
 {
+	unsigned long flags;
 	struct stack *stack;
 
 	if (!gfpflags_allow_spinning(gfp_mask))
-		return NULL;
+		return;
 
 	set_current_in_page_owner();
 	stack = kmalloc(sizeof(*stack), gfp_nested_mask(gfp_mask));
-	unset_current_in_page_owner();
-
-	return stack;
-}
-
-static void free_stack_record(struct stack *stack)
-{
-	set_current_in_page_owner();
-	kfree(stack);
-	unset_current_in_page_owner();
-}
-
-static void add_stack_record_to_list(depot_stack_handle_t handle,
-				     struct stack *stack)
-{
-	unsigned long flags;
-
-	if (WARN_ON_ONCE(!stack))
+	if (!stack) {
+		unset_current_in_page_owner();
 		return;
+	}
+	unset_current_in_page_owner();
 
-	stack->handle = handle;
+	stack->stack_record = stack_record;
 	stack->next = NULL;
 
 	spin_lock_irqsave(&stack_list_lock, flags);
 	stack->next = stack_list;
-	stack_list = stack;
+	/*
+	 * This pairs with smp_load_acquire() from function
+	 * stack_start(). This guarantees that stack_start()
+	 * will see an updated stack_list before starting to
+	 * traverse the list.
+	 */
+	smp_store_release(&stack_list, stack);
 	spin_unlock_irqrestore(&stack_list_lock, flags);
 }
 
-static bool inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
-				   unsigned int nr_base_pages)
+static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
+				   int nr_base_pages)
 {
-	struct stack *stack = NULL;
-	bool new_count = false;
-	unsigned int count;
+	struct stack_record *stack_record = __stack_depot_get_stack_record(handle);
 
-	if (!handle || !nr_base_pages)
-		return false;
+	if (!stack_record)
+		return;
 
 	/*
-	 * Snapshot only avoids allocation when the stack is already counted. If this
-	 * races a final decrement to zero, inc_count() fails safely.
+	 * New stack_record's that do not use STACK_DEPOT_FLAG_GET start
+	 * with REFCOUNT_SATURATED to catch spurious increments of their
+	 * refcount.
+	 * Since we do not use STACK_DEPOT_FLAG_GET API, let us
+	 * set a refcount of 1 ourselves.
 	 */
-	if (!__stack_depot_get_count(handle, &count))
-		stack = alloc_stack_record(gfp_mask);
+	if (refcount_read(&stack_record->count) == REFCOUNT_SATURATED) {
+		int old = REFCOUNT_SATURATED;
 
-	/*
-	 * Only one caller can win the saturated-to-counted cmpxchg transition.
-	 * Racing transition losers free their unused list node below.
-	 */
-	if (!__stack_depot_inc_count(handle, nr_base_pages, &new_count)) {
-		if (stack)
-			free_stack_record(stack);
-		return false;
+		if (atomic_try_cmpxchg_relaxed(&stack_record->count.refs, &old, 1))
+			/* Add the new stack_record to our list. */
+			add_stack_record_to_list(stack_record, gfp_mask);
 	}
-	/*
-	 * new_count includes the list marker. If list allocation failed, keep
-	 * the count and handle anyway; show_stacks remains best effort.
-	 */
-	if (new_count) {
-		if (stack)
-			add_stack_record_to_list(handle, stack);
-	} else if (stack) {
-		free_stack_record(stack);
-	}
-
-	return true;
+	refcount_add(nr_base_pages, &stack_record->count);
 }
 
 static void dec_stack_record_count(depot_stack_handle_t handle,
-				   unsigned int nr_base_pages)
+				   int nr_base_pages)
 {
-	/* Counted handles keep a marker unit; zero means it was decremented. */
-	if (__stack_depot_dec_count_and_test(handle, nr_base_pages))
+	struct stack_record *stack_record = __stack_depot_get_stack_record(handle);
+
+	if (!stack_record)
+		return;
+
+	if (refcount_sub_and_test(nr_base_pages, &stack_record->count))
 		pr_warn("%s: refcount went to 0 for %u handle\n", __func__,
 			handle);
 }
@@ -357,24 +333,12 @@ noinline void __set_page_owner(struct page *page, unsigned short order,
 {
 	u64 ts_nsec = local_clock();
 	depot_stack_handle_t handle;
-	bool counted;
 
-	/* Any previous allocation handle for this page was decremented at free. */
 	handle = save_stack(gfp_mask);
-	counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
-	if (!counted && handle != failure_handle) {
-		/* Store failure_handle only if the matching count was applied. */
-		handle = failure_handle;
-		counted = inc_stack_record_count(handle, gfp_mask, 1 << order);
-	}
-	/* Avoid storing a handle that would later decrement an unapplied count. */
-	if (!counted) {
-		pr_warn_ratelimited("failed to count page owner stack\n");
-		handle = 0;
-	}
 	__update_page_owner_handle(page, handle, order, gfp_mask, -1,
 				   ts_nsec, current->pid, current->tgid,
 				   current->comm);
+	inc_stack_record_count(handle, gfp_mask, 1 << order);
 }
 
 void __folio_set_owner_migrate_reason(struct folio *folio, int reason)
@@ -899,33 +863,34 @@ static const struct file_operations proc_page_owner_operations = {
 
 static void *stack_start(struct seq_file *m, loff_t *ppos)
 {
-	struct page_owner_stack_seq *priv = m->private;
-	unsigned long flags;
 	struct stack *stack;
 
+	/* m->private is only the current list cursor, not seq_open_private() data. */
 	if (*ppos == -1UL)
 		return NULL;
 
 	if (!*ppos) {
-		spin_lock_irqsave(&stack_list_lock, flags);
-		stack = stack_list;
-		spin_unlock_irqrestore(&stack_list_lock, flags);
+		/*
+		 * This pairs with smp_store_release() from function
+		 * add_stack_record_to_list(), so we get a consistent
+		 * value of stack_list.
+		 */
+		stack = smp_load_acquire(&stack_list);
 	} else {
-		stack = priv->stack;
+		stack = m->private;
 	}
-	priv->stack = stack;
+	m->private = stack;
 
 	return stack;
 }
 
 static void *stack_next(struct seq_file *m, void *v, loff_t *ppos)
 {
-	struct page_owner_stack_seq *priv = m->private;
 	struct stack *stack = v;
 
 	stack = stack->next;
 	*ppos = stack ? *ppos + 1 : -1UL;
-	priv->stack = stack;
+	m->private = stack;
 
 	return stack;
 }
@@ -934,36 +899,25 @@ static unsigned int page_owner_pages_threshold;
 
 static int stack_print(struct seq_file *m, void *v)
 {
-	struct page_owner_stack_seq *priv = m->private;
+	int i, nr_base_pages;
 	struct stack *stack = v;
-	depot_stack_handle_t handle = stack->handle;
-	unsigned int nr_base_pages = 0;
-	unsigned int i, nr_entries;
+	unsigned long *entries;
+	unsigned long nr_entries;
+	struct stack_record *stack_record = stack->stack_record;
 
-	if (!handle)
+	if (!stack->stack_record)
 		return 0;
 
-	/* Counts can race with page_owner updates; seq_file output is best effort. */
-	/* Treat count 1 as marker-only for best-effort reporting. */
-	if (!__stack_depot_get_count(handle, &nr_base_pages) || nr_base_pages <= 1)
-		return 0;
-	/* The <= 1 guard above makes removing the list marker safe. */
-	nr_base_pages--;
+	nr_entries = stack_record->size;
+	entries = stack_record->entries;
+	nr_base_pages = refcount_read(&stack_record->count) - 1;
 
-	/* Drop the list marker before applying the page-count threshold. */
-	if (nr_base_pages < READ_ONCE(page_owner_pages_threshold))
-		return 0;
-
-	/* Keep show_stacks independent of stackdepot's internal storage layout. */
-	nr_entries = stack_depot_fetch_into(handle, priv->entries,
-					    ARRAY_SIZE(priv->entries));
-	/* Buffer matches save_stack()'s cap, so exact-or-nothing fetch should fit. */
-	if (!nr_entries)
+	if (nr_base_pages < 1 || nr_base_pages < READ_ONCE(page_owner_pages_threshold))
 		return 0;
 
 	for (i = 0; i < nr_entries; i++)
-		seq_printf(m, " %pS\n", (void *)priv->entries[i]);
-	seq_printf(m, "nr_base_pages: %u\n\n", nr_base_pages);
+		seq_printf(m, " %pS\n", (void *)entries[i]);
+	seq_printf(m, "nr_base_pages: %d\n\n", nr_base_pages);
 
 	return 0;
 }
@@ -981,15 +935,14 @@ static const struct seq_operations page_owner_stack_op = {
 
 static int page_owner_stack_open(struct inode *inode, struct file *file)
 {
-	return seq_open_private(file, &page_owner_stack_op,
-				sizeof(struct page_owner_stack_seq));
+	return seq_open(file, &page_owner_stack_op);
 }
 
 static const struct file_operations page_owner_stack_operations = {
 	.open		= page_owner_stack_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= seq_release_private,
+	.release	= seq_release,
 };
 
 static int page_owner_threshold_get(void *data, u64 *val)
