@@ -155,7 +155,8 @@ static inline int stack_depot_early_init(void)	{ return 0; }
  *
  * When trie storage is enabled, persistent non-refcounted saves use trie
  * storage. Constrained contexts remain best effort and can return 0 if a
- * required trylock or reserved resource is unavailable.
+ * required trylock or reserved resource is unavailable; trie failures do not
+ * fall back to hash storage.
  *
  * If the provided stack trace comes from the interrupt context, only the part
  * up to the interrupt entry is saved.

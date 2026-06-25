@@ -3471,7 +3471,7 @@ __stack_depot_trie_lookup_step(const struct stack_depot_trie_root *root,
 		return 0;
 	}
 
-		node = trie_child_array_load_child(children, pos);
+	node = trie_child_array_load_child(children, pos);
 	if (!node)
 		return -EINVAL;
 	/*
@@ -4281,7 +4281,7 @@ stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *ar
 
 		node = trie_child_array_load_child(array, mid);
 		if (!node) {
-			/* A tail append may publish nr_children before the child is visible. */
+			/* Tail append may produce a transient lockless lookup miss. */
 			right = mid;
 			continue;
 		}
