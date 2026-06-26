@@ -7,7 +7,6 @@
 #include <linux/stacktrace.h>
 #include <linux/page_owner.h>
 #include <linux/jump_label.h>
-#include <linux/limits.h>
 #include <linux/migrate.h>
 #include <linux/stackdepot.h>
 #include <linux/seq_file.h>
@@ -41,7 +40,6 @@ struct stack {
 	struct stack_record *stack_record;
 	struct stack *next;
 };
-
 static struct stack dummy_stack;
 static struct stack failure_stack;
 static struct stack *stack_list;
@@ -122,7 +120,7 @@ static __init void init_page_owner(void)
 	register_failure_stack();
 	register_early_stack();
 	init_early_allocated_pages();
-	/* Initialize dummy and failure stacks and link them to stack_list. */
+	/* Initialize dummy and failure stacks and link them to stack_list */
 	dummy_stack.stack_record = __stack_depot_get_stack_record(dummy_handle);
 	failure_stack.stack_record = __stack_depot_get_stack_record(failure_handle);
 	if (dummy_stack.stack_record)
@@ -217,7 +215,7 @@ static void inc_stack_record_count(depot_stack_handle_t handle, gfp_t gfp_mask,
 		int old = REFCOUNT_SATURATED;
 
 		if (atomic_try_cmpxchg_relaxed(&stack_record->count.refs, &old, 1))
-			/* Add the new stack_record to our list. */
+			/* Add the new stack_record to our list */
 			add_stack_record_to_list(stack_record, gfp_mask);
 	}
 	refcount_add(nr_base_pages, &stack_record->count);
@@ -541,8 +539,8 @@ out_unlock:
 
 static ssize_t
 print_page_owner(char __user *buf, size_t count, unsigned long pfn,
-		 struct page *page, struct page_owner *page_owner,
-		 depot_stack_handle_t handle)
+		struct page *page, struct page_owner *page_owner,
+		depot_stack_handle_t handle)
 {
 	int ret, pageblock_mt, page_mt;
 	char *kbuf;
@@ -641,13 +639,13 @@ void __dump_page_owner(const struct page *page)
 		pr_alert("page_owner free stack trace missing\n");
 	} else {
 		pr_alert("page last free pid %d tgid %d stack trace:\n",
-			 page_owner->free_pid, page_owner->free_tgid);
+			  page_owner->free_pid, page_owner->free_tgid);
 		stack_depot_print(handle);
 	}
 
 	if (page_owner->last_migrate_reason != -1)
 		pr_alert("page has been migrated, last migrate reason: %s\n",
-			 migrate_reason_names[page_owner->last_migrate_reason]);
+			migrate_reason_names[page_owner->last_migrate_reason]);
 	page_ext_put(page_ext);
 }
 
@@ -864,7 +862,6 @@ static void *stack_start(struct seq_file *m, loff_t *ppos)
 {
 	struct stack *stack;
 
-	/* m->private is only the current list cursor, not seq_open_private() data. */
 	if (*ppos == -1UL)
 		return NULL;
 
@@ -875,10 +872,10 @@ static void *stack_start(struct seq_file *m, loff_t *ppos)
 		 * value of stack_list.
 		 */
 		stack = smp_load_acquire(&stack_list);
+		m->private = stack;
 	} else {
 		stack = m->private;
 	}
-	m->private = stack;
 
 	return stack;
 }
@@ -894,7 +891,7 @@ static void *stack_next(struct seq_file *m, void *v, loff_t *ppos)
 	return stack;
 }
 
-static unsigned int page_owner_pages_threshold;
+static unsigned long page_owner_pages_threshold;
 
 static int stack_print(struct seq_file *m, void *v)
 {
@@ -911,7 +908,7 @@ static int stack_print(struct seq_file *m, void *v)
 	entries = stack_record->entries;
 	nr_base_pages = refcount_read(&stack_record->count) - 1;
 
-	if (nr_base_pages < 1 || nr_base_pages < READ_ONCE(page_owner_pages_threshold))
+	if (nr_base_pages < 1 || nr_base_pages < page_owner_pages_threshold)
 		return 0;
 
 	for (i = 0; i < nr_entries; i++)
@@ -934,14 +931,14 @@ static const struct seq_operations page_owner_stack_op = {
 
 static int page_owner_stack_open(struct inode *inode, struct file *file)
 {
-	return seq_open(file, &page_owner_stack_op);
+	return seq_open_private(file, &page_owner_stack_op, 0);
 }
 
 static const struct file_operations page_owner_stack_operations = {
 	.open		= page_owner_stack_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= seq_release,
+	.release	= seq_release_private,
 };
 
 static int page_owner_threshold_get(void *data, u64 *val)
@@ -952,15 +949,13 @@ static int page_owner_threshold_get(void *data, u64 *val)
 
 static int page_owner_threshold_set(void *data, u64 val)
 {
-	if (val > UINT_MAX)
-		return -ERANGE;
-
-	WRITE_ONCE(page_owner_pages_threshold, (unsigned int)val);
+	WRITE_ONCE(page_owner_pages_threshold, val);
 	return 0;
 }
 
 DEFINE_SIMPLE_ATTRIBUTE(proc_page_owner_threshold, &page_owner_threshold_get,
 			&page_owner_threshold_set, "%llu");
+
 
 static int __init pageowner_init(void)
 {
