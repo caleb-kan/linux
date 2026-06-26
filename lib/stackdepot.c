@@ -137,8 +137,8 @@ struct stack_depot_trie_alloc_request {
 	struct stack_depot_trie_alloc_txn *txn;
 	struct stack_depot_trie_node_slot *node_slots;
 	struct stack_depot_trie_child_array_slot *child_slots;
-	/* Optional opaque replacement child-array storage. */
-	void **storage;
+	/* Optional replacement child-array storage. */
+	struct stack_depot_trie_child_array **storage;
 	/* Optional fresh stackdepot pool page, preallocated before insertion. */
 	void **pool_prealloc;
 	struct stack_depot_trie_side_prealloc *side_prealloc;
@@ -153,7 +153,7 @@ struct stack_depot_trie_alloc_workspace {
 	struct stack_depot_trie_node_slot node_slots[STACK_DEPOT_TRIE_MAX_NODE_SLOTS];
 	struct stack_depot_trie_child_array_slot child_slots[STACK_DEPOT_TRIE_MAX_CHILD_SLOTS];
 	u32 scratch[CONFIG_STACKDEPOT_MAX_FRAMES];
-	void *storage;
+	struct stack_depot_trie_child_array *storage;
 };
 
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_BITS 9
@@ -190,7 +190,8 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  struct stack_depot_trie_child_array_slot *child_slots,
 				  unsigned int nr_child_slots,
 				  struct stack_depot_trie_alloc_txn *txn,
-				  void **storage, void **pool_prealloc,
+				  struct stack_depot_trie_child_array **storage,
+				  void **pool_prealloc,
 				  struct stack_depot_trie_side_prealloc *side_prealloc,
 				  struct stack_depot_trie_alloc_request *req);
 static int
@@ -261,7 +262,8 @@ __stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
 					 const struct stack_depot_trie_child_array_slot
 					 *child_slots,
 					 unsigned int nr_child_slots, u32 *scratch,
-					 unsigned int nr_scratch, void *new_storage,
+					 unsigned int nr_scratch,
+					 struct stack_depot_trie_child_array *new_storage,
 					 size_t new_storage_size);
 static int
 __stack_depot_trie_insert_plan(const struct stack_depot_trie_root *root,
@@ -290,7 +292,8 @@ __stack_depot_trie_split_child_array_init(void *storage, size_t storage_size,
 static int
 __stack_depot_trie_child_array_insert(const struct stack_depot_trie_child_array *old,
 				      const struct stack_depot_trie_node *child,
-				      void *new_storage, size_t new_storage_size);
+				      struct stack_depot_trie_child_array *new_storage,
+				      size_t new_storage_size);
 
 /*
  * The pool_index is offset by 1 so the first record does not have a 0 handle.
@@ -1735,7 +1738,8 @@ __stack_depot_trie_alloc_txn_plan(const struct stack_depot_trie_root *root,
 				  struct stack_depot_trie_child_array_slot *child_slots,
 				  unsigned int nr_child_slots,
 				  struct stack_depot_trie_alloc_txn *txn,
-				  void **storage, void **pool_prealloc,
+				  struct stack_depot_trie_child_array **storage,
+				  void **pool_prealloc,
 				  struct stack_depot_trie_side_prealloc *side_prealloc,
 				  struct stack_depot_trie_alloc_request *req)
 {
@@ -1845,7 +1849,7 @@ __stack_depot_trie_alloc_txn_insert(struct stack_depot_trie_root *root,
 {
 	struct stack_depot_trie_alloc_txn *txn;
 	u32 id;
-	void *storage;
+	struct stack_depot_trie_child_array *storage;
 	int ret;
 
 	if (!root || !req || !req->txn || !leaf_id)
@@ -1882,13 +1886,17 @@ rollback:
 static void __stack_depot_trie_alloc_txn_rollback(struct stack_depot_trie_alloc_txn *txn)
 {
 	unsigned long flags;
+	bool rolled_back = true;
 
 	if (!txn)
 		return;
 
-	raw_spin_lock_irqsave(&pool_lock, flags);
-	stack_depot_trie_pool_rollback_locked(&txn->pool);
-	raw_spin_unlock_irqrestore(&pool_lock, flags);
+	if (txn->pool.size) {
+		raw_spin_lock_irqsave(&pool_lock, flags);
+		rolled_back = stack_depot_trie_pool_rollback_locked(&txn->pool);
+		raw_spin_unlock_irqrestore(&pool_lock, flags);
+		WARN_ON_ONCE(!rolled_back);
+	}
 	txn->leaf_id = 0;
 	memset(&txn->pool, 0, sizeof(txn->pool));
 }
@@ -2514,11 +2522,16 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 	void *pool_prealloc = NULL;
 	depot_stack_handle_t handle;
 	unsigned long flags;
+	bool can_alloc;
+	bool retried = false;
 	u32 leaf_id;
 	int ret;
 
 	workspace = stack_depot_trie_load_workspace();
+	can_alloc = (depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC) &&
+		gfpflags_allow_spinning(alloc_flags);
 
+retry:
 	handle = trie_find_handle(&stack_depot_trie_root, entries, nr_entries);
 	if (handle)
 		return handle;
@@ -2551,6 +2564,16 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 			handle = __stack_depot_trie_handle(leaf_id);
 	}
 	raw_spin_unlock_irqrestore(&stack_depot_trie_workspace_lock, flags);
+	if (!handle && ret == -ENOSPC && can_alloc && !retried) {
+		retried = true;
+		depot_try_keep_new_pool(&pool_prealloc);
+		if (pool_prealloc) {
+			free_pages((unsigned long)pool_prealloc, DEPOT_POOL_ORDER);
+			pool_prealloc = NULL;
+		}
+		__stack_depot_trie_side_table_free_prealloc(&side_prealloc);
+		goto retry;
+	}
 
 out_free:
 	depot_try_keep_new_pool(&pool_prealloc);
@@ -2560,17 +2583,10 @@ out_free:
 	return handle;
 }
 
-struct stack_depot_hash_save {
-	struct list_head *bucket;
-	unsigned long *entries;
-	unsigned int nr_entries;
-	u32 hash;
-	depot_flags_t depot_flags;
-	void **prealloc;
-};
-
 static depot_stack_handle_t
-depot_save_stack_locked(struct stack_depot_hash_save *save)
+depot_save_stack_locked(struct list_head *bucket, unsigned long *entries,
+			unsigned int nr_entries, u32 hash,
+			depot_flags_t depot_flags, void **prealloc)
 {
 	struct stack_record *found;
 	struct stack_record *new;
@@ -2578,12 +2594,10 @@ depot_save_stack_locked(struct stack_depot_hash_save *save)
 	lockdep_assert_held(&pool_lock);
 
 	/* Try to find again, to avoid concurrently inserting duplicates. */
-	found = find_stack(save->bucket, save->entries, save->nr_entries,
-			   save->hash, save->depot_flags);
+	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
 	if (found)
 		return found->handle.handle;
-	new = depot_alloc_stack(save->entries, save->nr_entries, save->hash,
-				save->depot_flags, save->prealloc);
+	new = depot_alloc_stack(entries, nr_entries, hash, depot_flags, prealloc);
 	if (!new)
 		return 0;
 
@@ -2591,7 +2605,7 @@ depot_save_stack_locked(struct stack_depot_hash_save *save)
 	 * This releases the stack record into the bucket and makes it visible to
 	 * readers in find_stack().
 	 */
-	list_add_rcu(&new->hash_list, save->bucket);
+	list_add_rcu(&new->hash_list, bucket);
 	return new->handle.handle;
 }
 
@@ -2601,7 +2615,6 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 					    depot_flags_t depot_flags)
 {
 	struct list_head *bucket;
-	struct stack_depot_hash_save save;
 	struct stack_record *found = NULL;
 	depot_stack_handle_t handle = 0;
 	struct page *page = NULL;
@@ -2646,15 +2659,6 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 
 	hash = hash_stack(entries, nr_entries);
 	bucket = &stack_table[hash & stack_hash_mask];
-	save = (struct stack_depot_hash_save) {
-		.bucket = bucket,
-		.entries = entries,
-		.nr_entries = nr_entries,
-		.hash = hash,
-		.depot_flags = depot_flags,
-		.prealloc = &prealloc,
-	};
-
 	/* Fast path: look the stack trace up without locking. */
 	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
 	if (found)
@@ -2677,7 +2681,8 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		if (!raw_spin_trylock_irqsave(&pool_lock, flags))
 			goto out_free;
 		printk_deferred_enter();
-		handle = depot_save_stack_locked(&save);
+		handle = depot_save_stack_locked(bucket, entries, nr_entries,
+						 hash, depot_flags, &prealloc);
 		if (prealloc) {
 			/*
 			 * Either stack depot already contains this stack trace, or
@@ -2693,7 +2698,8 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
 	printk_deferred_enter();
-	handle = depot_save_stack_locked(&save);
+	handle = depot_save_stack_locked(bucket, entries, nr_entries,
+					 hash, depot_flags, &prealloc);
 	if (prealloc) {
 		/*
 		 * Either stack depot already contains this stack trace, or
@@ -2869,8 +2875,7 @@ stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
 	}
 
 	memcpy(&low, node->data + index * sizeof(low), sizeof(low));
-	if (!arch_stack_depot_frame_decompress(low, frame))
-		return -EINVAL;
+	arch_stack_depot_frame_decompress(low, frame);
 
 	return 0;
 }
@@ -3126,7 +3131,8 @@ trie_child_array_can_append(const struct stack_depot_trie_child_array *array,
 static void
 trie_child_array_replace_at(const struct stack_depot_trie_child_array *old_array,
 			    const struct stack_depot_trie_node *new_child,
-			    void *new_storage, size_t new_storage_size,
+			    struct stack_depot_trie_child_array *new_storage,
+			    size_t new_storage_size,
 			    unsigned int pos)
 {
 	struct stack_depot_trie_child_array *new_array = new_storage;
@@ -3190,7 +3196,8 @@ trie_promote_child(struct stack_depot_trie_root *root,
 		   unsigned int pos,
 		   const struct stack_depot_trie_node *child, u32 leaf_id,
 		   const struct stack_depot_trie_node_slot *slot,
-		   void *new_storage, size_t new_storage_size)
+		   struct stack_depot_trie_child_array *new_storage,
+		   size_t new_storage_size)
 {
 	const struct stack_depot_trie_child_array **publish_slot;
 	struct stack_depot_trie_leaf_update update;
@@ -3326,8 +3333,8 @@ __stack_depot_trie_append_chain(const struct stack_depot_trie_node *parent,
 static int trie_publish_append_prepare(struct stack_depot_trie_root *root,
 				       struct stack_depot_trie_node *parent,
 				       const struct stack_depot_trie_node *head,
-				       void *new_storage, size_t new_storage_size,
-				       u32 leaf_id,
+				       struct stack_depot_trie_child_array *new_storage,
+				       size_t new_storage_size, u32 leaf_id,
 				       const struct stack_depot_trie_node *leaf)
 {
 	const struct stack_depot_trie_child_array *old_array;
@@ -3504,12 +3511,8 @@ __stack_depot_trie_find_leaf(const struct stack_depot_trie_root *root,
 		node = lookup.node;
 		if (node) {
 			const struct stack_depot_trie_node *node_parent;
-			unsigned int node_len;
 
 			node_parent = trie_load_parent(node);
-			if (trie_node_stack_len(node, &node_len) ||
-			    node_len != pos + lookup.matched)
-				return NULL;
 			if (node_parent != parent &&
 			    !trie_parent_chain_matches_prefix(node_parent, entries,
 							      pos))
@@ -3550,7 +3553,8 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 			    unsigned int nr_node_slots,
 			    const struct stack_depot_trie_child_array_slot *child_slots,
 			    unsigned int nr_child_slots, u32 *scratch,
-			    unsigned int nr_scratch, void *new_storage,
+			    unsigned int nr_scratch,
+			    struct stack_depot_trie_child_array *new_storage,
 			    size_t new_storage_size);
 
 static int
@@ -3564,7 +3568,8 @@ __stack_depot_trie_insert_append_prepare(struct stack_depot_trie_root *root,
 					 const struct stack_depot_trie_child_array_slot
 					 *child_slots,
 					 unsigned int nr_child_slots, u32 *scratch,
-					 unsigned int nr_scratch, void *new_storage,
+					 unsigned int nr_scratch,
+					 struct stack_depot_trie_child_array *new_storage,
 					 size_t new_storage_size)
 {
 	const struct stack_depot_trie_node *head;
@@ -4204,7 +4209,8 @@ static int trie_split_child(struct stack_depot_trie_root *root,
 			    unsigned int nr_node_slots,
 			    const struct stack_depot_trie_child_array_slot *child_slots,
 			    unsigned int nr_child_slots, u32 *scratch,
-			    unsigned int nr_scratch, void *new_storage,
+			    unsigned int nr_scratch,
+			    struct stack_depot_trie_child_array *new_storage,
 			    size_t new_storage_size)
 {
 	const struct stack_depot_trie_child_array **publish_slot;
@@ -4287,7 +4293,8 @@ stack_depot_trie_child_lower_bound(const struct stack_depot_trie_child_array *ar
 static int
 __stack_depot_trie_child_array_insert(const struct stack_depot_trie_child_array *old,
 				      const struct stack_depot_trie_node *node,
-				      void *new_storage, size_t new_storage_size)
+				      struct stack_depot_trie_child_array *new_storage,
+				      size_t new_storage_size)
 {
 	struct stack_depot_trie_child_array *new_array = new_storage;
 	unsigned int nr_old;

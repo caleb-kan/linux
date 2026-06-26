@@ -34,11 +34,10 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 	return true;
 }
 
-static inline bool
+static inline void
 arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
 	*frame = arch_stack_depot_frame_from_low(low);
-	return true;
 }
 
 #endif /* __ASM_STACKDEPOT_H */

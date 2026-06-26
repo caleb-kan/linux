@@ -27,11 +27,10 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 	return true;
 }
 
-static inline bool
+static inline void
 arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
 	*frame = STACK_DEPOT_X86_64_FRAME_PREFIX | low;
-	return true;
 }
 
 #else

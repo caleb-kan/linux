@@ -10,10 +10,10 @@ arch_stack_depot_frame_try_compress(unsigned long frame, u32 *low)
 	return false;
 }
 
-static inline bool
+static inline void
 arch_stack_depot_frame_decompress(u32 low, unsigned long *frame)
 {
-	return false;
+	/* Generic code never compresses frames, so this hook is unreachable. */
 }
 
 #endif /* __ASM_GENERIC_STACKDEPOT_H */

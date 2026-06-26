@@ -316,8 +316,7 @@ void __reset_page_owner(struct page *page, unsigned short order)
 	__update_page_owner_free_handle(page, handle, order, current->pid,
 					current->tgid, free_ts_nsec);
 
-	/* A zero handle means no allocation stack count was applied. */
-	if (alloc_handle && alloc_handle != early_handle)
+	if (alloc_handle != early_handle)
 		/*
 		 * early_handle is being set as a handle for all those
 		 * early allocated pages. See init_pages_in_zone().

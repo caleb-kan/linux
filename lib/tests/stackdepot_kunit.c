@@ -328,14 +328,12 @@ static void stackdepot_frame_x86_64(struct kunit *test)
 	unsigned long frame = 0xffffffff81234567UL;
 	unsigned long out;
 	bool compressed;
-	bool decoded;
 	u32 low;
 
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_TRUE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)0x81234567);
-	decoded = arch_stack_depot_frame_decompress(low, &out);
-	KUNIT_EXPECT_TRUE(test, decoded);
+	arch_stack_depot_frame_decompress(low, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 
 	compressed = arch_stack_depot_frame_try_compress(direct_map, &low);
@@ -352,30 +350,26 @@ static void stackdepot_frame_arm64(struct kunit *test)
 	unsigned long frame = stackdepot_arm64_frame(offset);
 	unsigned long out;
 	bool compressed;
-	bool decoded;
 	u32 low;
 
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_TRUE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)(s32)offset);
-	decoded = arch_stack_depot_frame_decompress(low, &out);
-	KUNIT_EXPECT_TRUE(test, decoded);
+	arch_stack_depot_frame_decompress(low, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 
 	frame = stackdepot_arm64_frame(negative_offset);
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_TRUE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)(s32)negative_offset);
-	decoded = arch_stack_depot_frame_decompress(low, &out);
-	KUNIT_EXPECT_TRUE(test, decoded);
+	arch_stack_depot_frame_decompress(low, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 
 	frame = stackdepot_arm64_frame(positive_offset);
 	compressed = arch_stack_depot_frame_try_compress(frame, &low);
 	KUNIT_EXPECT_TRUE(test, compressed);
 	KUNIT_EXPECT_EQ(test, low, (u32)(s32)positive_offset);
-	decoded = arch_stack_depot_frame_decompress(low, &out);
-	KUNIT_EXPECT_TRUE(test, decoded);
+	arch_stack_depot_frame_decompress(low, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 }
 #endif /* CONFIG_ARM64 */
