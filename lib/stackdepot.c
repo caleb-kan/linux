@@ -505,7 +505,7 @@ static u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 	if (leaf_id > READ_ONCE(trie_side_table_max_id))
 		return 0;
 
-	return leaf_id > U32_MAX ? 0 : leaf_id;
+	return leaf_id;
 }
 
 struct stack_depot_trie_side_entry {
@@ -1151,12 +1151,13 @@ static size_t trie_object_alloc_size(size_t size)
 
 static inline struct stack_depot_trie_free_object *trie_object_header(const void *ptr)
 {
-	return (void *)ptr - trie_object_header_size();
+	return (struct stack_depot_trie_free_object *)((const char *)ptr -
+							 trie_object_header_size());
 }
 
 static inline void *trie_object_payload(struct stack_depot_trie_free_object *free)
 {
-	return (void *)free + trie_object_header_size();
+	return (char *)free + trie_object_header_size();
 }
 
 static unsigned int trie_free_class(size_t size)
@@ -1320,7 +1321,7 @@ static void *trie_pop_free_node(size_t size)
 	trie_free_list_del(&free->list, free_trie_nodes, free_trie_node_map,
 			   class);
 	if (old_size > size)
-		trie_free_object_tail_locked((void *)free + size, old_size - size);
+		trie_free_object_tail_locked((char *)free + size, old_size - size);
 	return free;
 }
 

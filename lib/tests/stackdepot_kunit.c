@@ -441,24 +441,29 @@ static int stackdepot_stress_worker(void *data)
 static void stackdepot_concurrent_save_fetch(struct kunit *test)
 {
 	struct stackdepot_stress_ctx *ctx;
+	struct completion *start;
 	struct task_struct *task;
-	atomic_t failures = ATOMIC_INIT(0);
-	struct completion start;
+	atomic_t *failures;
 	unsigned int created = 0;
 	unsigned int i;
 	long timeout;
 	int err = 0;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
-	init_completion(&start);
+	start = kunit_kmalloc(test, sizeof(*start), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, start);
+	init_completion(start);
+	failures = kunit_kmalloc(test, sizeof(*failures), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, failures);
+	atomic_set(failures, 0);
 	ctx = kunit_kcalloc(test, STACKDEPOT_STRESS_THREADS, sizeof(*ctx), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, ctx);
 
 	for (i = 0; i < STACKDEPOT_STRESS_THREADS; i++) {
 		init_completion(&ctx[i].ready);
 		init_completion(&ctx[i].done);
-		ctx[i].start = &start;
-		ctx[i].failures = &failures;
+		ctx[i].start = start;
+		ctx[i].failures = failures;
 		ctx[i].id = i + 1;
 
 		task = kthread_run(stackdepot_stress_worker, &ctx[i],
@@ -475,7 +480,7 @@ static void stackdepot_concurrent_save_fetch(struct kunit *test)
 						      msecs_to_jiffies(10000));
 		KUNIT_EXPECT_GT(test, timeout, 0L);
 	}
-	complete_all(&start);
+	complete_all(start);
 
 	for (i = 0; i < created; i++) {
 		timeout = wait_for_completion_timeout(&ctx[i].done,
@@ -484,7 +489,7 @@ static void stackdepot_concurrent_save_fetch(struct kunit *test)
 	}
 
 	KUNIT_EXPECT_EQ(test, err, 0);
-	KUNIT_EXPECT_EQ(test, atomic_read(&failures), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(failures), 0);
 }
 
 static struct kunit_case stackdepot_test_cases[] = {
