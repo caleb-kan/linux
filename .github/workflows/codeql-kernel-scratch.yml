@@ -1,0 +1,274 @@
+name: KRN CodeQL Scratch
+
+on:
+  push:
+    branches:
+      - caleb/KRN-1117-stackdepot-port-codeql
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-kernel-scratch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86
+            make_arch: ""
+            cross_compile: ""
+            targets: >-
+              lib/stackdepot.o
+              lib/tests/stackdepot_kunit.o
+              mm/page_owner.o
+              mm/slub.o
+              mm/kmemleak.o
+              drivers/gpu/drm/drm_modeset_lock.o
+            config: >-
+              -e DEBUG_KERNEL
+              -e KUNIT
+              -e STACKDEPOT
+              -e STACKDEPOT_ALWAYS_INIT
+              -e STACKDEPOT_KUNIT_TEST
+              -e PAGE_OWNER
+              -e DEBUG_KMEMLEAK
+              -e SLUB_DEBUG
+              -e SYSFS
+              -e DEBUG_FS
+              -e DRM
+              -e DRM_KMS_HELPER
+          - name: arm64
+            make_arch: arm64
+            cross_compile: aarch64-linux-gnu-
+            targets: >-
+              lib/stackdepot.o
+              lib/tests/stackdepot_kunit.o
+            config: >-
+              -e DEBUG_KERNEL
+              -e KUNIT
+              -e STACKDEPOT
+              -e STACKDEPOT_ALWAYS_INIT
+              -e STACKDEPOT_KUNIT_TEST
+              -e SLUB_DEBUG
+              -e SYSFS
+              -e DEBUG_FS
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libssl-dev libelf-dev dwarves \
+            curl zstd python3 ca-certificates gcc-aarch64-linux-gnu
+
+      - name: Locate CodeQL CLI
+        run: |
+          set -euo pipefail
+          if command -v codeql >/dev/null 2>&1; then
+            codeql_bin="$(command -v codeql)"
+          else
+            codeql_bin="$(find /opt/hostedtoolcache/CodeQL -path '*/codeql/codeql' -type f | sort -V | tail -n 1)"
+          fi
+          test -x "$codeql_bin"
+          echo "CODEQL=$codeql_bin" >> "$GITHUB_ENV"
+          "$codeql_bin" version
+
+      - name: Generate changed-file list
+        run: |
+          set -euo pipefail
+          git fetch origin linux-6.18.y
+          mkdir -p "$RUNNER_TEMP/codeql-kernel/out"
+          git diff --name-only --diff-filter=ACMRTUXB \
+            origin/linux-6.18.y...HEAD > "$RUNNER_TEMP/codeql-kernel/changed-files.txt"
+          cp "$RUNNER_TEMP/codeql-kernel/changed-files.txt" \
+            "$RUNNER_TEMP/codeql-kernel/out/changed-files.txt"
+
+      - name: Configure kernel
+        env:
+          MAKE_ARCH: ${{ matrix.make_arch }}
+          CROSS_COMPILE: ${{ matrix.cross_compile }}
+          CONFIG_FLAGS: ${{ matrix.config }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/codeql-kernel/build-${{ matrix.name }}"
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          make_args=(O="$out")
+          if [ -n "$MAKE_ARCH" ]; then
+            make_args+=(ARCH="$MAKE_ARCH")
+          fi
+          if [ -n "$CROSS_COMPILE" ]; then
+            make_args+=(CROSS_COMPILE="$CROSS_COMPILE")
+          fi
+
+          make "${make_args[@]}" defconfig
+          scripts/config --file "$out/.config" $CONFIG_FLAGS
+          make "${make_args[@]}" olddefconfig prepare scripts
+
+      - name: Create CodeQL database
+        env:
+          MAKE_ARCH: ${{ matrix.make_arch }}
+          CROSS_COMPILE: ${{ matrix.cross_compile }}
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/codeql-kernel"
+          out="$root/build-${{ matrix.name }}"
+          db="$root/db-${{ matrix.name }}"
+          rm -rf "$db"
+
+          make_cmd=(make O="$out")
+          if [ -n "$MAKE_ARCH" ]; then
+            make_cmd+=(ARCH="$MAKE_ARCH")
+          fi
+          if [ -n "$CROSS_COMPILE" ]; then
+            make_cmd+=(CROSS_COMPILE="$CROSS_COMPILE")
+          fi
+          make_cmd+=(-j"$(nproc)")
+          for target in $TARGETS; do
+            make_cmd+=("$target")
+          done
+
+          "$CODEQL" database create "$db" \
+            --language=cpp \
+            --source-root="$GITHUB_WORKSPACE" \
+            --overwrite \
+            --command "${make_cmd[*]}"
+
+      - name: Analyze CodeQL database
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/codeql-kernel"
+          db="$root/db-${{ matrix.name }}"
+          sarif="$root/out/codeql-${{ matrix.name }}.sarif"
+
+          "$CODEQL" database analyze "$db" \
+            'codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls' \
+            --format=sarif-latest \
+            --sarif-category="linux-${{ matrix.name }}" \
+            --threads=0 \
+            --output="$sarif"
+
+      - name: Filter SARIF to changed-file TSV
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/codeql-kernel"
+          python3 - "$GITHUB_WORKSPACE" "$root/changed-files.txt" \
+            "$root/out/codeql-${{ matrix.name }}.sarif" \
+            "$root/out/codeql-${{ matrix.name }}.changed.tsv" \
+            "${{ matrix.name }}" <<'PY'
+          import csv
+          import json
+          import os
+          import sys
+          import urllib.parse
+
+          src, changed_path, sarif_path, out_path, arch = sys.argv[1:]
+          src = os.path.normpath(src)
+
+          with open(changed_path, encoding="utf-8") as f:
+              changed = {line.strip() for line in f if line.strip()}
+
+          def normalize_uri(uri):
+              if not uri:
+                  return None
+              parsed = urllib.parse.urlparse(uri)
+              if parsed.scheme == "file":
+                  path = urllib.parse.unquote(parsed.path)
+              else:
+                  path = urllib.parse.unquote(uri)
+              path = path.replace("\\", "/")
+              if os.path.isabs(path):
+                  try:
+                      rel = os.path.relpath(os.path.normpath(path), src)
+                  except ValueError:
+                      return None
+              else:
+                  rel = os.path.normpath(path)
+              rel = rel.replace("\\", "/")
+              if rel == "." or rel == ".." or rel.startswith("../"):
+                  return None
+              if rel.startswith("./"):
+                  rel = rel[2:]
+              return rel
+
+          with open(sarif_path, encoding="utf-8") as f:
+              sarif = json.load(f)
+
+          rows = []
+          for run in sarif.get("runs", []):
+              rules = {}
+              driver = run.get("tool", {}).get("driver", {})
+              for rule in driver.get("rules", []):
+                  rules[rule.get("id")] = rule
+
+              for result in run.get("results", []):
+                  locs = result.get("locations") or []
+                  if not locs:
+                      continue
+                  phys = locs[0].get("physicalLocation") or {}
+                  artifact = phys.get("artifactLocation") or {}
+                  rel = normalize_uri(artifact.get("uri"))
+                  if rel not in changed:
+                      continue
+
+                  region = phys.get("region") or {}
+                  rule_id = result.get("ruleId", "")
+                  rule = rules.get(rule_id, {})
+                  level = (
+                      result.get("level")
+                      or rule.get("defaultConfiguration", {}).get("level")
+                      or ""
+                  )
+                  msg = result.get("message", {}).get("text", "")
+                  msg = " ".join(msg.split())
+                  rows.append([
+                      arch,
+                      rule_id,
+                      level,
+                      rel,
+                      region.get("startLine", ""),
+                      region.get("startColumn", ""),
+                      msg,
+                  ])
+
+          with open(out_path, "w", encoding="utf-8", newline="") as f:
+              writer = csv.writer(f, delimiter="\t", lineterminator="\n")
+              writer.writerow(["arch", "rule", "level", "path", "line", "column", "message"])
+              writer.writerows(rows)
+          PY
+
+      - name: Compress SARIF and clean large scratch data
+        if: always()
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/codeql-kernel"
+          sarif="$root/out/codeql-${{ matrix.name }}.sarif"
+          if [ -f "$sarif" ]; then
+            gzip -f "$sarif"
+          fi
+          rm -rf "$root/build-${{ matrix.name }}" "$root/db-${{ matrix.name }}"
+          du -sh "$root/out" || true
+
+      - name: Upload CodeQL artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/codeql-kernel/out/changed-files.txt
+            ${{ runner.temp }}/codeql-kernel/out/codeql-${{ matrix.name }}.changed.tsv
+            ${{ runner.temp }}/codeql-kernel/out/codeql-${{ matrix.name }}.sarif.gz
+          if-no-files-found: warn
