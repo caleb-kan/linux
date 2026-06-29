@@ -156,6 +156,7 @@ jobs:
 
           "$CODEQL" database analyze "$db" \
             'codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls' \
+            '.github/codeql/stackdepot' \
             --format=sarif-latest \
             --sarif-category="linux-${{ matrix.name }}" \
             --threads=0 \
