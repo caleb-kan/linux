@@ -63,7 +63,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install build dependencies
         run: |
@@ -87,10 +87,10 @@ jobs:
       - name: Generate changed-file list
         run: |
           set -euo pipefail
-          git fetch origin linux-6.18.y
+          git fetch --depth=1 origin linux-6.18.y
           mkdir -p "$RUNNER_TEMP/codeql-kernel/out"
           git diff --name-only --diff-filter=ACMRTUXB \
-            origin/linux-6.18.y...HEAD > "$RUNNER_TEMP/codeql-kernel/changed-files.txt"
+            origin/linux-6.18.y HEAD > "$RUNNER_TEMP/codeql-kernel/changed-files.txt"
           cp "$RUNNER_TEMP/codeql-kernel/changed-files.txt" \
             "$RUNNER_TEMP/codeql-kernel/out/changed-files.txt"
 
