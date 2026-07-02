@@ -1,4 +1,4 @@
-name: KRN CodeQL Scratch
+name: CodeQL
 
 on:
   push:
@@ -9,13 +9,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: codeql-kernel-scratch-${{ github.ref }}
+  group: codeql-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  BASE_REF: linux-6.18.y
 
 jobs:
   codeql:
     name: CodeQL (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -87,12 +90,12 @@ jobs:
       - name: Generate changed-file list
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin linux-6.18.y
-          mkdir -p "$RUNNER_TEMP/codeql-kernel/out"
+          root="$RUNNER_TEMP/codeql"
+          mkdir -p "$root/out"
+          git fetch --depth=1 origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
           git diff --name-only --diff-filter=ACMRTUXB \
-            origin/linux-6.18.y HEAD > "$RUNNER_TEMP/codeql-kernel/changed-files.txt"
-          cp "$RUNNER_TEMP/codeql-kernel/changed-files.txt" \
-            "$RUNNER_TEMP/codeql-kernel/out/changed-files.txt"
+            "origin/$BASE_REF" HEAD > "$root/changed-files.txt"
+          cp "$root/changed-files.txt" "$root/out/changed-files.txt"
 
       - name: Configure kernel
         env:
@@ -101,7 +104,8 @@ jobs:
           CONFIG_FLAGS: ${{ matrix.config }}
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/codeql-kernel/build-${{ matrix.name }}"
+          root="$RUNNER_TEMP/codeql"
+          out="$root/build-${{ matrix.name }}"
           rm -rf "$out"
           mkdir -p "$out"
 
@@ -113,9 +117,11 @@ jobs:
             make_args+=(CROSS_COMPILE="$CROSS_COMPILE")
           fi
 
+          read -r -a config_args <<< "$CONFIG_FLAGS"
           make "${make_args[@]}" defconfig
-          scripts/config --file "$out/.config" $CONFIG_FLAGS
+          scripts/config --file "$out/.config" "${config_args[@]}"
           make "${make_args[@]}" olddefconfig prepare scripts
+          cp "$out/.config" "$root/out/config-${{ matrix.name }}"
 
       - name: Create CodeQL database
         env:
@@ -124,7 +130,7 @@ jobs:
           TARGETS: ${{ matrix.targets }}
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/codeql-kernel"
+          root="$RUNNER_TEMP/codeql"
           out="$root/build-${{ matrix.name }}"
           db="$root/db-${{ matrix.name }}"
           rm -rf "$db"
@@ -137,8 +143,11 @@ jobs:
             make_cmd+=(CROSS_COMPILE="$CROSS_COMPILE")
           fi
           make_cmd+=(-j"$(nproc)")
+          targets_manifest="$root/out/targets-${{ matrix.name }}.txt"
+          : > "$targets_manifest"
           for target in $TARGETS; do
             make_cmd+=("$target")
+            printf "%s\n" "$target" >> "$targets_manifest"
           done
 
           "$CODEQL" database create "$db" \
@@ -150,7 +159,7 @@ jobs:
       - name: Analyze CodeQL database
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/codeql-kernel"
+          root="$RUNNER_TEMP/codeql"
           db="$root/db-${{ matrix.name }}"
           sarif="$root/out/codeql-${{ matrix.name }}.sarif"
 
@@ -165,7 +174,7 @@ jobs:
       - name: Filter SARIF to changed-file TSV
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/codeql-kernel"
+          root="$RUNNER_TEMP/codeql"
           python3 - "$GITHUB_WORKSPACE" "$root/changed-files.txt" \
             "$root/out/codeql-${{ matrix.name }}.sarif" \
             "$root/out/codeql-${{ matrix.name }}.changed.tsv" \
@@ -208,6 +217,28 @@ jobs:
           with open(sarif_path, encoding="utf-8") as f:
               sarif = json.load(f)
 
+          def physical_locations(result):
+              for loc in result.get("locations") or []:
+                  phys = loc.get("physicalLocation") or {}
+                  if phys:
+                      yield "primary", phys
+              for loc in result.get("relatedLocations") or []:
+                  phys = loc.get("physicalLocation") or {}
+                  if phys:
+                      yield "related", phys
+              for flow in result.get("codeFlows") or []:
+                  for thread in flow.get("threadFlows") or []:
+                      for loc in thread.get("locations") or []:
+                          phys = (loc.get("location") or {}).get("physicalLocation") or {}
+                          if phys:
+                              yield "codeflow", phys
+
+          def loc_info(phys):
+              artifact = phys.get("artifactLocation") or {}
+              rel = normalize_uri(artifact.get("uri"))
+              region = phys.get("region") or {}
+              return rel, region.get("startLine", ""), region.get("startColumn", "")
+
           rows = []
           for run in sarif.get("runs", []):
               rules = {}
@@ -216,16 +247,14 @@ jobs:
                   rules[rule.get("id")] = rule
 
               for result in run.get("results", []):
-                  locs = result.get("locations") or []
-                  if not locs:
+                  locs = [(kind, *loc_info(phys)) for kind, phys in physical_locations(result)]
+                  primary_locs = [loc for loc in locs if loc[0] == "primary"]
+                  changed_locs = [loc for loc in locs if loc[1] in changed]
+                  if not changed_locs:
                       continue
-                  phys = locs[0].get("physicalLocation") or {}
-                  artifact = phys.get("artifactLocation") or {}
-                  rel = normalize_uri(artifact.get("uri"))
-                  if rel not in changed:
-                      continue
+                  primary = primary_locs[0] if primary_locs else ("", "", "", "")
+                  matched = changed_locs[0]
 
-                  region = phys.get("region") or {}
                   rule_id = result.get("ruleId", "")
                   rule = rules.get(rule_id, {})
                   level = (
@@ -239,15 +268,24 @@ jobs:
                       arch,
                       rule_id,
                       level,
-                      rel,
-                      region.get("startLine", ""),
-                      region.get("startColumn", ""),
+                      primary[1],
+                      primary[2],
+                      primary[3],
+                      matched[1],
+                      matched[2],
+                      matched[3],
+                      matched[0],
                       msg,
                   ])
 
           with open(out_path, "w", encoding="utf-8", newline="") as f:
               writer = csv.writer(f, delimiter="\t", lineterminator="\n")
-              writer.writerow(["arch", "rule", "level", "path", "line", "column", "message"])
+              writer.writerow([
+                  "arch", "rule", "level",
+                  "primary_path", "primary_line", "primary_column",
+                  "matched_path", "matched_line", "matched_column", "matched_kind",
+                  "message",
+              ])
               writer.writerows(rows)
           PY
 
@@ -255,7 +293,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/codeql-kernel"
+          root="$RUNNER_TEMP/codeql"
           sarif="$root/out/codeql-${{ matrix.name }}.sarif"
           if [ -f "$sarif" ]; then
             gzip -f "$sarif"
@@ -269,7 +307,9 @@ jobs:
         with:
           name: codeql-${{ matrix.name }}
           path: |
-            ${{ runner.temp }}/codeql-kernel/out/changed-files.txt
-            ${{ runner.temp }}/codeql-kernel/out/codeql-${{ matrix.name }}.changed.tsv
-            ${{ runner.temp }}/codeql-kernel/out/codeql-${{ matrix.name }}.sarif.gz
+            ${{ runner.temp }}/codeql/out/changed-files.txt
+            ${{ runner.temp }}/codeql/out/config-${{ matrix.name }}
+            ${{ runner.temp }}/codeql/out/targets-${{ matrix.name }}.txt
+            ${{ runner.temp }}/codeql/out/codeql-${{ matrix.name }}.changed.tsv
+            ${{ runner.temp }}/codeql/out/codeql-${{ matrix.name }}.sarif.gz
           if-no-files-found: warn

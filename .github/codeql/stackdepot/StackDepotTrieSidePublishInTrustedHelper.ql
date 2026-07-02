@@ -4,14 +4,11 @@
  * @kind problem
  * @problem.severity recommendation
  * @precision high
- * @id scratch/stackdepot-trie-side-publish-in-trusted-helper
+ * @id stackdepot/trie-side-publish-in-trusted-helper
  */
 
 import cpp
-
-predicate isStackDepotFile(File f) {
-  f.getRelativePath() = "lib/stackdepot.c"
-}
+import StackDepot
 
 predicate targetFunctionName(string name) {
   name = "__stack_depot_trie_insert_append_prepare" or
@@ -31,4 +28,4 @@ where
   f = call.getEnclosingFunction() and
   isTargetFunction(f) and
   call.getTarget().hasName("trie_side_publish")
-select call, "Trusted trie insertion helper $@ publishes side-table state here; verify failure handling is not a normal path after reservation.", f, f.getName()
+select call, "Trusted trie insertion helper $@ publishes side-table state directly; verify this belongs in the planned publish operation and has clear failure handling.", f, f.getName()

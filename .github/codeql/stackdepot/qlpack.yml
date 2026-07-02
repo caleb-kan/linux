@@ -1,4 +1,4 @@
-name: scratch/stackdepot-queries
+name: stackdepot/codeql
 version: 0.0.1
 dependencies:
   codeql/cpp-all: "*"
