@@ -1,6 +1,6 @@
 /**
  * @name Trusted stackdepot trie helper publishes side-table state directly
- * @description Flags trie_side_publish() calls in trusted trie insertion helpers.
+ * @description Flags direct side-table publication calls in trusted trie insertion helpers.
  * @kind problem
  * @problem.severity recommendation
  * @precision high
@@ -11,11 +11,18 @@ import cpp
 import StackDepot
 
 predicate targetFunctionName(string name) {
-  name = "__stack_depot_trie_insert_append_prepare" or
-  name = "trie_publish_append_prepare" or
-  name = "trie_promote_child" or
-  name = "trie_split_subtree_prepare" or
-  name = "trie_split_child"
+  name = "trie_build_append_chain" or
+  name = "trie_build_split" or
+  name = "trie_publish_cow" or
+  name = "trie_publish_first_child" or
+  name = "trie_publish_split" or
+  name = "trie_publish_tail_append" or
+  name = "trie_promote_child"
+}
+
+predicate sidePublishFunctionName(string name) {
+  name = "trie_side_publish_new" or
+  name = "trie_side_publish_split"
 }
 
 predicate isTargetFunction(Function f) {
@@ -27,5 +34,5 @@ from FunctionCall call, Function f
 where
   f = call.getEnclosingFunction() and
   isTargetFunction(f) and
-  call.getTarget().hasName("trie_side_publish")
+  sidePublishFunctionName(call.getTarget().getName())
 select call, "Trusted trie insertion helper $@ publishes side-table state directly; verify this belongs in the planned publish operation and has clear failure handling.", f, f.getName()

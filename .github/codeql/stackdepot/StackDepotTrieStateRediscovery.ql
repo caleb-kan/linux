@@ -11,15 +11,15 @@ import cpp
 import StackDepot
 
 predicate rediscoveryFunctionName(string name) {
-  name = "stack_depot_trie_child_lower_bound" or
+  name = "trie_child_array_find_slot" or
   name = "trie_child_array_can_append" or
-  name = "__stack_depot_trie_lookup_step"
+  name = "stack_depot_trie_lookup"
 }
 
 from FunctionCall call, Function f, Function target
 where
   f = call.getEnclosingFunction() and
-  isTrustedTrieHelper(f) and
+  isTrustedStructuralHelper(f) and
   target = call.getTarget() and
   rediscoveryFunctionName(target.getName())
 select call, "Trusted trie insertion helper $@ calls $@ here; verify this state was not already established by planning/writer serialization.", f, f.getName(), target, target.getName()

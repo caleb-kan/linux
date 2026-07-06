@@ -1,18 +1,23 @@
 /**
- * @name Trusted stackdepot trie helper revalidates trie node size
- * @description Flags __stack_depot_trie_node_size() calls in trusted trie insertion helpers.
+ * @name Stackdepot trie node-size helper performs defensive checks
+ * @description Flags defensive checks inside __stack_depot_trie_node_size(); constructed trie runs should make node size a direct calculation.
  * @kind problem
  * @problem.severity recommendation
  * @precision medium
- * @id stackdepot/trie-node-size-revalidation
+ * @id stackdepot/trie-node-size-defensive-check
+ * @previous-id stackdepot/trie-node-size-revalidation
  */
 
 import cpp
 import StackDepot
 
-from FunctionCall call, Function f
+predicate isNodeSizeHelper(Function f) {
+  isStackDepotFile(f.getFile()) and
+  f.getName() = "__stack_depot_trie_node_size"
+}
+
+from Function f, IfStmt ifs
 where
-  f = call.getEnclosingFunction() and
-  isTrustedTrieHelper(f) and
-  call.getTarget().hasName("__stack_depot_trie_node_size")
-select call, "Trusted trie insertion helper $@ recomputes trie node size here; verify this is not rechecking owned metadata or planner state.", f, f.getName()
+  isNodeSizeHelper(f) and
+  ifs.getEnclosingFunction() = f
+select ifs, "__stack_depot_trie_node_size() contains conditional validation; constructed frame-run metadata should make node size a direct calculation."

@@ -4,19 +4,67 @@ predicate isStackDepotFile(File f) {
   f.getRelativePath() = "lib/stackdepot.c"
 }
 
-predicate trustedTrieHelperName(string name) {
-  name = "__stack_depot_trie_insert_append_prepare" or
-  name = "__stack_depot_trie_append_chain" or
-  name = "__stack_depot_trie_child_array_insert" or
-  name = "__stack_depot_trie_node_init_slice" or
-  name = "trie_clone_promoted_node" or
-  name = "trie_publish_append_prepare" or
-  name = "trie_promote_child" or
-  name = "trie_split_subtree_prepare" or
-  name = "trie_split_child"
+predicate isStackDepotFunction(Function f) {
+  isStackDepotFile(f.getFile())
 }
 
-predicate isTrustedTrieHelper(Function f) {
-  isStackDepotFile(f.getFile()) and
-  trustedTrieHelperName(f.getName())
+predicate isTrieWriterOrchestrator(Function f) {
+  isStackDepotFunction(f) and
+  f.getName() = "stack_depot_trie_insert_locked"
+}
+
+predicate trustedStructuralHelperName(string name) {
+  name = "trie_build_append_chain" or
+  name = "trie_build_split" or
+  name = "trie_child_array_insert_at" or
+  name = "trie_node_init_slice" or
+  name = "trie_publish_cow" or
+  name = "trie_publish_first_child" or
+  name = "trie_publish_split" or
+  name = "trie_publish_tail_append" or
+  name = "trie_promote_child"
+}
+
+predicate isTrustedStructuralHelper(Function f) {
+  isStackDepotFunction(f) and
+  trustedStructuralHelperName(f.getName())
+}
+
+predicate isSidePublishFunction(Function f) {
+  isStackDepotFunction(f) and
+  (f.getName() = "trie_side_publish_new" or
+   f.getName() = "trie_side_publish_split")
+}
+
+predicate isBoundaryFunction(Function f) {
+  isStackDepotFunction(f) and
+  (
+    f.getName().matches("%init%") or
+    f.getName().matches("%prealloc%") or
+    f.getName().matches("%lookup%") or
+    f.getName().matches("%fetch%") or
+    f.getName().matches("%save%") or
+    f.getName().matches("%put%") or
+    f.getName().matches("%print%") or
+    f.getName().matches("%snprint%") or
+    f.getName().matches("%handle%")
+  )
+}
+
+predicate isForbiddenTrieAbstractionName(string name) {
+  name.matches("%lookup_status%") or
+  name.matches("%trie_lookup%") and name.matches("%status%") or
+  name.matches("%alloc_txn%") or
+  name.matches("%alloc_request%") or
+  name.matches("%pool_mark%") or
+  name.matches("%rollback%") or
+  name.matches("%insert_plan%") or
+  name.matches("%child_array_slot%") or
+  name.matches("%node_slot%") or
+  name.matches("%leaf_update%")
+}
+
+predicate returnsEinvalExpr(Expr e) {
+  // Linux UAPI errno value for EINVAL.
+  e.getValue().toInt() = -22
 }
