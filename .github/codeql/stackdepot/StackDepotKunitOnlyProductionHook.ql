@@ -28,6 +28,8 @@ from Function f
 where
   isStackDepotFunction(f) and
   not f.getName().matches("%kunit%") and
+  not f.getName().matches("stack_depot_%") and
+  not f.getName().matches("__stack_depot_%") and
   calledFromStackdepotKunit(f) and
   not calledFromNonKunit(f)
 select f, "Production stackdepot helper '$@' appears KUnit-only; avoid production helper surface just for tests.", f, f.getName()

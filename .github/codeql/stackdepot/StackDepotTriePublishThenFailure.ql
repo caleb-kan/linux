@@ -24,12 +24,16 @@ predicate normalFailureReturn(ReturnStmt ret) {
   )
 }
 
-from Function f, FunctionCall pub, ReturnStmt ret
+from Function f, FunctionCall pub, IfStmt guard, ReturnStmt ret
 where
   isTrieWriterOrchestrator(f) and
   pub.getEnclosingFunction() = f and
+  guard.getEnclosingFunction() = f and
   ret.getEnclosingFunction() = f and
   publishCall(pub) and
   normalFailureReturn(ret) and
-  pub.getLocation().getStartLine() < ret.getLocation().getStartLine()
-select ret, "Normal failure return after trie side-table or structural publication; expected failures should happen before publication begins."
+  guard.getLocation().getStartLine() > pub.getLocation().getStartLine() and
+  guard.getLocation().getStartLine() <= pub.getLocation().getStartLine() + 3 and
+  ret.getLocation().getStartLine() >= guard.getLocation().getStartLine() and
+  ret.getLocation().getStartLine() <= guard.getLocation().getEndLine()
+select ret, "Normal failure guard immediately after trie side-table or structural publication; expected failures should happen before publication begins."

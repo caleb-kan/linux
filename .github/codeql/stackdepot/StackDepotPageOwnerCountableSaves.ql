@@ -16,9 +16,5 @@ predicate isPageOwnerFile(File f) {
 from FunctionCall call
 where
   isPageOwnerFile(call.getFile()) and
-  (
-    call.getTarget().hasName("stack_depot_save") or
-    call.getTarget().hasName("stack_depot_save_flags") and
-    not call.getArgument(3).toString().matches("%STACK_DEPOT_FLAG_COUNTABLE%")
-  )
-select call, "page_owner stackdepot save should remain hash-backed COUNTABLE; avoid routing it into trie storage."
+  call.getTarget().hasName("stack_depot_save")
+select call, "page_owner direct stack_depot_save() can route into trie storage; use stack_depot_save_flags() with STACK_DEPOT_FLAG_COUNTABLE."
