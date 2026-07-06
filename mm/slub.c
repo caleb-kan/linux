@@ -9929,19 +9929,21 @@ static int slab_debugfs_show(struct seq_file *seq, void *v)
 				 nodemask_pr_args(&l->nodes));
 
 #ifdef CONFIG_STACKDEPOT
-	{
-		depot_stack_handle_t handle;
-		unsigned long entries[TRACK_ADDRS_COUNT];
-		unsigned int nr_entries, j;
+		{
+			depot_stack_handle_t handle;
+			unsigned long entries[TRACK_ADDRS_COUNT];
+			unsigned int nr_entries, j;
 
-		handle = READ_ONCE(l->handle);
-		if (handle) {
-			nr_entries = stack_depot_fetch_into(handle, entries, ARRAY_SIZE(entries));
-			seq_puts(seq, "\n");
-			for (j = 0; j < nr_entries; j++)
-				seq_printf(seq, "        %pS\n", (void *)entries[j]);
+			handle = READ_ONCE(l->handle);
+			if (handle) {
+				nr_entries =
+					stack_depot_fetch_into(handle, entries,
+							       ARRAY_SIZE(entries));
+				seq_puts(seq, "\n");
+				for (j = 0; j < nr_entries; j++)
+					seq_printf(seq, "        %pS\n", (void *)entries[j]);
+			}
 		}
-	}
 #endif
 		seq_puts(seq, "\n");
 	}

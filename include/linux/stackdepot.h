@@ -274,7 +274,7 @@ void stack_depot_print(depot_stack_handle_t stack);
  * Return:	Number of bytes printed
  */
 int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
-			int spaces);
+		       int spaces);
 
 /**
  * stack_depot_put - Drop a reference to a stack trace from stack depot
@@ -303,8 +303,8 @@ void stack_depot_put(depot_stack_handle_t handle);
  * Stack depot handles have a few unused bits, which can be used for storing
  * user-specific information. These bits are transparent to the stack depot.
  */
-depot_stack_handle_t __must_check stack_depot_set_extra_bits(depot_stack_handle_t handle,
-							     unsigned int extra_bits);
+depot_stack_handle_t __must_check stack_depot_set_extra_bits(
+			depot_stack_handle_t handle, unsigned int extra_bits);
 
 /**
  * stack_depot_get_extra_bits - Retrieve extra bits from a stack depot handle

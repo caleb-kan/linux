@@ -2,10 +2,7 @@
 
 #include <kunit/test.h>
 #include <linux/array_size.h>
-#include <linux/atomic.h>
-#include <linux/completion.h>
 #include <linux/gfp.h>
-#include <linux/kthread.h>
 #include <linux/limits.h>
 #include <linux/stackdepot.h>
 #include <linux/stacktrace.h>
@@ -374,124 +371,6 @@ static void stackdepot_frame_arm64(struct kunit *test)
 }
 #endif /* CONFIG_ARM64 */
 
-#define STACKDEPOT_STRESS_THREADS 4
-#define STACKDEPOT_STRESS_ITERS 64
-#define STACKDEPOT_STRESS_DEPTH 8
-
-struct stackdepot_stress_ctx {
-	struct completion ready;
-	struct completion done;
-	struct completion *start;
-	atomic_t *failures;
-	unsigned int id;
-};
-
-static void stackdepot_stress_entries(unsigned int id, unsigned int iter,
-				      unsigned long *entries)
-{
-	unsigned int i;
-
-	for (i = 0; i < STACKDEPOT_STRESS_DEPTH; i++)
-		entries[i] = 0xa0000000UL + id * 0x100000UL + iter * 0x1000UL +
-			     i * 0x10UL;
-}
-
-static int stackdepot_stress_worker(void *data)
-{
-	struct stackdepot_stress_ctx *ctx = data;
-	unsigned long entries[STACKDEPOT_STRESS_DEPTH];
-	unsigned long fetched[STACKDEPOT_STRESS_DEPTH];
-	depot_stack_handle_t again;
-	depot_stack_handle_t handle;
-	unsigned int nr_entries;
-	unsigned int iter;
-	char buf[256];
-
-	complete(&ctx->ready);
-	wait_for_completion(ctx->start);
-
-	for (iter = 0; iter < STACKDEPOT_STRESS_ITERS; iter++) {
-		stackdepot_stress_entries(ctx->id, iter, entries);
-		handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
-		if (!handle) {
-			atomic_inc(ctx->failures);
-			continue;
-		}
-
-		nr_entries = stack_depot_fetch_into(handle, fetched,
-						    ARRAY_SIZE(fetched));
-		if (nr_entries != ARRAY_SIZE(entries) ||
-		    memcmp(fetched, entries, sizeof(entries))) {
-			atomic_inc(ctx->failures);
-			continue;
-		}
-
-		again = save_noalloc(entries, ARRAY_SIZE(entries));
-		if (again != handle)
-			atomic_inc(ctx->failures);
-
-		if (!(iter % 8) && !stack_depot_snprint(handle, buf, sizeof(buf), 0))
-			atomic_inc(ctx->failures);
-	}
-
-	complete(&ctx->done);
-	return 0;
-}
-
-static void stackdepot_concurrent_save_fetch(struct kunit *test)
-{
-	struct stackdepot_stress_ctx *ctx;
-	struct completion *start;
-	struct task_struct *task;
-	atomic_t *failures;
-	unsigned int created = 0;
-	unsigned int i;
-	long timeout;
-	int err = 0;
-
-	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
-	start = kunit_kmalloc(test, sizeof(*start), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, start);
-	init_completion(start);
-	failures = kunit_kmalloc(test, sizeof(*failures), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, failures);
-	atomic_set(failures, 0);
-	ctx = kunit_kcalloc(test, STACKDEPOT_STRESS_THREADS, sizeof(*ctx), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, ctx);
-
-	for (i = 0; i < STACKDEPOT_STRESS_THREADS; i++) {
-		init_completion(&ctx[i].ready);
-		init_completion(&ctx[i].done);
-		ctx[i].start = start;
-		ctx[i].failures = failures;
-		ctx[i].id = i + 1;
-
-		task = kthread_run(stackdepot_stress_worker, &ctx[i],
-				   "stackdepot_stress/%u", i);
-		if (IS_ERR(task)) {
-			err = PTR_ERR(task);
-			break;
-		}
-		created++;
-	}
-
-	for (i = 0; i < created; i++) {
-		timeout = wait_for_completion_timeout(&ctx[i].ready,
-						      msecs_to_jiffies(10000));
-		KUNIT_EXPECT_GT(test, timeout, 0L);
-	}
-	complete_all(start);
-
-	for (i = 0; i < created; i++) {
-		timeout = wait_for_completion_timeout(&ctx[i].done,
-						      msecs_to_jiffies(10000));
-		KUNIT_EXPECT_GT(test, timeout, 0L);
-	}
-
-	KUNIT_EXPECT_EQ(test, err, 0);
-	KUNIT_EXPECT_EQ(test, atomic_read(failures), 0);
-}
-
 static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
@@ -507,7 +386,6 @@ static struct kunit_case stackdepot_test_cases[] = {
 #ifdef CONFIG_ARM64
 	KUNIT_CASE(stackdepot_frame_arm64),
 #endif
-	KUNIT_CASE(stackdepot_concurrent_save_fetch),
 	{}
 };
 

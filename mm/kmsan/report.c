@@ -101,7 +101,7 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 		nr_entries = stack_depot_fetch_into(origin, entries, max_entries);
 		depth = kmsan_depth_from_eb(stack_depot_get_extra_bits(origin));
 		magic = nr_entries ? entries[0] : 0;
-		if (nr_entries == 4 && magic == KMSAN_ALLOCA_MAGIC_ORIGIN) {
+		if ((nr_entries == 4) && (magic == KMSAN_ALLOCA_MAGIC_ORIGIN)) {
 			descr = (char *)entries[1];
 			pc1 = (void *)entries[2];
 			pc2 = (void *)entries[3];
@@ -113,7 +113,7 @@ void kmsan_print_origin(depot_stack_handle_t origin)
 				pr_err(" %pSb\n", pc2);
 			break;
 		}
-		if (nr_entries == 3 && magic == KMSAN_CHAIN_MAGIC_ORIGIN) {
+		if ((nr_entries == 3) && (magic == KMSAN_CHAIN_MAGIC_ORIGIN)) {
 			/*
 			 * Origin chains deeper than KMSAN_MAX_ORIGIN_DEPTH are
 			 * not stored, so the output may be incomplete.
