@@ -51,9 +51,10 @@ predicate isBoundaryFunction(Function f) {
   )
 }
 
+bindingset[name]
 predicate isForbiddenTrieAbstractionName(string name) {
   name.matches("%lookup_status%") or
-  name.matches("%trie_lookup%") and name.matches("%status%") or
+  (name.matches("%trie_lookup%") and name.matches("%status%")) or
   name.matches("%alloc_txn%") or
   name.matches("%alloc_request%") or
   name.matches("%pool_mark%") or

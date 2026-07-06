@@ -15,7 +15,7 @@ where
   isStackDepotFile(m.getFile()) and
   (m.getMacroName() = "READ_ONCE" or m.getMacroName() = "WRITE_ONCE") and
   (
-    m.getUnexpandedArgument(0).matches("%nr_children%") or
-    m.getUnexpandedArgument(0).matches("%trie%")
+    m.toString().matches("%nr_children%") or
+    m.toString().matches("%trie%")
   )
 select m, "Trie-specific $@ use; verify a documented lockless reader or publication pairing justifies it.", m, m.getMacroName()

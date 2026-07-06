@@ -19,7 +19,7 @@ predicate publishCall(FunctionCall call) {
 predicate normalFailureReturn(ReturnStmt ret) {
   ret.hasExpr() and
   (
-    ret.getExpr().getValue().toInt() < 0 or
+    ret.getExpr().toString().matches("-%") or
     ret.getExpr().toString() = "ret"
   )
 }

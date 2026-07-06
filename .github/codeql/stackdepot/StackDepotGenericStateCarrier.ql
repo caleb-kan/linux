@@ -15,7 +15,7 @@ predicate isPointerSizeCarrier(Struct s) {
     ptr = s.getAField() and
     sz = s.getAField() and
     ptr != sz and
-    ptr.getType().getPointerIndirectionLevel() > 0 and
+    ptr.getType().toString().matches("%*%") and
     (sz.getName().matches("%size%") or
      sz.getName().matches("%bytes%") or
      sz.getName().matches("%capacity%"))

@@ -11,7 +11,7 @@ import cpp
 import StackDepot
 
 predicate conditionMentionsPointerParam(IfStmt ifs, Parameter p) {
-  p.getType().getPointerIndirectionLevel() > 0 and
+  p.getType().toString().matches("%*%") and
   (
     ifs.getCondition().toString().matches("%" + p.getName() + "%NULL%") or
     ifs.getCondition().toString().matches("%!" + p.getName() + "%")
