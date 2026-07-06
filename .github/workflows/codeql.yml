@@ -288,6 +288,17 @@ jobs:
                   "message",
               ])
               writer.writerows(rows)
+
+          custom_out_path = out_path.replace(".changed.tsv", ".stackdepot.changed.tsv")
+          with open(custom_out_path, "w", encoding="utf-8", newline="") as f:
+              writer = csv.writer(f, delimiter="\t", lineterminator="\n")
+              writer.writerow([
+                  "arch", "rule", "level",
+                  "primary_path", "primary_line", "primary_column",
+                  "matched_path", "matched_line", "matched_column", "matched_kind",
+                  "message",
+              ])
+              writer.writerows(row for row in rows if row[1].startswith("stackdepot/"))
           PY
 
       - name: Compress SARIF and clean large scratch data
@@ -312,5 +323,6 @@ jobs:
             ${{ runner.temp }}/codeql/out/config-${{ matrix.name }}
             ${{ runner.temp }}/codeql/out/targets-${{ matrix.name }}.txt
             ${{ runner.temp }}/codeql/out/codeql-${{ matrix.name }}.changed.tsv
+            ${{ runner.temp }}/codeql/out/codeql-${{ matrix.name }}.stackdepot.changed.tsv
             ${{ runner.temp }}/codeql/out/codeql-${{ matrix.name }}.sarif.gz
           if-no-files-found: warn
