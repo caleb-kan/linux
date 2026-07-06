@@ -3,7 +3,6 @@
 #define __ASM_STACKDEPOT_H
 
 #include <linux/types.h>
-#include <linux/limits.h>
 #include <asm/sections.h>
 
 /*

@@ -21,8 +21,6 @@
 #define _LINUX_STACKDEPOT_H
 
 #include <linux/gfp.h>
-#include <linux/list.h>
-#include <linux/refcount.h>
 
 typedef u32 depot_stack_handle_t;
 
@@ -216,7 +214,7 @@ struct stack_record *__stack_depot_get_stack_record(depot_stack_handle_t handle)
  * This helper returns a pointer to stackdepot-owned contiguous storage for
  * legacy hash-backed handles. Callers that need backend-independent access to
  * stack contents should use stack_depot_fetch_into(), stack_depot_print(), or
- * stack_depot_snprint().
+ * stack_depot_snprint(). Passing a trie-backed handle is invalid and may WARN.
  *
  * Return: Number of frames for the fetched stack
  */

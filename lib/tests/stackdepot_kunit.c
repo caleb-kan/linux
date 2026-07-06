@@ -138,7 +138,7 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	depot_stack_handle_t truncated_handle;
 	depot_stack_handle_t overlong_handle;
 	depot_stack_handle_t count_handle;
-	depot_stack_handle_t hash_handle;
+	depot_stack_handle_t plain_handle;
 	depot_stack_handle_t get_handle;
 	depot_stack_handle_t again;
 	depot_stack_handle_t extra;
@@ -162,18 +162,18 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	for (i = 0; i < overlong_nr; i++)
 		overlong_entries[i] = 0x800000UL + i * 0x1000UL;
 
-	hash_handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
-	KUNIT_ASSERT_NE(test, hash_handle, (depot_stack_handle_t)0);
+	plain_handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, plain_handle, (depot_stack_handle_t)0);
 	again = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
-	KUNIT_EXPECT_EQ(test, again, hash_handle);
+	KUNIT_EXPECT_EQ(test, again, plain_handle);
 
-	nr_entries = stack_depot_fetch_into(hash_handle, fetched,
+	nr_entries = stack_depot_fetch_into(plain_handle, fetched,
 					    ARRAY_SIZE(fetched));
 	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
 	KUNIT_EXPECT_MEMEQ(test, fetched, entries, sizeof(entries));
 
 	noalloc_handle = save_noalloc(entries, ARRAY_SIZE(entries));
-	KUNIT_EXPECT_EQ(test, noalloc_handle, hash_handle);
+	KUNIT_EXPECT_EQ(test, noalloc_handle, plain_handle);
 	noalloc_handle = save_noalloc(noalloc_entries, noalloc_nr);
 	if (noalloc_handle) {
 		unsigned long noalloc_fetched[ARRAY_SIZE(noalloc_entries)] = {};
@@ -208,7 +208,7 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	truncated_handle = stack_depot_save(overlong_entries, truncated_nr, GFP_KERNEL);
 	KUNIT_EXPECT_EQ(test, truncated_handle, overlong_handle);
 
-	extra = stack_depot_set_extra_bits(hash_handle, 7);
+	extra = stack_depot_set_extra_bits(plain_handle, 7);
 	KUNIT_ASSERT_NE(test, extra, (depot_stack_handle_t)0);
 	KUNIT_EXPECT_EQ(test, stack_depot_get_extra_bits(extra), 7U);
 	memset(fetched, 0, sizeof(fetched));
