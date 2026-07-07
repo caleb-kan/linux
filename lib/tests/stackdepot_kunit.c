@@ -92,14 +92,14 @@ static void stackdepot_fetch_into_rejects_bad_inputs(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 }
 
-static depot_stack_handle_t save_hash(unsigned long *entries, unsigned int nr)
+static depot_stack_handle_t save_countable(unsigned long *entries, unsigned int nr)
 {
 	depot_flags_t flags = STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_COUNTABLE;
 
 	return stack_depot_save_flags(entries, nr, GFP_KERNEL, flags);
 }
 
-static void stackdepot_hash_flag_roundtrip(struct kunit *test)
+static void stackdepot_countable_flag_roundtrip(struct kunit *test)
 {
 	unsigned long entries[] = {
 		0x1234567800210000UL,
@@ -112,7 +112,7 @@ static void stackdepot_hash_flag_roundtrip(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 
-	handle = save_hash(entries, ARRAY_SIZE(entries));
+	handle = save_countable(entries, ARRAY_SIZE(entries));
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
 
 	nr_entries = stack_depot_fetch_into(handle, fetched, ARRAY_SIZE(fetched));
@@ -249,7 +249,7 @@ static void stackdepot_get_stack_record(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
 
-	handle = save_hash(entries, ARRAY_SIZE(entries));
+	handle = save_countable(entries, ARRAY_SIZE(entries));
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
 
 	record = __stack_depot_get_stack_record(handle);
@@ -282,7 +282,7 @@ static void stackdepot_countable_does_not_alias_other_modes(struct kunit *test)
 
 	plain_handle = stack_depot_save(plain_entries, plain_nr, GFP_KERNEL);
 	KUNIT_ASSERT_NE(test, plain_handle, (depot_stack_handle_t)0);
-	count_handle = save_hash(plain_entries, plain_nr);
+	count_handle = save_countable(plain_entries, plain_nr);
 	KUNIT_ASSERT_NE(test, count_handle, (depot_stack_handle_t)0);
 	record = __stack_depot_get_stack_record(count_handle);
 	KUNIT_ASSERT_NOT_NULL(test, record);
@@ -291,7 +291,7 @@ static void stackdepot_countable_does_not_alias_other_modes(struct kunit *test)
 
 	get_handle = stack_depot_save_flags(get_entries, get_nr, GFP_KERNEL, get);
 	KUNIT_ASSERT_NE(test, get_handle, (depot_stack_handle_t)0);
-	count_handle = save_hash(get_entries, get_nr);
+	count_handle = save_countable(get_entries, get_nr);
 	KUNIT_ASSERT_NE(test, count_handle, (depot_stack_handle_t)0);
 	record = __stack_depot_get_stack_record(count_handle);
 	KUNIT_ASSERT_NOT_NULL(test, record);
@@ -304,7 +304,7 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 {
 	unsigned long frame = 0xffff888000001000UL;
 	bool compressed;
-	u32 low = 0xfeedbeef;
+	u32 payload = 0xfeedbeef;
 
 #ifdef CONFIG_ARM64
 	if ((unsigned long)_text <= ULONG_MAX - ((unsigned long)S32_MAX + 1UL))
@@ -313,9 +313,9 @@ static void stackdepot_frame_raw_fallback(struct kunit *test)
 		frame = stackdepot_arm64_frame((long)S32_MIN - 1L);
 #endif
 
-	compressed = arch_stack_depot_frame_try_compress(frame, &low);
+	compressed = arch_stack_depot_frame_try_compress(frame, &payload);
 	KUNIT_EXPECT_FALSE(test, compressed);
-	KUNIT_EXPECT_EQ(test, low, (u32)0xfeedbeef);
+	KUNIT_EXPECT_EQ(test, payload, (u32)0xfeedbeef);
 }
 
 #ifdef CONFIG_X86_64
@@ -347,26 +347,26 @@ static void stackdepot_frame_arm64(struct kunit *test)
 	unsigned long frame = stackdepot_arm64_frame(offset);
 	unsigned long out;
 	bool compressed;
-	u32 low;
+	u32 payload;
 
-	compressed = arch_stack_depot_frame_try_compress(frame, &low);
+	compressed = arch_stack_depot_frame_try_compress(frame, &payload);
 	KUNIT_EXPECT_TRUE(test, compressed);
-	KUNIT_EXPECT_EQ(test, low, (u32)(s32)offset);
-	arch_stack_depot_frame_decompress(low, &out);
+	KUNIT_EXPECT_EQ(test, payload, (u32)(s32)offset);
+	arch_stack_depot_frame_decompress(payload, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 
 	frame = stackdepot_arm64_frame(negative_offset);
-	compressed = arch_stack_depot_frame_try_compress(frame, &low);
+	compressed = arch_stack_depot_frame_try_compress(frame, &payload);
 	KUNIT_EXPECT_TRUE(test, compressed);
-	KUNIT_EXPECT_EQ(test, low, (u32)(s32)negative_offset);
-	arch_stack_depot_frame_decompress(low, &out);
+	KUNIT_EXPECT_EQ(test, payload, (u32)(s32)negative_offset);
+	arch_stack_depot_frame_decompress(payload, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 
 	frame = stackdepot_arm64_frame(positive_offset);
-	compressed = arch_stack_depot_frame_try_compress(frame, &low);
+	compressed = arch_stack_depot_frame_try_compress(frame, &payload);
 	KUNIT_EXPECT_TRUE(test, compressed);
-	KUNIT_EXPECT_EQ(test, low, (u32)(s32)positive_offset);
-	arch_stack_depot_frame_decompress(low, &out);
+	KUNIT_EXPECT_EQ(test, payload, (u32)(s32)positive_offset);
+	arch_stack_depot_frame_decompress(payload, &out);
 	KUNIT_EXPECT_EQ(test, out, frame);
 }
 #endif /* CONFIG_ARM64 */
@@ -374,7 +374,7 @@ static void stackdepot_frame_arm64(struct kunit *test)
 static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_bad_inputs),
-	KUNIT_CASE(stackdepot_hash_flag_roundtrip),
+	KUNIT_CASE(stackdepot_countable_flag_roundtrip),
 	KUNIT_CASE(stackdepot_save_flags_public),
 	KUNIT_CASE(stackdepot_snprint_public),
 	KUNIT_CASE(stackdepot_get_stack_record),
