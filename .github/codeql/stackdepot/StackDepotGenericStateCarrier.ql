@@ -27,7 +27,6 @@ predicate isKnownTrieStateStruct(Struct s) {
   s.getName() = "stack_depot_trie_child_array" or
   s.getName() = "stack_depot_trie_free_node" or
   s.getName() = "stack_depot_trie_free_object" or
-  s.getName() = "stack_depot_trie_side_entry" or
   s.getName() = "stack_depot_trie_side_dir" or
   s.getName() = "stack_depot_trie_side_root" or
   s.getName() = "stack_depot_trie_side_prealloc" or

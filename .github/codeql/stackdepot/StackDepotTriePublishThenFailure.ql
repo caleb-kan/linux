@@ -11,9 +11,8 @@ import cpp
 import StackDepot
 
 predicate publishCall(FunctionCall call) {
-  call.getTarget().getName().matches("trie_side_publish_%") or
-  call.getTarget().getName().matches("trie_publish_%") or
-  call.getTarget().hasName("trie_promote_child")
+  call.getTarget().getName().matches("trie_side_table_publish_%") or
+  call.getTarget().getName().matches("trie_publish_%")
 }
 
 predicate normalFailureReturn(ReturnStmt ret) {

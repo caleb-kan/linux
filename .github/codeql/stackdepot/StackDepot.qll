@@ -17,12 +17,10 @@ predicate trustedStructuralHelperName(string name) {
   name = "trie_build_append_chain" or
   name = "trie_build_split" or
   name = "trie_child_array_insert_at" or
+  name = "trie_child_array_replace_at" or
   name = "trie_node_init_slice" or
-  name = "trie_publish_cow" or
-  name = "trie_publish_first_child" or
-  name = "trie_publish_split" or
   name = "trie_publish_tail_append" or
-  name = "trie_promote_child"
+  name = "trie_reparent_children"
 }
 
 predicate isTrustedStructuralHelper(Function f) {
@@ -32,8 +30,8 @@ predicate isTrustedStructuralHelper(Function f) {
 
 predicate isSidePublishFunction(Function f) {
   isStackDepotFunction(f) and
-  (f.getName() = "trie_side_publish_new" or
-   f.getName() = "trie_side_publish_split")
+  (f.getName() = "trie_side_table_publish_new_leaf" or
+   f.getName() = "trie_side_table_publish_split_leaves")
 }
 
 predicate isBoundaryFunction(Function f) {

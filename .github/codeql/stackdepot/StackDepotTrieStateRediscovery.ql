@@ -12,7 +12,6 @@ import StackDepot
 
 predicate rediscoveryFunctionName(string name) {
   name = "trie_child_array_find_slot" or
-  name = "trie_child_array_can_append" or
   name = "stack_depot_trie_lookup"
 }
 
