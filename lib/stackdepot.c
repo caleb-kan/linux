@@ -1090,9 +1090,9 @@ static void *trie_pop_free_object(size_t size)
 /*
  * Preallocate resources that cannot be allocated while trie writers hold raw
  * spinlocks. Side-table growth is mandatory before a new leaf ID can be
- * reserved, so side-table preallocation failure disables insertion for this
+ * used, so side-table preallocation failure disables insertion for this
  * save. Pool preallocation is opportunistic: reusable trie storage or active
- * pool space may still satisfy the reservation, and pool_carve() reports
+ * pool space may still satisfy the insertion, and pool_carve() reports
  * -ENOSPC if they do not. Callers without spinning allocation context skip
  * insertion and perform only best-effort lookup.
  */
