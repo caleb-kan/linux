@@ -6,7 +6,7 @@
  * callers that request STACK_DEPOT_FLAG_COUNTABLE use the legacy hash table with
  * contiguous stack records in stack pools. Persistent non-refcounted entries
  * can use trie storage when enabled; trie nodes share common frame prefixes and
- * are published through RCU/COW child arrays.
+ * are published through RCU/COW children containers.
  *
  * Author: Alexander Potapenko <glider@google.com>
  * Copyright (C) 2016 Google, Inc.
@@ -124,38 +124,38 @@ struct stack_depot_frame_run {
 
 static_assert(CONFIG_STACKDEPOT_MAX_FRAMES <= U16_MAX);
 
-struct stack_depot_trie_child_array;
+struct stack_depot_trie_children;
 
 struct stack_depot_trie_node {
 	/* Parent links let fetch rebuild a full stack from a leaf to the root. */
 	const struct stack_depot_trie_node __rcu *parent;
-	/* Child arrays are separate RCU/COW generations. */
-	const struct stack_depot_trie_child_array __rcu *children;
+	/* Children are separate RCU/COW generations. */
+	const struct stack_depot_trie_children __rcu *children;
 	u32 leaf_id;
 	struct stack_depot_frame_run run;
 	unsigned char data[];
 };
 
 /*
- * Children are sorted by first frame and searched by insertion slot.
+ * Children are sorted by first frame and searched by insertion position.
  * Writers may append to spare capacity at the sorted tail, but never change
  * existing child pointers. Other updates build and publish a replacement array.
  */
-struct stack_depot_trie_child_array {
+struct stack_depot_trie_children {
 	unsigned int nr_children;
 	unsigned int capacity;
-	const struct stack_depot_trie_node __rcu *children[];
+	const struct stack_depot_trie_node __rcu *nodes[];
 };
 
-/* A retired child array carries an optional node through its RCU grace period. */
-struct stack_depot_trie_retired_array {
+/* Retired children carry an optional node through their RCU grace period. */
+struct stack_depot_trie_retired_children {
 	struct list_head list;
 	unsigned long rcu_state;
 	struct stack_depot_trie_node *pending_node;
 	unsigned char data[];
 };
 
-static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_array, data),
+static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_children, data),
 			 1UL << DEPOT_STACK_ALIGN));
 
 #define STACK_DEPOT_TRIE_MAX_NODES (CONFIG_STACKDEPOT_MAX_FRAMES + 1)
@@ -180,13 +180,13 @@ static_assert(STACK_DEPOT_TRIE_POOL_FIRST_SLOT < STACK_DEPOT_TRIE_POOL_SLOTS);
 struct stack_depot_trie_insert_alloc {
 	struct stack_depot_trie_node *nodes[STACK_DEPOT_TRIE_MAX_NODES];
 	size_t node_sizes[STACK_DEPOT_TRIE_MAX_NODES];
-	struct stack_depot_trie_child_array *chain_arrays[STACK_DEPOT_TRIE_MAX_CHILD_ARRAYS];
-	struct stack_depot_trie_child_array *prefix_children;
-	struct stack_depot_trie_child_array *slot_array;
+	struct stack_depot_trie_children *path_children[STACK_DEPOT_TRIE_MAX_CHILD_ARRAYS];
+	struct stack_depot_trie_children *prefix_children;
+	struct stack_depot_trie_children *new_children;
 };
 
 static DEFINE_STATIC_KEY_FALSE(stack_depot_trie_enabled);
-static const struct stack_depot_trie_child_array __rcu *stack_depot_trie_root;
+static const struct stack_depot_trie_children __rcu *stack_depot_trie_root;
 static struct stack_depot_trie_insert_alloc *stack_depot_trie_alloc;
 static DEFINE_RAW_SPINLOCK(stack_depot_trie_writer_lock);
 static bool stack_depot_trie_requested;
@@ -199,7 +199,7 @@ MODULE_PARM_DESC(trie_enabled, "Enable stack depot trie storage at boot");
 
 /* Retired fixed-size slots remain reserved until their RCU grace period ends. */
 static LIST_HEAD(stack_depot_trie_pools);
-static LIST_HEAD(pending_trie_arrays);
+static LIST_HEAD(pending_trie_children);
 
 /*
  * stack_max_pools is the split point between hash and trie handle encodings.
@@ -304,28 +304,28 @@ static inline size_t trie_node_bytes(const struct stack_depot_frame_run *run)
 		     stack_depot_frame_run_bytes(run), sizeof(unsigned long));
 }
 
-static size_t trie_child_array_bytes(unsigned int capacity)
+static size_t trie_children_bytes(unsigned int capacity)
 {
 	size_t size;
 
-	size = struct_size_t(struct stack_depot_trie_child_array, children,
+	size = struct_size_t(struct stack_depot_trie_children, nodes,
 			     capacity);
 	return ALIGN(size, sizeof(unsigned long));
 }
 
-static void trie_child_array_init(struct stack_depot_trie_child_array *array,
-				  unsigned int capacity,
-				  const struct stack_depot_trie_node * const *nodes,
-				  unsigned int nr_children)
+static void trie_children_init(struct stack_depot_trie_children *children,
+			       unsigned int capacity,
+			       const struct stack_depot_trie_node * const *nodes,
+			       unsigned int nr_children)
 {
 	unsigned int i;
 
-	array->nr_children = nr_children;
-	array->capacity = capacity;
+	children->nr_children = nr_children;
+	children->capacity = capacity;
 	for (i = 0; i < nr_children; i++)
-		RCU_INIT_POINTER(array->children[i], nodes[i]);
+		RCU_INIT_POINTER(children->nodes[i], nodes[i]);
 	for (i = nr_children; i < capacity; i++)
-		RCU_INIT_POINTER(array->children[i], NULL);
+		RCU_INIT_POINTER(children->nodes[i], NULL);
 }
 
 static inline unsigned int trie_side_table_root_index(u32 id)
@@ -609,15 +609,15 @@ static const struct stack_depot_trie_node *__stack_depot_trie_side_table_lookup(
 				     rcu_read_lock_sched_held());
 }
 
-static inline size_t trie_array_alloc_size(size_t size)
+static inline size_t trie_children_alloc_size(size_t size)
 {
-	return offsetof(struct stack_depot_trie_retired_array, data) + size;
+	return offsetof(struct stack_depot_trie_retired_children, data) + size;
 }
 
-static inline struct stack_depot_trie_retired_array *
-trie_retired_array(const void *ptr)
+static inline struct stack_depot_trie_retired_children *
+trie_retired_children(const void *ptr)
 {
-	return container_of(ptr, struct stack_depot_trie_retired_array, data);
+	return container_of(ptr, struct stack_depot_trie_retired_children, data);
 }
 
 static bool depot_init_pool(void **prealloc);
@@ -703,64 +703,64 @@ static void trie_pool_release(const void *ptr, size_t size)
 	pool->free_slots += nr_slots;
 }
 
-static struct stack_depot_trie_child_array *
-trie_pool_alloc_array(size_t size, void **prealloc)
+static struct stack_depot_trie_children *
+trie_pool_alloc_children(size_t size, void **prealloc)
 {
-	struct stack_depot_trie_retired_array *retired;
+	struct stack_depot_trie_retired_children *retired;
 
-	retired = trie_pool_alloc(trie_array_alloc_size(size), prealloc);
+	retired = trie_pool_alloc(trie_children_alloc_size(size), prealloc);
 	return retired ? (void *)retired->data : NULL;
 }
 
-static void trie_pool_release_array(const void *ptr, size_t size)
+static void trie_pool_release_children(const void *ptr, size_t size)
 {
-	trie_pool_release(trie_retired_array(ptr), trie_array_alloc_size(size));
+	trie_pool_release(trie_retired_children(ptr), trie_children_alloc_size(size));
 }
 
-static void trie_drain_pending_arrays(void)
+static void trie_drain_pending_children(void)
 {
-	struct stack_depot_trie_retired_array *retired;
-	struct stack_depot_trie_retired_array *tmp;
-	struct stack_depot_trie_child_array *array;
+	struct stack_depot_trie_retired_children *retired;
+	struct stack_depot_trie_retired_children *tmp;
+	struct stack_depot_trie_children *children;
 
 	lockdep_assert_held(&pool_lock);
 
-	list_for_each_entry_safe(retired, tmp, &pending_trie_arrays, list) {
-		/* Pending arrays are FIFO; later entries cannot be ready yet. */
+	list_for_each_entry_safe(retired, tmp, &pending_trie_children, list) {
+		/* Pending children are FIFO; later entries cannot be ready yet. */
 		if (!poll_state_synchronize_rcu(retired->rcu_state))
 			break;
-		array = (void *)retired->data;
+		children = (void *)retired->data;
 		list_del(&retired->list);
 		if (retired->pending_node)
 			trie_pool_release(retired->pending_node,
 					  trie_node_bytes(&retired->pending_node->run));
-		trie_pool_release_array(array,
-					trie_child_array_bytes(array->capacity));
+		trie_pool_release_children(children,
+					   trie_children_bytes(children->capacity));
 	}
 }
 
-static void trie_retire_child_array(const void *ptr)
+static void trie_retire_children(const void *ptr)
 {
-	struct stack_depot_trie_retired_array *retired;
+	struct stack_depot_trie_retired_children *retired;
 
 	lockdep_assert_held(&pool_lock);
 
-	retired = trie_retired_array(ptr);
+	retired = trie_retired_children(ptr);
 	retired->pending_node = NULL;
 	retired->rcu_state = get_state_synchronize_rcu();
-	list_add_tail(&retired->list, &pending_trie_arrays);
+	list_add_tail(&retired->list, &pending_trie_children);
 }
 
 static void
-trie_retire_child_array_with_node(const void *ptr,
-				  const struct stack_depot_trie_node *node)
+trie_retire_children_with_node(const void *ptr,
+			       const struct stack_depot_trie_node *node)
 {
-	struct stack_depot_trie_retired_array *retired;
+	struct stack_depot_trie_retired_children *retired;
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
-	trie_retire_child_array(ptr);
-	retired = trie_retired_array(ptr);
+	trie_retire_children(ptr);
+	retired = trie_retired_children(ptr);
 	retired->pending_node = (struct stack_depot_trie_node *)node;
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 }
@@ -774,9 +774,9 @@ trie_retire_child_array_with_node(const void *ptr,
 static int trie_pool_alloc_insert(struct stack_depot_trie_insert_alloc *alloc,
 				  void **pool_prealloc,
 				  unsigned int nr_nodes,
-				  unsigned int nr_chain_arrays,
+				  unsigned int nr_path_children,
 				  size_t prefix_children_size,
-				  size_t slot_array_size)
+				  size_t new_children_size)
 {
 	unsigned long flags;
 	size_t one_child_size;
@@ -784,37 +784,37 @@ static int trie_pool_alloc_insert(struct stack_depot_trie_insert_alloc *alloc,
 	int ret = -ENOSPC;
 
 	memset(alloc->nodes, 0, nr_nodes * sizeof(*alloc->nodes));
-	memset(alloc->chain_arrays, 0,
-	       nr_chain_arrays * sizeof(*alloc->chain_arrays));
+	memset(alloc->path_children, 0,
+	       nr_path_children * sizeof(*alloc->path_children));
 	alloc->prefix_children = NULL;
-	alloc->slot_array = NULL;
+	alloc->new_children = NULL;
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
 	printk_deferred_enter();
-	trie_drain_pending_arrays();
-	one_child_size = trie_child_array_bytes(1);
+	trie_drain_pending_children();
+	one_child_size = trie_children_bytes(1);
 	for (i = 0; i < nr_nodes; i++) {
 		alloc->nodes[i] = trie_pool_alloc(alloc->node_sizes[i],
 						  pool_prealloc);
 		if (!alloc->nodes[i])
 			goto out_discard;
 	}
-	for (i = 0; i < nr_chain_arrays; i++) {
-		alloc->chain_arrays[i] =
-			trie_pool_alloc_array(one_child_size, pool_prealloc);
-		if (!alloc->chain_arrays[i])
+	for (i = 0; i < nr_path_children; i++) {
+		alloc->path_children[i] =
+			trie_pool_alloc_children(one_child_size, pool_prealloc);
+		if (!alloc->path_children[i])
 			goto out_discard;
 	}
 	if (prefix_children_size) {
 		alloc->prefix_children =
-			trie_pool_alloc_array(prefix_children_size, pool_prealloc);
+			trie_pool_alloc_children(prefix_children_size, pool_prealloc);
 		if (!alloc->prefix_children)
 			goto out_discard;
 	}
-	if (slot_array_size) {
-		alloc->slot_array =
-			trie_pool_alloc_array(slot_array_size, pool_prealloc);
-		if (!alloc->slot_array)
+	if (new_children_size) {
+		alloc->new_children =
+			trie_pool_alloc_children(new_children_size, pool_prealloc);
+		if (!alloc->new_children)
 			goto out_discard;
 	}
 	ret = 0;
@@ -826,18 +826,18 @@ out_discard:
 		if (node)
 			trie_pool_release(node, alloc->node_sizes[i]);
 	}
-	for (i = 0; i < nr_chain_arrays; i++) {
-		struct stack_depot_trie_child_array *array = alloc->chain_arrays[i];
+	for (i = 0; i < nr_path_children; i++) {
+		struct stack_depot_trie_children *children = alloc->path_children[i];
 
-		if (!array)
+		if (!children)
 			continue;
-		trie_pool_release_array(array, one_child_size);
+		trie_pool_release_children(children, one_child_size);
 	}
 	if (alloc->prefix_children)
-		trie_pool_release_array(alloc->prefix_children,
-					prefix_children_size);
-	if (alloc->slot_array)
-		trie_pool_release_array(alloc->slot_array, slot_array_size);
+		trie_pool_release_children(alloc->prefix_children,
+					   prefix_children_size);
+	if (alloc->new_children)
+		trie_pool_release_children(alloc->new_children, new_children_size);
 out:
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
@@ -1763,8 +1763,8 @@ trie_load_parent(const struct stack_depot_trie_node *node)
 				     rcu_read_lock_sched_held());
 }
 
-static inline const struct stack_depot_trie_child_array *
-trie_load_children_slot(const struct stack_depot_trie_child_array __rcu * const *slot)
+static inline const struct stack_depot_trie_children *
+trie_load_children(const struct stack_depot_trie_children __rcu * const *slot)
 {
 	return rcu_dereference_check(*slot,
 				     lockdep_is_held(&stack_depot_trie_writer_lock) ||
@@ -1772,40 +1772,40 @@ trie_load_children_slot(const struct stack_depot_trie_child_array __rcu * const 
 }
 
 static inline const struct stack_depot_trie_node *
-trie_child_array_load_child(const struct stack_depot_trie_child_array *array,
-			    unsigned int pos)
+trie_children_load_child(const struct stack_depot_trie_children *children,
+			 unsigned int pos)
 {
-	return rcu_dereference_check(array->children[pos],
+	return rcu_dereference_check(children->nodes[pos],
 				     lockdep_is_held(&stack_depot_trie_writer_lock) ||
 				     rcu_read_lock_sched_held());
 }
 
 /*
- * Find the child slot for @frame.
+ * Find the child position for @frame.
  *
- * Return true and set @pos to the matching child index when @array contains a
- * matching child. Return false and set @pos to the insertion index otherwise.
- * A NULL @array is treated as empty and returns @pos = 0.
+ * Return true and set @pos to the matching child index when @children contains
+ * a matching child. Return false and set @pos to the insertion index otherwise.
+ * A NULL @children is treated as empty and returns @pos = 0.
  */
 static bool
-trie_child_array_find_slot(const struct stack_depot_trie_child_array *array,
-			   unsigned long frame, unsigned int *pos)
+trie_children_find_slot(const struct stack_depot_trie_children *children,
+			unsigned long frame, unsigned int *pos)
 {
 	unsigned int left = 0;
 	unsigned int right;
 
-	if (!array) {
+	if (!children) {
 		*pos = 0;
 		return false;
 	}
 
-	right = READ_ONCE(array->nr_children);
+	right = READ_ONCE(children->nr_children);
 	while (left < right) {
 		unsigned int mid = left + (right - left) / 2;
 		const struct stack_depot_trie_node *node;
 		unsigned long mid_frame;
 
-		node = trie_child_array_load_child(array, mid);
+		node = trie_children_load_child(children, mid);
 		if (!node) {
 			/* Tail append may produce a transient lockless lookup miss. */
 			right = mid;
@@ -1827,54 +1827,54 @@ trie_child_array_find_slot(const struct stack_depot_trie_child_array *array,
 }
 
 static void
-trie_child_array_insert_at(const struct stack_depot_trie_child_array *old,
-			   unsigned int pos,
-			   const struct stack_depot_trie_node *node,
-			   struct stack_depot_trie_child_array *new_array,
-			   unsigned int new_capacity)
+trie_children_insert_at(const struct stack_depot_trie_children *old_children,
+			unsigned int pos,
+			const struct stack_depot_trie_node *node,
+			struct stack_depot_trie_children *new_children,
+			unsigned int new_capacity)
 {
 	unsigned int nr_old;
 	unsigned int i;
 
-	nr_old = old->nr_children;
+	nr_old = old_children->nr_children;
 
-	new_array->nr_children = nr_old + 1;
-	new_array->capacity = new_capacity;
+	new_children->nr_children = nr_old + 1;
+	new_children->capacity = new_capacity;
 	for (i = 0; i < pos; i++)
-		RCU_INIT_POINTER(new_array->children[i],
-				 trie_child_array_load_child(old, i));
-	RCU_INIT_POINTER(new_array->children[pos], node);
+		RCU_INIT_POINTER(new_children->nodes[i],
+				 trie_children_load_child(old_children, i));
+	RCU_INIT_POINTER(new_children->nodes[pos], node);
 	for (i = pos; i < nr_old; i++)
-		RCU_INIT_POINTER(new_array->children[i + 1],
-				 trie_child_array_load_child(old, i));
-	for (i = nr_old + 1; i < new_array->capacity; i++)
-		RCU_INIT_POINTER(new_array->children[i], NULL);
+		RCU_INIT_POINTER(new_children->nodes[i + 1],
+				 trie_children_load_child(old_children, i));
+	for (i = nr_old + 1; i < new_children->capacity; i++)
+		RCU_INIT_POINTER(new_children->nodes[i], NULL);
 }
 
 static void
-trie_child_array_replace_at(const struct stack_depot_trie_child_array *old_array,
-			    const struct stack_depot_trie_node *new_child,
-			    struct stack_depot_trie_child_array *new_array,
-			    unsigned int pos)
+trie_children_replace_at(const struct stack_depot_trie_children *old_children,
+			 const struct stack_depot_trie_node *new_child,
+			 struct stack_depot_trie_children *new_children,
+			 unsigned int pos)
 {
 	unsigned int i;
 
-	new_array->nr_children = old_array->nr_children;
-	new_array->capacity = old_array->capacity;
-	for (i = 0; i < old_array->nr_children; i++)
-		RCU_INIT_POINTER(new_array->children[i],
-				 trie_child_array_load_child(old_array, i));
-	RCU_INIT_POINTER(new_array->children[pos], new_child);
-	for (i = old_array->nr_children; i < new_array->capacity; i++)
-		RCU_INIT_POINTER(new_array->children[i], NULL);
+	new_children->nr_children = old_children->nr_children;
+	new_children->capacity = old_children->capacity;
+	for (i = 0; i < old_children->nr_children; i++)
+		RCU_INIT_POINTER(new_children->nodes[i],
+				 trie_children_load_child(old_children, i));
+	RCU_INIT_POINTER(new_children->nodes[pos], new_child);
+	for (i = old_children->nr_children; i < new_children->capacity; i++)
+		RCU_INIT_POINTER(new_children->nodes[i], NULL);
 }
 
 static void trie_reparent_children(struct stack_depot_trie_node *parent)
 {
-	const struct stack_depot_trie_child_array *children;
+	const struct stack_depot_trie_children *children;
 	unsigned int i;
 
-	children = trie_load_children_slot(&parent->children);
+	children = trie_load_children(&parent->children);
 	if (!children)
 		return;
 	/*
@@ -1886,7 +1886,7 @@ static void trie_reparent_children(struct stack_depot_trie_node *parent)
 	for (i = 0; i < children->nr_children; i++) {
 		struct stack_depot_trie_node *child;
 
-		child = (struct stack_depot_trie_node *)trie_child_array_load_child(children, i);
+		child = (struct stack_depot_trie_node *)trie_children_load_child(children, i);
 		rcu_assign_pointer(child->parent, parent);
 	}
 }
@@ -1895,9 +1895,9 @@ static void
 trie_build_append_chain(const struct stack_depot_trie_node *parent, u32 leaf_id,
 			const unsigned long *entries, unsigned int nr_entries,
 			struct stack_depot_trie_node * const *nodes,
-			struct stack_depot_trie_child_array * const *chain_arrays,
-			const struct stack_depot_trie_node **head,
-			const struct stack_depot_trie_node **tail)
+			struct stack_depot_trie_children * const *path_children,
+			const struct stack_depot_trie_node **path_head,
+			const struct stack_depot_trie_node **path_leaf)
 {
 	const struct stack_depot_trie_node *prev = parent;
 	unsigned int pos = 0;
@@ -1923,19 +1923,19 @@ trie_build_append_chain(const struct stack_depot_trie_node *parent, u32 leaf_id,
 	for (i = 0; i + 1 < used; i++) {
 		const struct stack_depot_trie_node *next = nodes[i + 1];
 		struct stack_depot_trie_node *node = nodes[i];
-		struct stack_depot_trie_child_array *array = chain_arrays[i];
+		struct stack_depot_trie_children *children = path_children[i];
 
-		trie_child_array_init(array, 1, &next, 1);
-		RCU_INIT_POINTER(node->children, array);
+		trie_children_init(children, 1, &next, 1);
+		RCU_INIT_POINTER(node->children, children);
 	}
 
-	*head = nodes[0];
-	*tail = nodes[used - 1];
+	*path_head = nodes[0];
+	*path_leaf = nodes[used - 1];
 }
 
-static void trie_publish_tail_append(struct stack_depot_trie_child_array *array,
+static void trie_publish_tail_append(struct stack_depot_trie_children *children,
 				     unsigned int pos,
-				     const struct stack_depot_trie_node *head)
+				     const struct stack_depot_trie_node *child)
 {
 	/*
 	 * Writers hold stack_depot_trie_writer_lock. Existing children are
@@ -1944,36 +1944,36 @@ static void trie_publish_tail_append(struct stack_depot_trie_child_array *array,
 	 * see the new count either load the initialized child or treat a transient
 	 * NULL as a miss. The writer-lock recheck prevents permanent duplicates.
 	 */
-	rcu_assign_pointer(array->children[pos], head);
-	WRITE_ONCE(array->nr_children, pos + 1);
+	rcu_assign_pointer(children->nodes[pos], child);
+	WRITE_ONCE(children->nr_children, pos + 1);
 }
 
 static const struct stack_depot_trie_node *
 stack_depot_trie_lookup(const unsigned long *entries, unsigned int nr_entries)
 {
-	const struct stack_depot_trie_child_array *children;
-	unsigned int pos = 0;
+	const struct stack_depot_trie_children *children;
+	unsigned int entry = 0;
 
-	children = trie_load_children_slot(&stack_depot_trie_root);
+	children = trie_load_children(&stack_depot_trie_root);
 
-	while (pos < nr_entries) {
+	while (entry < nr_entries) {
 		const struct stack_depot_trie_node *node;
-		unsigned int remaining = nr_entries - pos;
+		unsigned int remaining = nr_entries - entry;
 		unsigned int matched;
-		unsigned int slot;
+		unsigned int pos;
 
-		if (!trie_child_array_find_slot(children, entries[pos], &slot))
+		if (!trie_children_find_slot(children, entries[entry], &pos))
 			return NULL;
 
-		node = trie_child_array_load_child(children, slot);
-		matched = __stack_depot_trie_node_match(node, &entries[pos], remaining);
+		node = trie_children_load_child(children, pos);
+		matched = __stack_depot_trie_node_match(node, &entries[entry], remaining);
 		if (matched < node->run.nr_entries)
 			return NULL;
-		pos += matched;
-		if (pos == nr_entries)
+		entry += matched;
+		if (entry == nr_entries)
 			return node->leaf_id ? node : NULL;
 
-		children = trie_load_children_slot(&node->children);
+		children = trie_load_children(&node->children);
 	}
 
 	return NULL;
@@ -1985,28 +1985,28 @@ static void trie_build_split(const struct stack_depot_trie_node *child,
 			     struct stack_depot_trie_node *prefix,
 			     struct stack_depot_trie_node *old_tail,
 			     struct stack_depot_trie_node * const *new_nodes,
-			     struct stack_depot_trie_child_array * const *chain_arrays,
-			     struct stack_depot_trie_child_array *prefix_children,
+			     struct stack_depot_trie_children * const *path_children,
+			     struct stack_depot_trie_children *prefix_children,
 			     const struct stack_depot_trie_node **new_leaf)
 {
-	const struct stack_depot_trie_child_array *child_children;
-	const struct stack_depot_trie_node *child_parent;
+	const struct stack_depot_trie_children *old_children;
+	const struct stack_depot_trie_node *old_parent;
 	const unsigned long *tail_entries;
-	const struct stack_depot_trie_node *split_children[2];
-	const struct stack_depot_trie_node *new_head = NULL;
-	const struct stack_depot_trie_node *new_tail = NULL;
+	const struct stack_depot_trie_node *split_nodes[2];
+	const struct stack_depot_trie_node *new_tail_head = NULL;
+	const struct stack_depot_trie_node *new_tail_leaf = NULL;
 	unsigned long new_frame;
 	unsigned long old_frame;
 	u32 prefix_leaf_id;
 	unsigned int tail_len;
 	bool has_new_tail;
 
-	child_children = trie_load_children_slot(&child->children);
-	child_parent = trie_load_parent(child);
+	old_children = trie_load_children(&child->children);
+	old_parent = trie_load_parent(child);
 
 	has_new_tail = matched < nr_entries;
 	prefix_leaf_id = has_new_tail ? 0 : leaf_id;
-	trie_node_init_slice(prefix, child_parent, prefix_leaf_id, child, 0,
+	trie_node_init_slice(prefix, old_parent, prefix_leaf_id, child, 0,
 			     matched);
 	tail_len = child->run.nr_entries - matched;
 	trie_node_init_slice(old_tail, prefix, child->leaf_id, child, matched,
@@ -2016,26 +2016,26 @@ static void trie_build_split(const struct stack_depot_trie_node *child,
 		tail_entries = &entries[matched];
 		tail_len = nr_entries - matched;
 		trie_build_append_chain(prefix, leaf_id, tail_entries, tail_len,
-					new_nodes, chain_arrays,
-					&new_head, &new_tail);
+					new_nodes, path_children,
+					&new_tail_head, &new_tail_leaf);
 		stack_depot_trie_node_frame(old_tail, 0, &old_frame);
-		stack_depot_trie_node_frame(new_head, 0, &new_frame);
+		stack_depot_trie_node_frame(new_tail_head, 0, &new_frame);
 		if (old_frame < new_frame) {
-			split_children[0] = old_tail;
-			split_children[1] = new_head;
+			split_nodes[0] = old_tail;
+			split_nodes[1] = new_tail_head;
 		} else {
-			split_children[0] = new_head;
-			split_children[1] = old_tail;
+			split_nodes[0] = new_tail_head;
+			split_nodes[1] = old_tail;
 		}
-		trie_child_array_init(prefix_children, ARRAY_SIZE(split_children),
-				      split_children, ARRAY_SIZE(split_children));
+		trie_children_init(prefix_children, ARRAY_SIZE(split_nodes),
+				   split_nodes, ARRAY_SIZE(split_nodes));
 	} else {
-		split_children[0] = old_tail;
-		trie_child_array_init(prefix_children, 1, split_children, 1);
+		split_nodes[0] = old_tail;
+		trie_children_init(prefix_children, 1, split_nodes, 1);
 	}
-	RCU_INIT_POINTER(old_tail->children, child_children);
+	RCU_INIT_POINTER(old_tail->children, old_children);
 	RCU_INIT_POINTER(prefix->children, prefix_children);
-	*new_leaf = has_new_tail ? new_tail : prefix;
+	*new_leaf = has_new_tail ? new_tail_leaf : prefix;
 }
 
 static unsigned int trie_size_append_chain(const unsigned long *entries,
@@ -2058,34 +2058,34 @@ static unsigned int trie_size_append_chain(const unsigned long *entries,
 }
 
 static u32
-trie_insert_path(const struct stack_depot_trie_child_array __rcu **slot,
-			 struct stack_depot_trie_node *parent,
-			 const struct stack_depot_trie_child_array *children,
-			 unsigned int pos, const unsigned long *entries,
-			 unsigned int nr_entries, void **pool_prealloc,
-			 struct stack_depot_trie_side_prealloc *side_prealloc)
+trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
+		 struct stack_depot_trie_node *parent,
+		 const struct stack_depot_trie_children *children,
+		 unsigned int pos, const unsigned long *entries,
+		 unsigned int nr_entries, void **pool_prealloc,
+		 struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_insert_alloc *alloc = stack_depot_trie_alloc;
-	struct stack_depot_trie_child_array *slot_array;
-	struct stack_depot_trie_child_array *tail_array;
-	const struct stack_depot_trie_node *chain_head;
-	const struct stack_depot_trie_node *chain_leaf;
+	struct stack_depot_trie_children *new_children;
+	struct stack_depot_trie_children *tail_children;
+	const struct stack_depot_trie_node *path_head;
+	const struct stack_depot_trie_node *path_leaf;
 	unsigned int capacity = 1;
 	unsigned int nr_nodes;
 	unsigned long flags;
 	u32 new_leaf_id;
-	size_t slot_array_size;
+	size_t new_children_size;
 	bool tail_append = false;
 
 	if (children) {
 		capacity = roundup_pow_of_two(children->nr_children + 1);
 		tail_append = pos == children->nr_children &&
 			children->nr_children < children->capacity;
-		slot_array_size = tail_append ? 0 : trie_child_array_bytes(capacity);
+		new_children_size = tail_append ? 0 : trie_children_bytes(capacity);
 	} else {
-		slot_array_size = trie_child_array_bytes(capacity);
+		new_children_size = trie_children_bytes(capacity);
 	}
-	if (slot_array_size > DEPOT_POOL_SIZE)
+	if (new_children_size > DEPOT_POOL_SIZE)
 		return 0;
 
 	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
@@ -2093,32 +2093,32 @@ trie_insert_path(const struct stack_depot_trie_child_array __rcu **slot,
 		return 0;
 	nr_nodes = trie_size_append_chain(entries, nr_entries, alloc->node_sizes);
 	if (trie_pool_alloc_insert(alloc, pool_prealloc, nr_nodes, nr_nodes - 1,
-					0, slot_array_size))
+				   0, new_children_size))
 		return 0;
 	trie_build_append_chain(parent, new_leaf_id, entries, nr_entries,
-				      alloc->nodes, alloc->chain_arrays,
-				      &chain_head, &chain_leaf);
-	trie_side_table_publish_new_leaf(new_leaf_id, chain_leaf);
+				alloc->nodes, alloc->path_children,
+				&path_head, &path_leaf);
+	trie_side_table_publish_new_leaf(new_leaf_id, path_leaf);
 
 	if (!children) {
-		slot_array = alloc->slot_array;
-		slot_array->nr_children = 1;
-		slot_array->capacity = 1;
-		RCU_INIT_POINTER(slot_array->children[0], chain_head);
-		rcu_assign_pointer(*slot, slot_array);
+		new_children = alloc->new_children;
+		new_children->nr_children = 1;
+		new_children->capacity = 1;
+		RCU_INIT_POINTER(new_children->nodes[0], path_head);
+		rcu_assign_pointer(*slot, new_children);
 		return new_leaf_id;
 	}
 
 	if (tail_append) {
-		tail_array = (struct stack_depot_trie_child_array *)children;
-		trie_publish_tail_append(tail_array, pos, chain_head);
+		tail_children = (struct stack_depot_trie_children *)children;
+		trie_publish_tail_append(tail_children, pos, path_head);
 	} else {
-		slot_array = alloc->slot_array;
-		trie_child_array_insert_at(children, pos, chain_head,
-					   slot_array, capacity);
-		rcu_assign_pointer(*slot, slot_array);
+		new_children = alloc->new_children;
+		trie_children_insert_at(children, pos, path_head, new_children,
+					capacity);
+		rcu_assign_pointer(*slot, new_children);
 		raw_spin_lock_irqsave(&pool_lock, flags);
-		trie_retire_child_array(children);
+		trie_retire_children(children);
 		raw_spin_unlock_irqrestore(&pool_lock, flags);
 	}
 
@@ -2126,17 +2126,17 @@ trie_insert_path(const struct stack_depot_trie_child_array __rcu **slot,
 }
 
 static u32
-trie_split_child(const struct stack_depot_trie_child_array __rcu **slot,
-			const struct stack_depot_trie_child_array *children,
-			const struct stack_depot_trie_node *child,
-			unsigned int pos, unsigned int matched,
-			const unsigned long *entries, unsigned int nr_entries,
-			void **pool_prealloc,
-			struct stack_depot_trie_side_prealloc *side_prealloc)
+trie_split_child(const struct stack_depot_trie_children __rcu **slot,
+		 const struct stack_depot_trie_children *children,
+		 const struct stack_depot_trie_node *child,
+		 unsigned int pos, unsigned int matched,
+		 const unsigned long *entries, unsigned int nr_entries,
+		 void **pool_prealloc,
+		 struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_insert_alloc *alloc = stack_depot_trie_alloc;
-	struct stack_depot_trie_child_array *prefix_children;
-	struct stack_depot_trie_child_array *slot_array;
+	struct stack_depot_trie_children *prefix_children;
+	struct stack_depot_trie_children *new_children;
 	const struct stack_depot_trie_node *split_leaf;
 	struct stack_depot_frame_run run;
 	struct stack_depot_trie_node *split_prefix;
@@ -2160,59 +2160,59 @@ trie_split_child(const struct stack_depot_trie_child_array __rcu **slot,
 						   nr_entries - matched,
 						   &alloc->node_sizes[2]);
 	if (trie_pool_alloc_insert(alloc, pool_prealloc, 2 + new_nodes,
-					 new_nodes ? new_nodes - 1 : 0,
-					 trie_child_array_bytes(has_new_tail ? 2 : 1),
-					 trie_child_array_bytes(children->capacity)))
+				   new_nodes ? new_nodes - 1 : 0,
+				   trie_children_bytes(has_new_tail ? 2 : 1),
+				   trie_children_bytes(children->capacity)))
 		return 0;
 
-	slot_array = alloc->slot_array;
+	new_children = alloc->new_children;
 	prefix_children = alloc->prefix_children;
 	split_prefix = alloc->nodes[0];
 	old_tail = alloc->nodes[1];
 	trie_build_split(child, matched, new_leaf_id, entries, nr_entries,
 			 split_prefix, old_tail, &alloc->nodes[2],
-			 alloc->chain_arrays, prefix_children, &split_leaf);
+			 alloc->path_children, prefix_children, &split_leaf);
 	trie_side_table_publish_split_leaves(child->leaf_id, old_tail,
 					     new_leaf_id, split_leaf);
-	trie_child_array_replace_at(children, split_prefix, slot_array, pos);
+	trie_children_replace_at(children, split_prefix, new_children, pos);
 	trie_reparent_children(old_tail);
-	rcu_assign_pointer(*slot, slot_array);
-	trie_retire_child_array_with_node(children, child);
+	rcu_assign_pointer(*slot, new_children);
+	trie_retire_children_with_node(children, child);
 
 	return new_leaf_id;
 }
 
 static u32
-trie_promote_child(const struct stack_depot_trie_child_array __rcu **slot,
-			  const struct stack_depot_trie_child_array *children,
-			  const struct stack_depot_trie_node *child,
-			  unsigned int pos, void **pool_prealloc,
-			  struct stack_depot_trie_side_prealloc *side_prealloc)
+trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
+		   const struct stack_depot_trie_children *children,
+		   const struct stack_depot_trie_node *child,
+		   unsigned int pos, void **pool_prealloc,
+		   struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_insert_alloc *alloc = stack_depot_trie_alloc;
-	struct stack_depot_trie_child_array *slot_array;
+	struct stack_depot_trie_children *new_children;
 	struct stack_depot_trie_node *promoted_node;
 	u32 new_leaf_id;
-	size_t slot_array_size;
+	size_t new_children_size;
 
 	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
 	if (!new_leaf_id)
 		return 0;
 	alloc->node_sizes[0] = trie_node_bytes(&child->run);
-	slot_array_size = trie_child_array_bytes(children->capacity);
+	new_children_size = trie_children_bytes(children->capacity);
 	if (trie_pool_alloc_insert(alloc, pool_prealloc, 1, 0, 0,
-				       slot_array_size))
+				   new_children_size))
 		return 0;
 
 	promoted_node = alloc->nodes[0];
-	slot_array = alloc->slot_array;
+	new_children = alloc->new_children;
 	memcpy(promoted_node, child, alloc->node_sizes[0]);
 	promoted_node->leaf_id = new_leaf_id;
 	trie_side_table_publish_new_leaf(new_leaf_id, promoted_node);
-	trie_child_array_replace_at(children, promoted_node, slot_array, pos);
+	trie_children_replace_at(children, promoted_node, new_children, pos);
 	trie_reparent_children(promoted_node);
-	rcu_assign_pointer(*slot, slot_array);
-	trie_retire_child_array_with_node(children, child);
+	rcu_assign_pointer(*slot, new_children);
+	trie_retire_children_with_node(children, child);
 
 	return new_leaf_id;
 }
@@ -2230,8 +2230,8 @@ stack_depot_trie_insert(const unsigned long *entries,
 			       void **pool_prealloc,
 			       struct stack_depot_trie_side_prealloc *side_prealloc)
 {
-	const struct stack_depot_trie_child_array *children;
-	const struct stack_depot_trie_child_array __rcu **slot =
+	const struct stack_depot_trie_children *children;
+	const struct stack_depot_trie_children __rcu **slot =
 		&stack_depot_trie_root;
 	const struct stack_depot_trie_node *child;
 	struct stack_depot_trie_node *parent = NULL;
@@ -2240,9 +2240,9 @@ stack_depot_trie_insert(const unsigned long *entries,
 	u32 leaf_id = 0;
 
 	for (;;) {
-		children = trie_load_children_slot(slot);
+		children = trie_load_children(slot);
 		/* Case 1: no matching child, so append the remaining stack path. */
-		if (!trie_child_array_find_slot(children, entries[0], &pos)) {
+		if (!trie_children_find_slot(children, entries[0], &pos)) {
 			leaf_id = trie_insert_path(slot, parent, children, pos,
 							   entries, nr_entries,
 							   pool_prealloc,
@@ -2250,7 +2250,7 @@ stack_depot_trie_insert(const unsigned long *entries,
 			break;
 		}
 
-		child = trie_child_array_load_child(children, pos);
+		child = trie_children_load_child(children, pos);
 		matched = __stack_depot_trie_node_match(child, entries, nr_entries);
 
 		/* Case 2: the match ends inside the child run, so split it. */
