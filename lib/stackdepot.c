@@ -6,7 +6,7 @@
  * callers that request STACK_DEPOT_FLAG_COUNTABLE use the legacy hash table with
  * contiguous stack records in stack pools. Persistent non-refcounted entries
  * can use trie storage when enabled; trie nodes share common frame prefixes and
- * are published through RCU/COW children containers.
+ * are published through immutable RCU children containers.
  *
  * Author: Alexander Potapenko <glider@google.com>
  * Copyright (C) 2016 Google, Inc.
@@ -127,11 +127,12 @@ static_assert(CONFIG_STACKDEPOT_MAX_FRAMES <= U16_MAX);
 struct stack_depot_trie_children;
 
 struct stack_depot_trie_node {
-	/* Parent links let fetch rebuild a full stack from a leaf to the root. */
+	/* Parent links let fetch rebuild a full stack from a node to the root. */
 	const struct stack_depot_trie_node __rcu *parent;
-	/* Children are separate RCU/COW generations. */
+	/* Children are immutable RCU-published containers. */
 	const struct stack_depot_trie_children __rcu *children;
-	u32 leaf_id;
+	/* Non-zero when a stored stack ends at this node. */
+	u32 stack_id;
 	struct stack_depot_frame_run run;
 	unsigned char data[];
 };
@@ -192,23 +193,23 @@ static LIST_HEAD(pending_trie_children);
  * stack_max_pools is the split point between hash and trie handle encodings.
  * A handle with pool_index_plus_1 in 1..stack_max_pools names a hash-backed
  * stack pool. Larger pool-index values cannot refer to hash pools, so trie
- * storage uses that handle space to encode a dense leaf_id. The side table
- * maps each leaf_id to its trie leaf node.
+ * storage uses that handle space to encode a dense stack ID. The side
+ * table maps each stack ID to its trie node.
  */
-static inline u32 __stack_depot_trie_max_leaf_id(void)
+static inline u32 trie_max_stack_id(void)
 {
 	return (DEPOT_POOL_INDEX_MASK - stack_max_pools) <<
 		DEPOT_OFFSET_BITS;
 }
 
-static depot_stack_handle_t __stack_depot_trie_handle(u32 leaf_id)
+static depot_stack_handle_t trie_handle(u32 stack_id)
 {
 	union handle_parts parts = {};
 	u64 pool_index_plus_1;
 	u32 pool_delta;
 	u32 index;
 
-	index = leaf_id - 1;
+	index = stack_id - 1;
 	pool_delta = index >> DEPOT_OFFSET_BITS;
 	pool_index_plus_1 = (u64)stack_max_pools + 1 + pool_delta;
 
@@ -224,7 +225,7 @@ static inline bool stack_depot_handle_is_trie(depot_stack_handle_t handle)
 	return parts.pool_index_plus_1 > stack_max_pools;
 }
 
-static u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
+static u32 trie_stack_id(depot_stack_handle_t handle)
 {
 	union handle_parts parts = { .handle = handle };
 	u32 pool_delta;
@@ -234,13 +235,16 @@ static u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 }
 
 /*
- * Trie handles encode a dense leaf ID. The side table maps that ID to a leaf
- * pointer for lockless fetch/print paths, which can run from diagnostic
- * contexts where taking a lock would be unsafe. Initialization
- * installs the root; early initialization also installs the first directory and
- * chunk. Additional directories and chunks are preallocated and published
- * lazily as leaf IDs grow. RCU pointer publication makes fully initialized
- * directories, chunks, and leaves visible to those lockless readers.
+ * Trie handles encode a dense stack ID. The side table maps that ID
+ * to a node pointer for lockless fetch and print operations. Those
+ * operations can run from diagnostic contexts where taking a lock would
+ * be unsafe.
+ *
+ * Initialization installs the side-table root. Early initialization
+ * also installs the first directory and chunk. Additional directories
+ * and chunks are preallocated and published lazily as stack IDs grow.
+ * RCU publication makes initialized directories, chunks, and nodes
+ * visible to those lockless readers.
  */
 #define STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE \
 	(PAGE_SIZE / sizeof(struct stack_depot_trie_node *))
@@ -248,7 +252,7 @@ static u32 __stack_depot_trie_leaf_id(depot_stack_handle_t handle)
 	(PAGE_SIZE / sizeof(struct stack_depot_trie_node **))
 
 struct stack_depot_trie_side_dir {
-	/* Both the chunk pointer and each leaf pointer in it are RCU-published. */
+	/* The chunk and each node pointer are RCU-published. */
 	const struct stack_depot_trie_node __rcu * __rcu *
 		chunks[STACK_DEPOT_TRIE_SIDE_TABLE_DIR_SIZE];
 };
@@ -261,7 +265,7 @@ struct stack_depot_trie_side_root {
 struct stack_depot_trie_side_prealloc {
 	/* Preallocated side-table directory page for sparse growth. */
 	struct stack_depot_trie_side_dir *dir;
-	/* Preallocated side-table leaf chunk for sparse growth. */
+	/* Preallocated side-table pointer chunk for sparse growth. */
 	const struct stack_depot_trie_node __rcu **chunk;
 };
 
@@ -269,7 +273,7 @@ static struct stack_depot_trie_side_root *trie_side_table_root;
 static DEFINE_RAW_SPINLOCK(trie_side_table_cache_lock);
 /* Zeroed unpublished pages; get/put transfer ownership under the cache lock. */
 static struct stack_depot_trie_side_prealloc trie_side_table_cache;
-static u32 trie_side_table_last_leaf_id;
+static u32 trie_side_table_last_stack_id;
 
 /* Lock order: writer_lock -> pool_lock. The cache lock is never nested. */
 
@@ -341,14 +345,14 @@ static inline const struct stack_depot_trie_node __rcu **
 trie_side_table_dir_load_chunk(struct stack_depot_trie_side_dir *dir,
 			       unsigned int idx)
 {
-	/* Pairs with the chunk rcu_assign_pointer() in leaf ID preparation. */
+	/* Pairs with the chunk rcu_assign_pointer() in stack ID preparation. */
 	return rcu_dereference_check(dir->chunks[idx],
 				     lockdep_is_held(&stack_depot_trie_writer_lock) ||
 				     rcu_read_lock_sched_held());
 }
 
 static u32
-trie_side_table_prepare_leaf_slot(struct stack_depot_trie_side_prealloc *prealloc)
+trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *prealloc)
 {
 	const struct stack_depot_trie_node __rcu **chunk;
 	struct stack_depot_trie_side_dir *dir;
@@ -359,8 +363,8 @@ trie_side_table_prepare_leaf_slot(struct stack_depot_trie_side_prealloc *preallo
 
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
 
-	id = trie_side_table_last_leaf_id + 1;
-	if (id > __stack_depot_trie_max_leaf_id())
+	id = trie_side_table_last_stack_id + 1;
+	if (id > trie_max_stack_id())
 		return 0;
 
 	root_vec = trie_side_table_root;
@@ -392,30 +396,30 @@ static void trie_side_table_root_init(struct stack_depot_trie_side_root *root_ve
 				      unsigned int root_size)
 {
 	root_vec->dir_capacity = root_size;
-	trie_side_table_last_leaf_id = 0;
+	trie_side_table_last_stack_id = 0;
 }
 
-static inline unsigned int trie_side_table_root_size_for_max_id(u32 max_leaf_id)
+static inline unsigned int trie_side_table_root_size_for_max_id(u32 max_stack_id)
 {
 	unsigned int top_size;
 
-	top_size = DIV_ROUND_UP(max_leaf_id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
+	top_size = DIV_ROUND_UP(max_stack_id, STACK_DEPOT_TRIE_SIDE_TABLE_CHUNK_SIZE);
 	return DIV_ROUND_UP(top_size, STACK_DEPOT_TRIE_SIDE_TABLE_DIR_SIZE);
 }
 
-static int __init __stack_depot_trie_side_table_init_memblock(void)
+static int __init trie_side_table_init_memblock(void)
 {
 	struct stack_depot_trie_side_root *root_vec;
 	struct stack_depot_trie_side_dir *first_dir;
 	const struct stack_depot_trie_node __rcu **first_chunk;
 	size_t root_bytes;
-	u32 max_leaf_id;
+	u32 max_stack_id;
 	unsigned int root_size;
 
-	max_leaf_id = __stack_depot_trie_max_leaf_id();
-	if (!max_leaf_id)
+	max_stack_id = trie_max_stack_id();
+	if (!max_stack_id)
 		return -EINVAL;
-	root_size = trie_side_table_root_size_for_max_id(max_leaf_id);
+	root_size = trie_side_table_root_size_for_max_id(max_stack_id);
 	root_bytes = struct_size_t(struct stack_depot_trie_side_root, dirs, root_size);
 
 	root_vec = memblock_alloc(root_bytes, __alignof__(*root_vec));
@@ -443,18 +447,18 @@ static int __init __stack_depot_trie_side_table_init_memblock(void)
 	return 0;
 }
 
-static int __stack_depot_trie_side_table_init(gfp_t gfp_flags)
+static int trie_side_table_init(gfp_t gfp_flags)
 {
 	struct stack_depot_trie_side_root *root_vec;
 	unsigned int root_size;
 	size_t root_bytes;
-	u32 max_leaf_id;
+	u32 max_stack_id;
 
-	max_leaf_id = __stack_depot_trie_max_leaf_id();
-	if (!max_leaf_id)
+	max_stack_id = trie_max_stack_id();
+	if (!max_stack_id)
 		return -EINVAL;
 
-	root_size = trie_side_table_root_size_for_max_id(max_leaf_id);
+	root_size = trie_side_table_root_size_for_max_id(max_stack_id);
 	root_bytes = struct_size_t(struct stack_depot_trie_side_root, dirs, root_size);
 	root_vec = kvzalloc(root_bytes, gfp_flags);
 	if (!root_vec)
@@ -469,7 +473,7 @@ static int __init stack_depot_trie_init_memblock(void)
 {
 	int ret;
 
-	ret = __stack_depot_trie_side_table_init_memblock();
+	ret = trie_side_table_init_memblock();
 	if (ret)
 		return ret;
 
@@ -481,7 +485,7 @@ static int stack_depot_trie_init(gfp_t gfp_flags)
 {
 	int ret;
 
-	ret = __stack_depot_trie_side_table_init(gfp_flags);
+	ret = trie_side_table_init(gfp_flags);
 	if (ret)
 		return ret;
 
@@ -537,7 +541,7 @@ static void trie_side_table_put_prealloc(struct stack_depot_trie_side_prealloc *
 		free_page((unsigned long)prealloc->chunk);
 }
 
-static const struct stack_depot_trie_node __rcu **trie_side_table_leaf_slot(u32 id)
+static const struct stack_depot_trie_node __rcu **trie_side_table_stack_slot(u32 id)
 {
 	const struct stack_depot_trie_node __rcu **chunk;
 	struct stack_depot_trie_side_dir *dir;
@@ -550,7 +554,7 @@ static const struct stack_depot_trie_node __rcu **trie_side_table_leaf_slot(u32 
 	return &chunk[trie_side_table_slot_index(id)];
 }
 
-static const struct stack_depot_trie_node *__stack_depot_trie_side_table_lookup(u32 id)
+static const struct stack_depot_trie_node *trie_side_table_lookup(u32 id)
 {
 	const struct stack_depot_trie_node __rcu **chunk;
 	struct stack_depot_trie_side_dir *dir;
@@ -564,7 +568,7 @@ static const struct stack_depot_trie_node *__stack_depot_trie_side_table_lookup(
 	if (!chunk)
 		return NULL;
 
-	/* Pairs with side-table leaf rcu_assign_pointer(). */
+	/* Pairs with side-table node publication. */
 	return rcu_dereference_check(chunk[trie_side_table_slot_index(id)],
 				     lockdep_is_held(&stack_depot_trie_writer_lock) ||
 				     rcu_read_lock_sched_held());
@@ -746,50 +750,50 @@ static depot_stack_handle_t
 trie_find_handle(const unsigned long *entries, unsigned int nr_entries)
 {
 	depot_stack_handle_t handle = 0;
-	const struct stack_depot_trie_node *leaf;
+	const struct stack_depot_trie_node *node;
 
 	rcu_read_lock_sched_notrace();
-	leaf = stack_depot_trie_lookup(entries, nr_entries);
-	if (leaf)
-		handle = __stack_depot_trie_handle(leaf->leaf_id);
+	node = stack_depot_trie_lookup(entries, nr_entries);
+	if (node)
+		handle = trie_handle(node->stack_id);
 	rcu_read_unlock_sched_notrace();
 
 	return handle;
 }
 
-static void trie_side_table_publish_new_leaf(u32 leaf_id,
-					     const struct stack_depot_trie_node *leaf)
+static void trie_side_table_publish_new_node(u32 stack_id,
+					     const struct stack_depot_trie_node *node)
 {
 	const struct stack_depot_trie_node __rcu **slot;
 
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
 
-	slot = trie_side_table_leaf_slot(leaf_id);
-	/* Pairs with __stack_depot_trie_side_table_lookup(). */
-	rcu_assign_pointer(*slot, leaf);
+	slot = trie_side_table_stack_slot(stack_id);
+	/* Pairs with trie_side_table_lookup(). */
+	rcu_assign_pointer(*slot, node);
 }
 
-static void trie_side_table_publish_split_leaves(u32 old_leaf_id,
-						 const struct stack_depot_trie_node *old_leaf,
-						 u32 new_leaf_id,
-						 const struct stack_depot_trie_node *new_leaf)
+static void trie_side_table_publish_split_nodes(u32 old_stack_id,
+						const struct stack_depot_trie_node *old_node,
+						u32 new_stack_id,
+						const struct stack_depot_trie_node *new_node)
 {
 	const struct stack_depot_trie_node __rcu **new_slot;
 	const struct stack_depot_trie_node __rcu **old_slot = NULL;
 
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
 
-	if (old_leaf_id)
-		old_slot = trie_side_table_leaf_slot(old_leaf_id);
+	if (old_stack_id)
+		old_slot = trie_side_table_stack_slot(old_stack_id);
 
-	new_slot = trie_side_table_leaf_slot(new_leaf_id);
+	new_slot = trie_side_table_stack_slot(new_stack_id);
 	if (old_slot) {
-		/* Pairs with __stack_depot_trie_side_table_lookup(). */
-		rcu_assign_pointer(*old_slot, old_leaf);
+		/* Pairs with trie_side_table_lookup(). */
+		rcu_assign_pointer(*old_slot, old_node);
 	}
 
-	/* Pairs with __stack_depot_trie_side_table_lookup(). */
-	rcu_assign_pointer(*new_slot, new_leaf);
+	/* Pairs with trie_side_table_lookup(). */
+	rcu_assign_pointer(*new_slot, new_node);
 }
 
 static int __init disable_stack_depot(char *str)
@@ -1359,7 +1363,7 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 	depot_stack_handle_t handle = 0;
 	unsigned long flags;
 	struct page *page;
-	u32 leaf_id;
+	u32 stack_id;
 
 	handle = trie_find_handle(entries, nr_entries);
 	if (handle)
@@ -1374,10 +1378,10 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 		pool_prealloc = page_address(page);
 
 	raw_spin_lock_irqsave(&stack_depot_trie_writer_lock, flags);
-	leaf_id = stack_depot_trie_insert(entries, nr_entries,
-					       &pool_prealloc, &side_prealloc);
-	if (leaf_id)
-		handle = __stack_depot_trie_handle(leaf_id);
+	stack_id = stack_depot_trie_insert(entries, nr_entries,
+					   &pool_prealloc, &side_prealloc);
+	if (stack_id)
+		handle = trie_handle(stack_id);
 	raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
 
 	if (pool_prealloc) {
@@ -1574,7 +1578,7 @@ stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
 }
 
 static void trie_node_init(struct stack_depot_trie_node *node,
-			   const struct stack_depot_trie_node *parent, u32 leaf_id,
+			   const struct stack_depot_trie_node *parent, u32 stack_id,
 			   const unsigned long *entries,
 			   const struct stack_depot_frame_run *run)
 {
@@ -1594,12 +1598,12 @@ static void trie_node_init(struct stack_depot_trie_node *node,
 
 	RCU_INIT_POINTER(node->parent, parent);
 	RCU_INIT_POINTER(node->children, NULL);
-	node->leaf_id = leaf_id;
+	node->stack_id = stack_id;
 	node->run = *run;
 }
 
 static void trie_node_init_slice(struct stack_depot_trie_node *node,
-				 const struct stack_depot_trie_node *parent, u32 leaf_id,
+				 const struct stack_depot_trie_node *parent, u32 stack_id,
 				 const struct stack_depot_trie_node *src_node,
 				 unsigned int start, unsigned int nr_entries)
 {
@@ -1614,14 +1618,14 @@ static void trie_node_init_slice(struct stack_depot_trie_node *node,
 	       stack_depot_frame_run_bytes(&run));
 	RCU_INIT_POINTER(node->parent, parent);
 	RCU_INIT_POINTER(node->children, NULL);
-	node->leaf_id = leaf_id;
+	node->stack_id = stack_id;
 	node->run = run;
 }
 
 static unsigned int
-__stack_depot_trie_node_match(const struct stack_depot_trie_node *node,
-			      const unsigned long *entries,
-			      unsigned int nr_entries)
+trie_node_match(const struct stack_depot_trie_node *node,
+		const unsigned long *entries,
+		unsigned int nr_entries)
 {
 	unsigned int limit;
 	unsigned int i;
@@ -1783,10 +1787,11 @@ static void trie_reparent_children(struct stack_depot_trie_node *parent)
 	if (!children)
 		return;
 	/*
-	 * COW updates reuse unchanged descendant subtrees. Repoint their parent
-	 * links before retiring the old parent so fetch never follows a freed node.
-	 * Lockless fetches may see the new parent before structural publication, but
-	 * the old and new parent chains contain the same frames and remain RCU-live.
+	 * Replacement children reuse unchanged descendant subtrees. Repoint
+	 * their parent links before retiring the old parent so fetch never
+	 * follows a freed node. Lockless fetches may see the new parent before
+	 * structural publication. The old and new parent chains contain the
+	 * same frames and remain RCU-live.
 	 */
 	for (i = 0; i < children->nr_children; i++) {
 		struct stack_depot_trie_node *child;
@@ -1799,39 +1804,40 @@ static void trie_reparent_children(struct stack_depot_trie_node *parent)
 /**
  * trie_path_alloc() - Allocate and initialize a linear trie path
  * @parent: Parent of the first path node, or %NULL at the trie root
- * @leaf_id: Leaf ID to assign to the final path node
+ * @stack_id: Stack ID to assign to the final path node
  * @entries: Frames to store in the path
  * @nr_entries: Number of frames in @entries
  * @pool_prealloc: Preallocated pool storage available to the allocator
- * @leaf_out: Returns the leaf on success
+ * @node_out: Returns the final node on success
  *
- * Split @entries into frame runs, allocate one node per run, and link adjacent
- * nodes through path children. The final node is always the leaf and is
- * initialized with @leaf_id. The caller must hold pool_lock. A partially
+ * Split @entries into frame runs, allocate one node per run, and link
+ * adjacent nodes through path children. Initialize the final node with
+ * @stack_id.
+ * The caller must hold pool_lock. A partially
  * allocated path is released before returning an error.
  *
  * Return: The path root on success, or %NULL on allocation failure.
  */
 static const struct stack_depot_trie_node *
-trie_path_alloc(const struct stack_depot_trie_node *parent, u32 leaf_id,
+trie_path_alloc(const struct stack_depot_trie_node *parent, u32 stack_id,
 		const unsigned long *entries, unsigned int nr_entries,
 		void **pool_prealloc,
-		const struct stack_depot_trie_node **leaf_out)
+		const struct stack_depot_trie_node **node_out)
 {
 	struct stack_depot_trie_children *path_children = NULL;
 	const struct stack_depot_trie_node *path_root = NULL;
-	const struct stack_depot_trie_node *leaf = NULL;
+	const struct stack_depot_trie_node *last_node = NULL;
 	const struct stack_depot_trie_node *prev = parent;
 	unsigned int entry = 0;
 
 	lockdep_assert_held(&pool_lock);
-	*leaf_out = NULL;
+	*node_out = NULL;
 
 	while (entry < nr_entries) {
 		struct stack_depot_frame_run run;
 		struct stack_depot_trie_node *node;
 		unsigned int start = entry;
-		u32 node_leaf_id = 0;
+		u32 node_stack_id = 0;
 
 		frame_run_init(&entries[start], nr_entries - start, &run);
 		node = trie_pool_alloc(trie_node_bytes(&run), pool_prealloc);
@@ -1840,15 +1846,15 @@ trie_path_alloc(const struct stack_depot_trie_node *parent, u32 leaf_id,
 
 		entry += run.nr_entries;
 		if (entry == nr_entries)
-			node_leaf_id = leaf_id;
+			node_stack_id = stack_id;
 
-		trie_node_init(node, prev, node_leaf_id, &entries[start], &run);
-		leaf = node;
+		trie_node_init(node, prev, node_stack_id, &entries[start], &run);
+		last_node = node;
 		if (!path_root)
 			path_root = node;
 
 		if (path_children) {
-			trie_children_insert(path_children, leaf, 0);
+			trie_children_insert(path_children, last_node, 0);
 			path_children = NULL;
 		}
 		if (entry < nr_entries) {
@@ -1860,15 +1866,15 @@ trie_path_alloc(const struct stack_depot_trie_node *parent, u32 leaf_id,
 		prev = node;
 	}
 
-	*leaf_out = leaf;
+	*node_out = last_node;
 	return path_root;
 
 err_release:
-	while (leaf && leaf != parent) {
+	while (last_node && last_node != parent) {
 		const struct stack_depot_trie_children *node_children;
-		const struct stack_depot_trie_node *node = leaf;
+		const struct stack_depot_trie_node *node = last_node;
 
-		leaf = trie_load_parent(node);
+		last_node = trie_load_parent(node);
 		node_children = trie_load_children(&node->children);
 		if (node_children)
 			trie_pool_release_children(node_children);
@@ -1895,12 +1901,12 @@ stack_depot_trie_lookup(const unsigned long *entries, unsigned int nr_entries)
 			return NULL;
 
 		node = trie_children_load_child(children, pos);
-		matched = __stack_depot_trie_node_match(node, &entries[entry], remaining);
+		matched = trie_node_match(node, &entries[entry], remaining);
 		if (matched < node->run.nr_entries)
 			return NULL;
 		entry += matched;
 		if (entry == nr_entries)
-			return node->leaf_id ? node : NULL;
+			return node->stack_id ? node : NULL;
 
 		children = trie_load_children(&node->children);
 	}
@@ -1918,13 +1924,13 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 {
 	struct stack_depot_trie_children *new_children;
 	const struct stack_depot_trie_node *path_root;
-	const struct stack_depot_trie_node *leaf;
+	const struct stack_depot_trie_node *node;
 	unsigned int cap = 1;
 	unsigned long flags;
-	u32 new_leaf_id;
+	u32 new_stack_id;
 
-	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
-	if (!new_leaf_id)
+	new_stack_id = trie_side_table_prepare_stack_slot(side_prealloc);
+	if (!new_stack_id)
 		return 0;
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
@@ -1943,19 +1949,19 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 	if (!new_children)
 		goto err_release;
 
-	path_root = trie_path_alloc(parent, new_leaf_id, entries, nr_entries,
-				    pool_prealloc, &leaf);
+	path_root = trie_path_alloc(parent, new_stack_id, entries, nr_entries,
+				    pool_prealloc, &node);
 	if (!path_root)
 		goto err_release;
 
-	trie_side_table_publish_new_leaf(new_leaf_id, leaf);
+	trie_side_table_publish_new_node(new_stack_id, node);
 
 	trie_children_init(children, new_children);
 	trie_children_insert(new_children, path_root, pos);
 
 	/*
 	 * Publish the completed children container. Readers can now reach the
-	 * new path, whose leaf is already visible in the side table.
+	 * new path, whose final node is already visible in the side table.
 	 */
 	rcu_assign_pointer(*slot, new_children);
 
@@ -1964,7 +1970,7 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
-	return new_leaf_id;
+	return new_stack_id;
 
 err_release:
 	if (new_children)
@@ -1985,19 +1991,19 @@ trie_split_child(const struct stack_depot_trie_children __rcu **slot,
 {
 	struct stack_depot_trie_children *prefix_children = NULL;
 	struct stack_depot_trie_children *new_children = NULL;
-	const struct stack_depot_trie_node *split_leaf;
-	const struct stack_depot_trie_node *split_nodes[2];
+	const struct stack_depot_trie_node *new_node;
+	const struct stack_depot_trie_node *suffix_roots[2];
 	struct stack_depot_trie_node *split_prefix = NULL;
-	struct stack_depot_trie_node *old_tail = NULL;
-	unsigned int i, nr_split_nodes;
-	unsigned int old_tail_len;
+	struct stack_depot_trie_node *old_suffix = NULL;
+	unsigned int i, nr_suffix_roots;
+	unsigned int old_suffix_len;
 	unsigned long flags;
 	size_t split_prefix_size;
-	size_t old_tail_size;
-	u32 new_leaf_id, prefix_leaf_id;
+	size_t old_suffix_size;
+	u32 new_stack_id, prefix_stack_id;
 
-	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
-	if (!new_leaf_id)
+	new_stack_id = trie_side_table_prepare_stack_slot(side_prealloc);
+	if (!new_stack_id)
 		return 0;
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
@@ -2009,10 +2015,10 @@ trie_split_child(const struct stack_depot_trie_children __rcu **slot,
 	if (!split_prefix)
 		goto err_release;
 
-	old_tail_len = child->run.nr_entries - matched;
-	old_tail_size = trie_node_bytes_for(child->run.mode, old_tail_len);
-	old_tail = trie_pool_alloc(old_tail_size, pool_prealloc);
-	if (!old_tail)
+	old_suffix_len = child->run.nr_entries - matched;
+	old_suffix_size = trie_node_bytes_for(child->run.mode, old_suffix_len);
+	old_suffix = trie_pool_alloc(old_suffix_size, pool_prealloc);
+	if (!old_suffix)
 		goto err_release;
 
 	new_children = trie_pool_alloc_children(children->capacity, pool_prealloc);
@@ -2022,41 +2028,41 @@ trie_split_child(const struct stack_depot_trie_children __rcu **slot,
 	if (matched < nr_entries) {
 		/*
 		 * The new and existing stacks diverge inside this child. Keep the
-		 * existing suffix as old_tail and build a second tail for the new
+		 * existing suffix as old_suffix and build a new suffix for the new
 		 * stack.
 		 */
-		const struct stack_depot_trie_node *new_tail;
-		unsigned int new_tail_len = nr_entries - matched;
+		const struct stack_depot_trie_node *new_suffix;
+		unsigned int new_suffix_len = nr_entries - matched;
 		unsigned long frame;
 
-		prefix_leaf_id = 0;
-		nr_split_nodes = 2;
-		prefix_children = trie_pool_alloc_children(nr_split_nodes,
+		prefix_stack_id = 0;
+		nr_suffix_roots = 2;
+		prefix_children = trie_pool_alloc_children(nr_suffix_roots,
 							   pool_prealloc);
 		if (!prefix_children)
 			goto err_release;
 
-		new_tail = trie_path_alloc(split_prefix, new_leaf_id,
-					   &entries[matched], new_tail_len,
-					   pool_prealloc, &split_leaf);
-		if (!new_tail)
+		new_suffix = trie_path_alloc(split_prefix, new_stack_id,
+					     &entries[matched], new_suffix_len,
+					     pool_prealloc, &new_node);
+		if (!new_suffix)
 			goto err_release;
 
 		stack_depot_trie_node_frame(child, matched, &frame);
 		if (frame < entries[matched]) {
-			split_nodes[0] = old_tail;
-			split_nodes[1] = new_tail;
+			suffix_roots[0] = old_suffix;
+			suffix_roots[1] = new_suffix;
 		} else {
-			split_nodes[0] = new_tail;
-			split_nodes[1] = old_tail;
+			suffix_roots[0] = new_suffix;
+			suffix_roots[1] = old_suffix;
 		}
 	} else {
 		/* The new stack ends at the shared prefix. */
-		prefix_leaf_id = new_leaf_id;
-		nr_split_nodes = 1;
-		split_leaf = split_prefix;
-		split_nodes[0] = old_tail;
-		prefix_children = trie_pool_alloc_children(nr_split_nodes,
+		prefix_stack_id = new_stack_id;
+		nr_suffix_roots = 1;
+		new_node = split_prefix;
+		suffix_roots[0] = old_suffix;
+		prefix_children = trie_pool_alloc_children(nr_suffix_roots,
 							   pool_prealloc);
 		if (!prefix_children)
 			goto err_release;
@@ -2066,30 +2072,31 @@ trie_split_child(const struct stack_depot_trie_children __rcu **slot,
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 
 	/* Keep the shared prefix under the old parent. */
-	trie_node_init_slice(split_prefix, trie_load_parent(child), prefix_leaf_id,
+	trie_node_init_slice(split_prefix, trie_load_parent(child), prefix_stack_id,
 			     child, 0, matched);
-	trie_node_init_slice(old_tail, split_prefix, child->leaf_id, child, matched,
-			     old_tail_len);
-	for (i = 0; i < nr_split_nodes; i++)
-		trie_children_insert(prefix_children, split_nodes[i], i);
+	trie_node_init_slice(old_suffix, split_prefix, child->stack_id, child, matched,
+			     old_suffix_len);
+	for (i = 0; i < nr_suffix_roots; i++)
+		trie_children_insert(prefix_children, suffix_roots[i], i);
 
-	/* Keep the old children under the old tail. */
-	RCU_INIT_POINTER(old_tail->children, trie_load_children(&child->children));
+	/* Keep the old children under the old suffix. */
+	RCU_INIT_POINTER(old_suffix->children, trie_load_children(&child->children));
 	RCU_INIT_POINTER(split_prefix->children, prefix_children);
 
-	trie_side_table_publish_split_leaves(child->leaf_id, old_tail, new_leaf_id, split_leaf);
+	trie_side_table_publish_split_nodes(child->stack_id, old_suffix,
+					    new_stack_id, new_node);
 	trie_children_replace_at(children, split_prefix, new_children, pos);
-	trie_reparent_children(old_tail);
+	trie_reparent_children(old_suffix);
 	rcu_assign_pointer(*slot, new_children);
 	trie_retire_children_with_node(children, child);
 
-	return new_leaf_id;
+	return new_stack_id;
 
 err_release:
 	if (split_prefix)
 		trie_pool_release(split_prefix, split_prefix_size);
-	if (old_tail)
-		trie_pool_release(old_tail, old_tail_size);
+	if (old_suffix)
+		trie_pool_release(old_suffix, old_suffix_size);
 	if (prefix_children)
 		trie_pool_release_children(prefix_children);
 	if (new_children)
@@ -2101,19 +2108,19 @@ err_release:
 
 static u32
 trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
-		   const struct stack_depot_trie_children *children,
-		   const struct stack_depot_trie_node *child,
-		   unsigned int pos, void **pool_prealloc,
-		   struct stack_depot_trie_side_prealloc *side_prealloc)
+			 const struct stack_depot_trie_children *children,
+			 const struct stack_depot_trie_node *child,
+			 unsigned int pos, void **pool_prealloc,
+			 struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_children *new_children;
 	struct stack_depot_trie_node *promoted_node;
 	unsigned long flags;
 	size_t node_size;
-	u32 new_leaf_id;
+	u32 new_stack_id;
 
-	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
-	if (!new_leaf_id)
+	new_stack_id = trie_side_table_prepare_stack_slot(side_prealloc);
+	if (!new_stack_id)
 		return 0;
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
@@ -2133,14 +2140,14 @@ trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 
 	memcpy(promoted_node, child, node_size);
-	promoted_node->leaf_id = new_leaf_id;
-	trie_side_table_publish_new_leaf(new_leaf_id, promoted_node);
+	promoted_node->stack_id = new_stack_id;
+	trie_side_table_publish_new_node(new_stack_id, promoted_node);
 	trie_children_replace_at(children, promoted_node, new_children, pos);
 	trie_reparent_children(promoted_node);
 	rcu_assign_pointer(*slot, new_children);
 	trie_retire_children_with_node(children, child);
 
-	return new_leaf_id;
+	return new_stack_id;
 
 out_release_node:
 	trie_pool_release(promoted_node, node_size);
@@ -2150,11 +2157,11 @@ out_unlock:
 	return 0;
 }
 
-static u32 trie_finish_insert(u32 leaf_id)
+static u32 trie_finish_insert(u32 stack_id)
 {
-	if (leaf_id)
-		trie_side_table_last_leaf_id = leaf_id;
-	return leaf_id;
+	if (stack_id)
+		trie_side_table_last_stack_id = stack_id;
+	return stack_id;
 }
 
 static u32
@@ -2170,37 +2177,37 @@ stack_depot_trie_insert(const unsigned long *entries,
 	struct stack_depot_trie_node *parent = NULL;
 	unsigned int matched;
 	unsigned int pos;
-	u32 leaf_id = 0;
+	u32 stack_id = 0;
 
 	for (;;) {
 		children = trie_load_children(slot);
-		/* Case 1: no matching child, so append the remaining stack path. */
+		/* Case 1: no matching child, so add the remaining path. */
 		if (!trie_children_find_slot(children, entries[0], &pos)) {
-			leaf_id = trie_insert_path(slot, parent, children, pos,
-							   entries, nr_entries,
-							   pool_prealloc,
-							   side_prealloc);
+			stack_id = trie_insert_path(slot, parent, children, pos,
+						    entries, nr_entries,
+						    pool_prealloc,
+						    side_prealloc);
 			break;
 		}
 
 		child = trie_children_load_child(children, pos);
-		matched = __stack_depot_trie_node_match(child, entries, nr_entries);
+		matched = trie_node_match(child, entries, nr_entries);
 
 		/* Case 2: the match ends inside the child run, so split it. */
 		if (matched < child->run.nr_entries) {
-			leaf_id = trie_split_child(slot, children, child, pos,
-							       matched, entries, nr_entries,
-							       pool_prealloc, side_prealloc);
+			stack_id = trie_split_child(slot, children, child, pos,
+						    matched, entries, nr_entries,
+						    pool_prealloc, side_prealloc);
 			break;
 		}
 
 		/* Case 3: the input ends here, so reuse or promote this child. */
 		if (matched == nr_entries) {
-			if (child->leaf_id)
-				return child->leaf_id;
-			leaf_id = trie_promote_child(slot, children, child, pos,
-							       pool_prealloc,
-							       side_prealloc);
+			if (child->stack_id)
+				return child->stack_id;
+			stack_id = trie_promote_child(slot, children, child, pos,
+						      pool_prealloc,
+						      side_prealloc);
 			break;
 		}
 
@@ -2211,54 +2218,54 @@ stack_depot_trie_insert(const unsigned long *entries,
 		nr_entries -= matched;
 	}
 
-	return trie_finish_insert(leaf_id);
+	return trie_finish_insert(stack_id);
 }
 
 static unsigned int
-__stack_depot_trie_fetch_into(const struct stack_depot_trie_node *leaf,
-			      unsigned long *entries,
-			      unsigned int max_entries)
+trie_fetch_into(const struct stack_depot_trie_node *node,
+		unsigned long *entries,
+		unsigned int max_entries)
 {
-	const struct stack_depot_trie_node *node;
+	const struct stack_depot_trie_node *cur;
 	unsigned int total;
 	unsigned int pos;
 	unsigned int i;
 
 	total = 0;
-	for (node = leaf; node; node = trie_load_parent(node))
-		total += node->run.nr_entries;
+	for (cur = node; cur; cur = trie_load_parent(cur))
+		total += cur->run.nr_entries;
 	if (WARN_ON_ONCE(!total))
 		return 0;
 	if (max_entries < total)
 		return 0;
 
 	pos = total;
-	for (node = leaf; node; node = trie_load_parent(node)) {
-		pos -= node->run.nr_entries;
-		for (i = 0; i < node->run.nr_entries; i++)
-			stack_depot_trie_node_frame(node, i, &entries[pos + i]);
+	for (cur = node; cur; cur = trie_load_parent(cur)) {
+		pos -= cur->run.nr_entries;
+		for (i = 0; i < cur->run.nr_entries; i++)
+			stack_depot_trie_node_frame(cur, i, &entries[pos + i]);
 	}
 
 	return total;
 }
 
 static unsigned int
-__stack_depot_trie_fetch_handle_into(depot_stack_handle_t handle,
-				     unsigned long *entries,
-				     unsigned int max_entries)
+trie_fetch_handle_into(depot_stack_handle_t handle,
+		       unsigned long *entries,
+		       unsigned int max_entries)
 {
-	const struct stack_depot_trie_node *leaf;
-	u32 leaf_id;
+	const struct stack_depot_trie_node *node;
+	u32 stack_id;
 	unsigned int nr_entries;
 
-	leaf_id = __stack_depot_trie_leaf_id(handle);
+	stack_id = trie_stack_id(handle);
 	rcu_read_lock_sched_notrace();
-	leaf = __stack_depot_trie_side_table_lookup(leaf_id);
-	if (WARN_ONCE(!leaf, "corrupt trie handle %08x\n", handle)) {
+	node = trie_side_table_lookup(stack_id);
+	if (WARN_ONCE(!node, "corrupt trie handle %08x\n", handle)) {
 		rcu_read_unlock_sched_notrace();
 		return 0;
 	}
-	nr_entries = __stack_depot_trie_fetch_into(leaf, entries, max_entries);
+	nr_entries = trie_fetch_into(node, entries, max_entries);
 	rcu_read_unlock_sched_notrace();
 	if (nr_entries)
 		kmsan_unpoison_memory(entries, nr_entries * sizeof(*entries));
@@ -2309,7 +2316,7 @@ unsigned int stack_depot_fetch_into(depot_stack_handle_t handle,
 		return 0;
 	WARN_ON_ONCE(!entries || !max_entries);
 	if (stack_depot_handle_is_trie(handle))
-		return __stack_depot_trie_fetch_handle_into(handle, entries,
+		return trie_fetch_handle_into(handle, entries,
 						      max_entries);
 
 	stack = depot_fetch_stack(handle);
@@ -2359,9 +2366,9 @@ void stack_depot_print(depot_stack_handle_t stack)
 	if (stack_depot_handle_is_trie(stack)) {
 		unsigned long trie_entries[CONFIG_STACKDEPOT_MAX_FRAMES];
 
-		nr_entries = __stack_depot_trie_fetch_handle_into(stack,
-								  trie_entries,
-								  ARRAY_SIZE(trie_entries));
+		nr_entries = trie_fetch_handle_into(stack,
+						    trie_entries,
+						    ARRAY_SIZE(trie_entries));
 		stack_trace_print(trie_entries, nr_entries, 0);
 		return;
 	}
@@ -2381,9 +2388,9 @@ int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
 	if (stack_depot_handle_is_trie(handle)) {
 		unsigned long trie_entries[CONFIG_STACKDEPOT_MAX_FRAMES];
 
-		nr_entries = __stack_depot_trie_fetch_handle_into(handle,
-								  trie_entries,
-								  ARRAY_SIZE(trie_entries));
+		nr_entries = trie_fetch_handle_into(handle,
+						    trie_entries,
+						    ARRAY_SIZE(trie_entries));
 		return stack_trace_snprint(buf, size, trie_entries, nr_entries,
 					   spaces);
 	}
