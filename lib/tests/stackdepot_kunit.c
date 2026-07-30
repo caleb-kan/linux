@@ -24,69 +24,52 @@ static inline unsigned long stackdepot_arm64_frame(long offset)
 }
 #endif
 
-static void stackdepot_fetch_into_roundtrip(struct kunit *test)
+static void stackdepot_trie_max_path_roundtrip(struct kunit *test)
 {
-	unsigned long entries[] = {
-		0x101000UL,
-		0x102000UL,
-		0x103000UL,
-	};
-	unsigned long exact[ARRAY_SIZE(entries)] = {};
-	unsigned long fetched[ARRAY_SIZE(entries) + 1] = {
-		[ARRAY_SIZE(entries)] = 0xa5a5a5a5UL,
-	};
-	unsigned long expected_tail = fetched[ARRAY_SIZE(entries)];
+	union handle_parts parts;
+	unsigned long *entries;
+	unsigned long *fetched;
 	depot_stack_handle_t handle;
-	unsigned int nr_entries;
+	size_t size = CONFIG_STACKDEPOT_MAX_FRAMES * sizeof(*entries);
+	u32 pool_index_plus_1;
+	unsigned int i;
 
+	if (expected_trie_pool_limit < 0)
+		kunit_skip(test, "trie pool limit was not provided");
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+	entries = kunit_kcalloc(test, CONFIG_STACKDEPOT_MAX_FRAMES,
+				sizeof(*entries), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, entries);
+	fetched = kunit_kcalloc(test, CONFIG_STACKDEPOT_MAX_FRAMES,
+				sizeof(*fetched), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fetched);
+	for (i = 0; i < CONFIG_STACKDEPOT_MAX_FRAMES; i++) {
+#ifdef CONFIG_ARM64
+		entries[i] = i & 1 ? 0x1000UL + i * 0x1000UL :
+			stackdepot_arm64_frame(i * 4);
+#elif defined(CONFIG_X86_64) && !defined(CONFIG_UML)
+		entries[i] = i & 1 ? 0xffff888000000000UL + i * 0x1000UL :
+			0xffffffff10000000UL + i * 0x10UL;
+#else
+		entries[i] = 0x1000UL + i * 0x1000UL;
+#endif
+	}
 
-	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	handle = stack_depot_save(entries, CONFIG_STACKDEPOT_MAX_FRAMES,
+				  GFP_KERNEL);
 	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
-
-	nr_entries = stack_depot_fetch_into(handle, exact, ARRAY_SIZE(exact));
-	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
-	KUNIT_EXPECT_MEMEQ(test, exact, entries, sizeof(entries));
-
-	nr_entries = stack_depot_fetch_into(handle, fetched, ARRAY_SIZE(fetched));
-	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
-	KUNIT_EXPECT_MEMEQ(test, fetched, entries, sizeof(entries));
-	KUNIT_EXPECT_EQ(test, fetched[ARRAY_SIZE(entries)], expected_tail);
-}
-
-static void stackdepot_fetch_into_rejects_missing_or_short_stack(struct kunit *test)
-{
-	unsigned long entries[] = {
-		0x111000UL,
-		0x112000UL,
-		0x113000UL,
-	};
-	unsigned long fetched[ARRAY_SIZE(entries)] = {
-		0xa1a1a1a1UL,
-		0xb2b2b2b2UL,
-		0xc3c3c3c3UL,
-	};
-	unsigned long expected[ARRAY_SIZE(fetched)];
-	depot_stack_handle_t handle;
-	unsigned int nr_entries;
-
-	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
-
-	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
-	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
-	memcpy(expected, fetched, sizeof(expected));
-
-	nr_entries = stack_depot_fetch_into(0, fetched, ARRAY_SIZE(fetched));
-	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
-	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
-
-	nr_entries = stack_depot_fetch_into(0, NULL, 0);
-	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
-
-	nr_entries = stack_depot_fetch_into(handle, fetched,
-					    ARRAY_SIZE(fetched) - 1);
-	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
-	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
+	parts.handle = handle;
+	pool_index_plus_1 = parts.pool_index_plus_1;
+	KUNIT_EXPECT_GT(test, pool_index_plus_1, (u32)expected_trie_pool_limit);
+	KUNIT_EXPECT_EQ(test,
+			stack_depot_fetch_into(handle, fetched,
+					       CONFIG_STACKDEPOT_MAX_FRAMES),
+			(unsigned int)CONFIG_STACKDEPOT_MAX_FRAMES);
+	KUNIT_EXPECT_MEMEQ(test, fetched, entries, size);
+	KUNIT_EXPECT_EQ(test,
+			stack_depot_save(entries, CONFIG_STACKDEPOT_MAX_FRAMES,
+					 GFP_KERNEL),
+			handle);
 }
 
 static void stackdepot_save_flags_public(struct kunit *test)
@@ -236,6 +219,71 @@ static void stackdepot_countable_public(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, record->entries, get_entries, sizeof(get_entries));
 
 	stack_depot_put(get_handle);
+}
+
+static void stackdepot_fetch_into_roundtrip(struct kunit *test)
+{
+	unsigned long entries[] = {
+		0x101000UL,
+		0x102000UL,
+		0x103000UL,
+	};
+	unsigned long exact[ARRAY_SIZE(entries)] = {};
+	unsigned long fetched[ARRAY_SIZE(entries) + 1] = {
+		[ARRAY_SIZE(entries)] = 0xa5a5a5a5UL,
+	};
+	unsigned long expected_tail = fetched[ARRAY_SIZE(entries)];
+	depot_stack_handle_t handle;
+	unsigned int nr_entries;
+
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+
+	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+
+	nr_entries = stack_depot_fetch_into(handle, exact, ARRAY_SIZE(exact));
+	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, exact, entries, sizeof(entries));
+
+	nr_entries = stack_depot_fetch_into(handle, fetched, ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries, (unsigned int)ARRAY_SIZE(entries));
+	KUNIT_EXPECT_MEMEQ(test, fetched, entries, sizeof(entries));
+	KUNIT_EXPECT_EQ(test, fetched[ARRAY_SIZE(entries)], expected_tail);
+}
+
+static void stackdepot_fetch_into_rejects_missing_or_short_stack(struct kunit *test)
+{
+	unsigned long entries[] = {
+		0x111000UL,
+		0x112000UL,
+		0x113000UL,
+	};
+	unsigned long fetched[ARRAY_SIZE(entries)] = {
+		0xa1a1a1a1UL,
+		0xb2b2b2b2UL,
+		0xc3c3c3c3UL,
+	};
+	unsigned long expected[ARRAY_SIZE(fetched)];
+	depot_stack_handle_t handle;
+	unsigned int nr_entries;
+
+	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+
+	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	memcpy(expected, fetched, sizeof(expected));
+
+	nr_entries = stack_depot_fetch_into(0, fetched, ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
+	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
+
+	nr_entries = stack_depot_fetch_into(0, NULL, 0);
+	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
+
+	nr_entries = stack_depot_fetch_into(handle, fetched,
+					    ARRAY_SIZE(fetched) - 1);
+	KUNIT_EXPECT_EQ(test, nr_entries, 0U);
+	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 }
 
 static void stackdepot_trie_topology_roundtrip(struct kunit *test)
@@ -395,11 +443,12 @@ static void stackdepot_frame_arm64(struct kunit *test)
 #endif /* CONFIG_ARM64 */
 
 static struct kunit_case stackdepot_test_cases[] = {
-	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
-	KUNIT_CASE(stackdepot_fetch_into_rejects_missing_or_short_stack),
+	KUNIT_CASE(stackdepot_trie_max_path_roundtrip),
 	KUNIT_CASE(stackdepot_save_flags_public),
 	KUNIT_CASE(stackdepot_snprint_public),
 	KUNIT_CASE(stackdepot_countable_public),
+	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
+	KUNIT_CASE(stackdepot_fetch_into_rejects_missing_or_short_stack),
 	KUNIT_CASE(stackdepot_trie_topology_roundtrip),
 	KUNIT_CASE(stackdepot_frame_storage_roundtrip),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
