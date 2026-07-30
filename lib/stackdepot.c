@@ -138,8 +138,7 @@ struct stack_depot_trie_node {
 
 /*
  * Children are sorted by first frame and searched by insertion position.
- * Writers may append to spare capacity at the sorted tail, but never change
- * existing child pointers. Other updates build and publish a replacement array.
+ * Published children are immutable; updates build and publish a replacement.
  */
 struct stack_depot_trie_children {
 	unsigned int nr_children;
@@ -1747,11 +1746,6 @@ trie_children_find_slot(const struct stack_depot_trie_children *children,
 		unsigned long mid_frame;
 
 		node = trie_children_load_child(children, mid);
-		if (!node) {
-			/* Tail append may produce a transient lockless lookup miss. */
-			right = mid;
-			continue;
-		}
 		stack_depot_trie_node_frame(node, 0, &mid_frame);
 		if (mid_frame < frame) {
 			left = mid + 1;
@@ -1767,17 +1761,28 @@ trie_children_find_slot(const struct stack_depot_trie_children *children,
 	return false;
 }
 
+/**
+ * trie_children_copy() - Copy children into a new container
+ * @new_children: Unpublished destination children container
+ * @new_capacity: Capacity of @new_children
+ * @old_children: Immutable source children container, or %NULL if empty
+ * @pos: Position at which to insert @node
+ * @node: Node to insert
+ *
+ * Copy @old_children into @new_children and insert @node without modifying the
+ * published source generation.
+ */
 static void
-trie_children_insert_at(const struct stack_depot_trie_children *old_children,
-			unsigned int pos,
-			const struct stack_depot_trie_node *node,
-			struct stack_depot_trie_children *new_children,
-			unsigned int new_capacity)
+trie_children_copy(struct stack_depot_trie_children *new_children,
+		   unsigned int new_capacity,
+		   const struct stack_depot_trie_children *old_children,
+		   unsigned int pos,
+		   const struct stack_depot_trie_node *node)
 {
 	unsigned int nr_old;
 	unsigned int i;
 
-	nr_old = old_children->nr_children;
+	nr_old = old_children ? old_children->nr_children : 0;
 
 	new_children->nr_children = nr_old + 1;
 	new_children->capacity = new_capacity;
@@ -1874,21 +1879,6 @@ trie_build_append_chain(const struct stack_depot_trie_node *parent, u32 leaf_id,
 	*path_leaf = nodes[used - 1];
 }
 
-static void trie_publish_tail_append(struct stack_depot_trie_children *children,
-				     unsigned int pos,
-				     const struct stack_depot_trie_node *child)
-{
-	/*
-	 * Writers hold stack_depot_trie_writer_lock. Existing children are
-	 * immutable, so tail append publishes the new child before increasing the
-	 * visible count. Lockless readers that see the old count miss; readers that
-	 * see the new count either load the initialized child or treat a transient
-	 * NULL as a miss. The writer-lock recheck prevents permanent duplicates.
-	 */
-	rcu_assign_pointer(children->nodes[pos], child);
-	WRITE_ONCE(children->nr_children, pos + 1);
-}
-
 static const struct stack_depot_trie_node *
 stack_depot_trie_lookup(const unsigned long *entries, unsigned int nr_entries)
 {
@@ -1947,101 +1937,94 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 		 unsigned int nr_entries, void **pool_prealloc,
 		 struct stack_depot_trie_side_prealloc *side_prealloc)
 {
-	struct stack_depot_trie_insert_alloc *alloc = stack_depot_trie_alloc;
-	struct stack_depot_trie_children *new_children;
-	struct stack_depot_trie_children *tail_children;
-	const struct stack_depot_trie_node *path_head;
-	const struct stack_depot_trie_node *path_leaf;
-	unsigned int capacity = 1;
-	unsigned int new_children_capacity = 1;
-	unsigned int i, nr_nodes;
+	struct stack_depot_trie_children *new_children = NULL;
+	struct stack_depot_trie_children *path_children = NULL;
+	const struct stack_depot_trie_node *path_head = NULL;
+	const struct stack_depot_trie_node *path_leaf = NULL;
+	const struct stack_depot_trie_node *prev = parent;
+	unsigned int cap = 1;
+	unsigned int entry = 0;
 	unsigned long flags;
 	u32 new_leaf_id;
-	bool tail_append = false;
 
-	if (children) {
-		capacity = roundup_pow_of_two(children->nr_children + 1);
-		tail_append = pos == children->nr_children &&
-			children->nr_children < children->capacity;
-		if (tail_append)
-			new_children_capacity = 0;
-		else
-			new_children_capacity = capacity;
-	}
 	new_leaf_id = trie_side_table_prepare_leaf_slot(side_prealloc);
 	if (!new_leaf_id)
 		return 0;
-
-	memset(alloc, 0, sizeof(*alloc));
-	nr_nodes = trie_size_append_chain(entries, nr_entries, alloc->node_sizes);
 
 	raw_spin_lock_irqsave(&pool_lock, flags);
 	printk_deferred_enter();
 	trie_drain_pending_children();
 
-	for (i = 0; i < nr_nodes; i++) {
-		alloc->nodes[i] = trie_pool_alloc(alloc->node_sizes[i], pool_prealloc);
-		if (!alloc->nodes[i])
+	/*
+	 * Build the path from parent to leaf. Each iteration links
+	 * the previous node's path children to the new node, then reserves path
+	 * children for the following node when more frames remain.
+	 */
+	while (entry < nr_entries) {
+		struct stack_depot_frame_run run;
+		struct stack_depot_trie_node *node;
+		unsigned int start = entry;
+		u32 leaf_id = 0;
+
+		frame_run_init(&entries[start], nr_entries - start, &run);
+		node = trie_pool_alloc(trie_node_bytes(&run), pool_prealloc);
+		if (!node)
 			goto err_release;
+
+		entry += run.nr_entries;
+		if (entry == nr_entries)
+			leaf_id = new_leaf_id;
+
+		trie_node_init(node, prev, leaf_id, &entries[start], &run);
+		path_leaf = node;
+		if (!path_head)
+			path_head = node;
+
+		/* Complete the link from the previous path node. */
+		if (path_children) {
+			trie_children_init(path_children, 1, &path_leaf, 1);
+			path_children = NULL;
+		}
+
+		/* Reserve path children for the next node. */
+		if (entry < nr_entries) {
+			path_children = trie_pool_alloc_children(1, pool_prealloc);
+			if (!path_children)
+				goto err_release;
+			RCU_INIT_POINTER(node->children, path_children);
+		}
+		prev = node;
 	}
 
-	for (i = 0; i < nr_nodes - 1; i++) {
-		alloc->path_children[i] =
-			trie_pool_alloc_children(1, pool_prealloc);
-		if (!alloc->path_children[i])
-			goto err_release;
-	}
+	if (children)
+		cap = roundup_pow_of_two(children->nr_children + 1);
+	new_children = trie_pool_alloc_children(cap, pool_prealloc);
+	if (!new_children)
+		goto err_release;
 
-	if (new_children_capacity) {
-		alloc->new_children = trie_pool_alloc_children(new_children_capacity,
-							       pool_prealloc);
-		if (!alloc->new_children)
-			goto err_release;
-	}
+	trie_side_table_publish_new_leaf(new_leaf_id, path_leaf);
+	trie_children_copy(new_children, cap, children, pos, path_head);
+	rcu_assign_pointer(*slot, new_children);
+	if (children)
+		trie_retire_children(children);
 
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
-
-	trie_build_append_chain(parent, new_leaf_id, entries, nr_entries,
-				alloc->nodes, alloc->path_children,
-				&path_head, &path_leaf);
-	trie_side_table_publish_new_leaf(new_leaf_id, path_leaf);
-
-	if (!children) {
-		new_children = alloc->new_children;
-		new_children->nr_children = 1;
-		new_children->capacity = 1;
-		RCU_INIT_POINTER(new_children->nodes[0], path_head);
-		rcu_assign_pointer(*slot, new_children);
-		return new_leaf_id;
-	}
-
-	if (tail_append) {
-		tail_children = (struct stack_depot_trie_children *)children;
-		trie_publish_tail_append(tail_children, pos, path_head);
-	} else {
-		new_children = alloc->new_children;
-		trie_children_insert_at(children, pos, path_head, new_children,
-					capacity);
-		rcu_assign_pointer(*slot, new_children);
-		raw_spin_lock_irqsave(&pool_lock, flags);
-		trie_retire_children(children);
-		raw_spin_unlock_irqrestore(&pool_lock, flags);
-	}
-
 	return new_leaf_id;
 
 err_release:
-	for (i = 0; i < ARRAY_SIZE(alloc->nodes); i++) {
-		if (alloc->nodes[i])
-			trie_pool_release(alloc->nodes[i], alloc->node_sizes[i]);
+	if (new_children)
+		trie_pool_release_children(new_children);
+	while (path_leaf && path_leaf != parent) {
+		const struct stack_depot_trie_children *node_children;
+		const struct stack_depot_trie_node *node = path_leaf;
+
+		path_leaf = trie_load_parent(node);
+		node_children = trie_load_children(&node->children);
+		if (node_children)
+			trie_pool_release_children(node_children);
+		trie_pool_release(node, trie_node_bytes(&node->run));
 	}
-	for (i = 0; i < ARRAY_SIZE(alloc->path_children); i++) {
-		if (alloc->path_children[i])
-			trie_pool_release_children(alloc->path_children[i]);
-	}
-	if (alloc->new_children)
-		trie_pool_release_children(alloc->new_children);
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 	return 0;
