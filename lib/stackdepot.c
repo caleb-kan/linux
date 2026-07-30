@@ -351,8 +351,7 @@ trie_side_table_dir_load_chunk(struct stack_depot_trie_side_dir *dir,
 				     rcu_read_lock_sched_held());
 }
 
-static u32
-trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *prealloc)
+static u32 trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *prealloc)
 {
 	const struct stack_depot_trie_node __rcu **chunk;
 	struct stack_depot_trie_side_dir *dir;
@@ -579,8 +578,7 @@ static inline size_t trie_children_alloc_size(size_t size)
 	return offsetof(struct stack_depot_trie_retired_children, data) + size;
 }
 
-static inline struct stack_depot_trie_retired_children *
-trie_retired_children(const void *ptr)
+static inline struct stack_depot_trie_retired_children *trie_retired_children(const void *ptr)
 {
 	return container_of(ptr, struct stack_depot_trie_retired_children, data);
 }
@@ -619,6 +617,17 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 	return STACK_DEPOT_TRIE_POOL_SLOTS;
 }
 
+/**
+ * trie_pool_alloc() - Allocate byte-addressed storage from trie pools
+ * @size: Number of bytes to allocate
+ * @prealloc: Preallocated pool storage that may be consumed
+ *
+ * Round @size up to trie-pool slots and reserve one contiguous run. If
+ * no current pool can satisfy the request, @prealloc may be consumed to
+ * create a new pool.
+ *
+ * Return: A pointer to at least @size bytes, or %NULL on failure.
+ */
 static void *trie_pool_alloc(size_t size, void **prealloc)
 {
 	struct stack_depot_trie_pool *pool;
@@ -648,6 +657,14 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 	return (char *)pool + slot * STACK_DEPOT_TRIE_SLOT_SIZE;
 }
 
+/**
+ * trie_pool_release() - Release byte-addressed trie-pool storage
+ * @ptr: Pointer returned by trie_pool_alloc()
+ * @size: Byte count originally passed to trie_pool_alloc()
+ *
+ * Release the trie-pool slots covering @size. The byte count must match
+ * the allocation, so the same rounded slot range returns to the pool.
+ */
 static void trie_pool_release(const void *ptr, size_t size)
 {
 	struct stack_depot_trie_pool *pool;
@@ -668,6 +685,17 @@ static void trie_pool_release(const void *ptr, size_t size)
 	pool->free_slots += nr_slots;
 }
 
+/**
+ * trie_pool_alloc_children() - Allocate a children container
+ * @capacity: Number of child-node pointer entries, not a byte count
+ * @prealloc: Preallocated pool storage that may be consumed
+ *
+ * Allocate space for @capacity pointers plus hidden RCU-retirement
+ * metadata. The returned container is empty and has its capacity
+ * initialized.
+ *
+ * Return: An unpublished children container, or %NULL on failure.
+ */
 static struct stack_depot_trie_children *
 trie_pool_alloc_children(unsigned int capacity, void **prealloc)
 {
@@ -688,6 +716,13 @@ trie_pool_alloc_children(unsigned int capacity, void **prealloc)
 	return children;
 }
 
+/**
+ * trie_pool_release_children() - Release a children container
+ * @children: Container returned by trie_pool_alloc_children()
+ *
+ * Derive the allocation byte size from @children->capacity and release
+ * the container together with its hidden RCU-retirement metadata.
+ */
 static void trie_pool_release_children(const struct stack_depot_trie_children *children)
 {
 	size_t size = trie_children_bytes(children->capacity);
@@ -696,6 +731,22 @@ static void trie_pool_release_children(const struct stack_depot_trie_children *c
 			  trie_children_alloc_size(size));
 }
 
+/**
+ * trie_drain_pending_children() - Reclaim retired trie-pool storage
+ *
+ * After publishing replacement children, trie_retire_children() records
+ * an RCU grace-period cookie in the old container's hidden metadata and
+ * appends it to pending_trie_children. When a node is replaced as well,
+ * the same metadata carries pending_node, so both allocations are
+ * reclaimed together.
+ *
+ * Call this after taking pool_lock and before allocating trie-pool
+ * storage, so completed grace periods return slots before searching for
+ * new space. Poll retired containers in FIFO order and stop when the
+ * first grace period is pending, because later entries cannot be ready
+ * yet. For each ready entry, release its optional node followed by the
+ * children container.
+ */
 static void trie_drain_pending_children(void)
 {
 	struct stack_depot_trie_retired_children *retired;
@@ -729,9 +780,8 @@ static void trie_retire_children(const void *ptr)
 	list_add_tail(&retired->list, &pending_trie_children);
 }
 
-static void
-trie_retire_children_with_node(const void *ptr,
-			       const struct stack_depot_trie_node *node)
+static void trie_retire_children_with_node(const void *ptr,
+					   const struct stack_depot_trie_node *node)
 {
 	struct stack_depot_trie_retired_children *retired;
 	unsigned long flags;
@@ -746,8 +796,7 @@ trie_retire_children_with_node(const void *ptr,
 static const struct stack_depot_trie_node *
 stack_depot_trie_lookup(const unsigned long *entries, unsigned int nr_entries);
 
-static depot_stack_handle_t
-trie_find_handle(const unsigned long *entries, unsigned int nr_entries)
+static depot_stack_handle_t trie_find_handle(const unsigned long *entries, unsigned int nr_entries)
 {
 	depot_stack_handle_t handle = 0;
 	const struct stack_depot_trie_node *node;
@@ -761,8 +810,27 @@ trie_find_handle(const unsigned long *entries, unsigned int nr_entries)
 	return handle;
 }
 
-static void trie_side_table_publish_new_node(u32 stack_id,
-					     const struct stack_depot_trie_node *node)
+/**
+ * trie_side_table_publish() - Publish a stack ID to lockless readers
+ * @node: Initialized node associated with @stack_id
+ * @stack_id: Non-zero stack ID to publish
+ *
+ * The node and its path to the root must be initialized before this
+ * call. All fallible allocation must also be complete. Publishing the
+ * stack-ID mapping commits the path, which cannot then be rolled back.
+ *
+ * This is the first half of the side-table/trie publication pair. The
+ * caller must publish the side-table mapping before publishing the
+ * children slot that makes the path reachable from the trie. Once that
+ * slot is visible, lookup may return @stack_id, so the side table must
+ * already resolve it to @node.
+ *
+ * Published storage must remain valid until retired through RCU. Frame
+ * data and children are immutable after publication, although parent
+ * links may still be updated through RCU while reparenting descendants.
+ */
+static void trie_side_table_publish(const struct stack_depot_trie_node *node,
+				    u32 stack_id)
 {
 	const struct stack_depot_trie_node __rcu **slot;
 
@@ -771,29 +839,6 @@ static void trie_side_table_publish_new_node(u32 stack_id,
 	slot = trie_side_table_stack_slot(stack_id);
 	/* Pairs with trie_side_table_lookup(). */
 	rcu_assign_pointer(*slot, node);
-}
-
-static void trie_side_table_publish_split_nodes(u32 old_stack_id,
-						const struct stack_depot_trie_node *old_node,
-						u32 new_stack_id,
-						const struct stack_depot_trie_node *new_node)
-{
-	const struct stack_depot_trie_node __rcu **new_slot;
-	const struct stack_depot_trie_node __rcu **old_slot = NULL;
-
-	lockdep_assert_held(&stack_depot_trie_writer_lock);
-
-	if (old_stack_id)
-		old_slot = trie_side_table_stack_slot(old_stack_id);
-
-	new_slot = trie_side_table_stack_slot(new_stack_id);
-	if (old_slot) {
-		/* Pairs with trie_side_table_lookup(). */
-		rcu_assign_pointer(*old_slot, old_node);
-	}
-
-	/* Pairs with trie_side_table_lookup(). */
-	rcu_assign_pointer(*new_slot, new_node);
 }
 
 static int __init disable_stack_depot(char *str)
@@ -1348,15 +1393,13 @@ static inline struct stack_record *find_stack(struct list_head *bucket,
 	return ret;
 }
 
-static u32
-stack_depot_trie_insert(const unsigned long *entries,
-			       unsigned int nr_entries,
-			       void **pool_prealloc,
-			       struct stack_depot_trie_side_prealloc *side_prealloc);
+static u32 stack_depot_trie_insert(const unsigned long *entries,
+				   unsigned int nr_entries,
+				   void **pool_prealloc,
+				   struct stack_depot_trie_side_prealloc *side_prealloc);
 
-static depot_stack_handle_t
-stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
-		      gfp_t alloc_flags)
+static depot_stack_handle_t stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
+						  gfp_t alloc_flags)
 {
 	struct stack_depot_trie_side_prealloc side_prealloc = {};
 	void *pool_prealloc = NULL;
@@ -1561,9 +1604,8 @@ static void frame_run_init(const unsigned long *entries,
 	run->nr_entries = i;
 }
 
-static void
-stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
-			    unsigned int index, unsigned long *frame)
+static void stack_depot_trie_node_frame(const struct stack_depot_trie_node *node,
+					unsigned int index, unsigned long *frame)
 {
 	u32 payload;
 
@@ -1622,10 +1664,9 @@ static void trie_node_init_slice(struct stack_depot_trie_node *node,
 	node->run = run;
 }
 
-static unsigned int
-trie_node_match(const struct stack_depot_trie_node *node,
-		const unsigned long *entries,
-		unsigned int nr_entries)
+static unsigned int trie_node_match(const struct stack_depot_trie_node *node,
+				    const unsigned long *entries,
+				    unsigned int nr_entries)
 {
 	unsigned int limit;
 	unsigned int i;
@@ -1686,9 +1727,8 @@ trie_children_load_child(const struct stack_depot_trie_children *children,
  * a matching child. Return false and set @pos to the insertion index otherwise.
  * A NULL @children is treated as empty and returns @pos = 0.
  */
-static bool
-trie_children_find_slot(const struct stack_depot_trie_children *children,
-			unsigned long frame, unsigned int *pos)
+static bool trie_children_find_slot(const struct stack_depot_trie_children *children,
+				    unsigned long frame, unsigned int *pos)
 {
 	unsigned int left = 0;
 	unsigned int right;
@@ -1730,9 +1770,8 @@ trie_children_find_slot(const struct stack_depot_trie_children *children,
  * initialized to %NULL. The allocator must already have set the
  * capacity of @new.
  */
-static void
-trie_children_init(const struct stack_depot_trie_children *old,
-		   struct stack_depot_trie_children *new)
+static void trie_children_init(const struct stack_depot_trie_children *old,
+			       struct stack_depot_trie_children *new)
 {
 	unsigned int nr_old;
 	unsigned int i;
@@ -1768,31 +1807,30 @@ static void trie_children_insert(struct stack_depot_trie_children *children,
 	children->nr_children++;
 }
 
-static void
-trie_children_replace_at(const struct stack_depot_trie_children *old_children,
-			 const struct stack_depot_trie_node *new_child,
-			 struct stack_depot_trie_children *new_children,
-			 unsigned int pos)
-{
-	trie_children_init(old_children, new_children);
-	RCU_INIT_POINTER(new_children->nodes[pos], new_child);
-}
-
+/**
+ * trie_reparent_children() - Reparent children before node retirement
+ * @parent: Replacement node that references the reused children
+ *
+ * Use this when replacing a node while retaining its children and
+ * descendant subtrees. The direct children still point back to the node
+ * being replaced, so update their parent links before publishing the
+ * replacement topology and queuing the old node for RCU retirement.
+ *
+ * Lockless fetches may observe the new parent before the replacement is
+ * published. This is safe because the old and new parent chains contain
+ * the same frames and both remain RCU-live during the transition.
+ */
 static void trie_reparent_children(struct stack_depot_trie_node *parent)
 {
 	const struct stack_depot_trie_children *children;
 	unsigned int i;
 
+	lockdep_assert_held(&stack_depot_trie_writer_lock);
+
 	children = trie_load_children(&parent->children);
 	if (!children)
 		return;
-	/*
-	 * Replacement children reuse unchanged descendant subtrees. Repoint
-	 * their parent links before retiring the old parent so fetch never
-	 * follows a freed node. Lockless fetches may see the new parent before
-	 * structural publication. The old and new parent chains contain the
-	 * same frames and remain RCU-live.
-	 */
+
 	for (i = 0; i < children->nr_children; i++) {
 		struct stack_depot_trie_node *child;
 
@@ -1914,13 +1952,12 @@ stack_depot_trie_lookup(const unsigned long *entries, unsigned int nr_entries)
 	return NULL;
 }
 
-static u32
-trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
-		 struct stack_depot_trie_node *parent,
-		 const struct stack_depot_trie_children *children,
-		 unsigned int pos, const unsigned long *entries,
-		 unsigned int nr_entries, void **pool_prealloc,
-		 struct stack_depot_trie_side_prealloc *side_prealloc)
+static u32 trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
+			    struct stack_depot_trie_node *parent,
+			    const struct stack_depot_trie_children *children,
+			    unsigned int pos, const unsigned long *entries,
+			    unsigned int nr_entries, void **pool_prealloc,
+			    struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_children *new_children;
 	const struct stack_depot_trie_node *path_root;
@@ -1954,7 +1991,7 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 	if (!path_root)
 		goto err_release;
 
-	trie_side_table_publish_new_node(new_stack_id, node);
+	trie_side_table_publish(node, new_stack_id);
 
 	trie_children_init(children, new_children);
 	trie_children_insert(new_children, path_root, pos);
@@ -1980,14 +2017,13 @@ err_release:
 	return 0;
 }
 
-static u32
-trie_split_child(const struct stack_depot_trie_children __rcu **slot,
-		 const struct stack_depot_trie_children *children,
-		 const struct stack_depot_trie_node *child,
-		 unsigned int pos, unsigned int matched,
-		 const unsigned long *entries, unsigned int nr_entries,
-		 void **pool_prealloc,
-		 struct stack_depot_trie_side_prealloc *side_prealloc)
+static u32 trie_split_child(const struct stack_depot_trie_children __rcu **slot,
+			    const struct stack_depot_trie_children *children,
+			    const struct stack_depot_trie_node *child,
+			    unsigned int pos, unsigned int matched,
+			    const unsigned long *entries, unsigned int nr_entries,
+			    void **pool_prealloc,
+			    struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_children *prefix_children = NULL;
 	struct stack_depot_trie_children *new_children = NULL;
@@ -2083,9 +2119,17 @@ trie_split_child(const struct stack_depot_trie_children __rcu **slot,
 	RCU_INIT_POINTER(old_suffix->children, trie_load_children(&child->children));
 	RCU_INIT_POINTER(split_prefix->children, prefix_children);
 
-	trie_side_table_publish_split_nodes(child->stack_id, old_suffix,
-					    new_stack_id, new_node);
-	trie_children_replace_at(children, split_prefix, new_children, pos);
+	if (child->stack_id)
+		trie_side_table_publish(old_suffix, child->stack_id);
+	trie_side_table_publish(new_node, new_stack_id);
+
+	/*
+	 * Copy the current children into their replacement container, then
+	 * store split_prefix at the position previously occupied by child.
+	 */
+	trie_children_init(children, new_children);
+	RCU_INIT_POINTER(new_children->nodes[pos], split_prefix);
+
 	trie_reparent_children(old_suffix);
 	rcu_assign_pointer(*slot, new_children);
 	trie_retire_children_with_node(children, child);
@@ -2106,12 +2150,11 @@ err_release:
 	return 0;
 }
 
-static u32
-trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
-			 const struct stack_depot_trie_children *children,
-			 const struct stack_depot_trie_node *child,
-			 unsigned int pos, void **pool_prealloc,
-			 struct stack_depot_trie_side_prealloc *side_prealloc)
+static u32 trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
+			      const struct stack_depot_trie_children *children,
+			      const struct stack_depot_trie_node *child,
+			      unsigned int pos, void **pool_prealloc,
+			      struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	struct stack_depot_trie_children *new_children;
 	struct stack_depot_trie_node *promoted_node;
@@ -2141,8 +2184,11 @@ trie_promote_child(const struct stack_depot_trie_children __rcu **slot,
 
 	memcpy(promoted_node, child, node_size);
 	promoted_node->stack_id = new_stack_id;
-	trie_side_table_publish_new_node(new_stack_id, promoted_node);
-	trie_children_replace_at(children, promoted_node, new_children, pos);
+	trie_side_table_publish(promoted_node, new_stack_id);
+
+	trie_children_init(children, new_children);
+	RCU_INIT_POINTER(new_children->nodes[pos], promoted_node);
+
 	trie_reparent_children(promoted_node);
 	rcu_assign_pointer(*slot, new_children);
 	trie_retire_children_with_node(children, child);
@@ -2157,11 +2203,10 @@ out_unlock:
 	return 0;
 }
 
-static u32
-stack_depot_trie_insert(const unsigned long *entries,
-			       unsigned int nr_entries,
-			       void **pool_prealloc,
-			       struct stack_depot_trie_side_prealloc *side_prealloc)
+static u32 stack_depot_trie_insert(const unsigned long *entries,
+				   unsigned int nr_entries,
+				   void **pool_prealloc,
+				   struct stack_depot_trie_side_prealloc *side_prealloc)
 {
 	const struct stack_depot_trie_children *children;
 	const struct stack_depot_trie_children __rcu **slot =
@@ -2217,10 +2262,9 @@ stack_depot_trie_insert(const unsigned long *entries,
 	return stack_id;
 }
 
-static unsigned int
-trie_fetch_into(const struct stack_depot_trie_node *node,
-		unsigned long *entries,
-		unsigned int max_entries)
+static unsigned int trie_fetch_into(const struct stack_depot_trie_node *node,
+				    unsigned long *entries,
+				    unsigned int max_entries)
 {
 	const struct stack_depot_trie_node *cur;
 	unsigned int total;
@@ -2245,10 +2289,9 @@ trie_fetch_into(const struct stack_depot_trie_node *node,
 	return total;
 }
 
-static unsigned int
-trie_fetch_handle_into(depot_stack_handle_t handle,
-		       unsigned long *entries,
-		       unsigned int max_entries)
+static unsigned int trie_fetch_handle_into(depot_stack_handle_t handle,
+					   unsigned long *entries,
+					   unsigned int max_entries)
 {
 	const struct stack_depot_trie_node *node;
 	u32 stack_id;
