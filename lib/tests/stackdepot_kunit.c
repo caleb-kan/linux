@@ -253,8 +253,10 @@ static void stackdepot_trie_topology_roundtrip(struct kunit *test)
 		{ 0x301000UL, 0x302000UL },
 		{ 0x301000UL, 0x302000UL, 0x303000UL },
 		{ 0x301000UL, 0x304000UL },
+		{ 0x401000UL, 0x402000UL, 0x403000UL },
+		{ 0x401000UL, 0x402000UL },
 	};
-	unsigned int nr_entries[] = { 2, 2, 1, 3, 2, 2, 2, 2, 2, 3, 2 };
+	unsigned int nr_entries[] = { 2, 2, 1, 3, 2, 2, 2, 2, 2, 3, 2, 3, 2 };
 	depot_stack_handle_t handles[ARRAY_SIZE(stacks)];
 	unsigned long fetched[ARRAY_SIZE(stacks[0])];
 	u32 pool_index_plus_1;
@@ -281,6 +283,9 @@ static void stackdepot_trie_topology_roundtrip(struct kunit *test)
 				nr_entries[i]);
 		KUNIT_EXPECT_MEMEQ(test, fetched, stacks[i],
 				   nr_entries[i] * sizeof(fetched[0]));
+		KUNIT_EXPECT_EQ(test,
+				stack_depot_save(stacks[i], nr_entries[i], GFP_KERNEL),
+				handles[i]);
 	}
 }
 
