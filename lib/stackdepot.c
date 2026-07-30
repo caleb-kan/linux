@@ -2157,13 +2157,6 @@ out_unlock:
 	return 0;
 }
 
-static u32 trie_finish_insert(u32 stack_id)
-{
-	if (stack_id)
-		trie_side_table_last_stack_id = stack_id;
-	return stack_id;
-}
-
 static u32
 stack_depot_trie_insert(const unsigned long *entries,
 			       unsigned int nr_entries,
@@ -2218,7 +2211,10 @@ stack_depot_trie_insert(const unsigned long *entries,
 		nr_entries -= matched;
 	}
 
-	return trie_finish_insert(stack_id);
+	if (stack_id)
+		trie_side_table_last_stack_id = stack_id;
+
+	return stack_id;
 }
 
 static unsigned int
