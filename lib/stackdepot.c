@@ -536,6 +536,7 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 	if (pool->free_slots < nr_slots)
 		return STACK_DEPOT_TRIE_POOL_SLOTS;
 
+	/* A free run can cross any previous allocation position. */
 	for (slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
 	     slot < STACK_DEPOT_TRIE_POOL_SLOTS; slot++) {
 		if (pool->used[slot / BITS_PER_LONG] &
@@ -705,9 +706,10 @@ trie_find_handle(const unsigned long *entries, unsigned int nr_entries)
 /*
  * Publish only after the node and its path are fully initialized and all
  * fallible allocation is complete. Publication commits the path, so it cannot
- * then be rolled back. The side-table mapping must precede the trie slot that
- * makes a new stack ID reachable from lookup. Published storage remains valid
- * until RCU retirement; only descendant parent links may change meanwhile.
+ * then be rolled back. Side-table mappings must precede trie topology
+ * publication that makes new or remapped nodes reachable from lookup.
+ * Published storage remains valid until RCU retirement; only descendant parent
+ * links may change meanwhile.
  */
 static void trie_side_table_publish(const struct stack_depot_trie_node *node)
 {
@@ -964,7 +966,7 @@ static bool depot_init_pool(void **prealloc)
 	 * NULL; do not reset to NULL if we have reached the maximum number of
 	 * pools.
 	 */
-	if (pools_num < stack_max_pools)
+	if (pools_num + 1 < stack_max_pools)
 		WRITE_ONCE(new_pool, NULL);
 	else
 		WRITE_ONCE(new_pool, STACK_DEPOT_POISON);
