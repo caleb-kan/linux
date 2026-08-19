@@ -74,10 +74,13 @@ static void stackdepot_trie_max_path_roundtrip(struct kunit *test)
 
 static void stackdepot_save_flags_public(struct kunit *test)
 {
+	union handle_parts parts;
 	unsigned long entries[] = { 0x501000UL, 0x502000UL, 0x503000UL };
 	unsigned long get_entries[] = { 0x601000UL, 0x602000UL };
 	unsigned long missing_entries[] = { 0x701000UL, 0x702000UL };
+	unsigned long blocking_entries[] = { 0x711000UL, 0x712000UL };
 	unsigned long fetched[ARRAY_SIZE(entries)] = {};
+	depot_stack_handle_t blocking_handle;
 	depot_stack_handle_t noalloc_handle;
 	depot_stack_handle_t overlong_handle;
 	depot_stack_handle_t plain_handle;
@@ -85,6 +88,7 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	depot_stack_handle_t again;
 	depot_stack_handle_t extra;
 	gfp_t no_spin = GFP_NOWAIT & ~__GFP_RECLAIM;
+	u32 pool_index_plus_1;
 	unsigned long *overlong_fetched;
 	unsigned long *overlong_entries;
 	unsigned int overlong_nr = CONFIG_STACKDEPOT_MAX_FRAMES + 1;
@@ -114,13 +118,44 @@ static void stackdepot_save_flags_public(struct kunit *test)
 
 	noalloc_handle = stack_depot_save_flags(entries, ARRAY_SIZE(entries), no_spin, 0);
 	KUNIT_EXPECT_EQ(test, noalloc_handle, plain_handle);
+	noalloc_handle = stack_depot_save_flags(missing_entries,
+						ARRAY_SIZE(missing_entries),
+						no_spin, 0);
+	KUNIT_ASSERT_NE(test, noalloc_handle, (depot_stack_handle_t)0);
 	if (expected_trie_pool_limit >= 0) {
-		noalloc_handle =
+		parts.handle = noalloc_handle;
+		pool_index_plus_1 = parts.pool_index_plus_1;
+		KUNIT_EXPECT_GT(test, pool_index_plus_1,
+				(u32)expected_trie_pool_limit);
+	}
+	nr_entries = stack_depot_fetch_into(noalloc_handle, fetched,
+					    ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries,
+			(unsigned int)ARRAY_SIZE(missing_entries));
+	KUNIT_EXPECT_MEMEQ(test, fetched, missing_entries, sizeof(missing_entries));
+	KUNIT_EXPECT_EQ(test,
 			stack_depot_save_flags(missing_entries,
 					       ARRAY_SIZE(missing_entries),
-					       no_spin, 0);
-		KUNIT_EXPECT_EQ(test, noalloc_handle, (depot_stack_handle_t)0);
+					       no_spin, 0),
+			noalloc_handle);
+
+	blocking_handle = stack_depot_save_flags(blocking_entries,
+						 ARRAY_SIZE(blocking_entries),
+						 GFP_KERNEL, 0);
+	KUNIT_ASSERT_NE(test, blocking_handle, (depot_stack_handle_t)0);
+	if (expected_trie_pool_limit >= 0) {
+		parts.handle = blocking_handle;
+		pool_index_plus_1 = parts.pool_index_plus_1;
+		KUNIT_EXPECT_GT(test, pool_index_plus_1,
+				(u32)expected_trie_pool_limit);
 	}
+	memset(fetched, 0, sizeof(fetched));
+	nr_entries = stack_depot_fetch_into(blocking_handle, fetched,
+					    ARRAY_SIZE(fetched));
+	KUNIT_EXPECT_EQ(test, nr_entries,
+			(unsigned int)ARRAY_SIZE(blocking_entries));
+	KUNIT_EXPECT_MEMEQ(test, fetched, blocking_entries,
+			   sizeof(blocking_entries));
 
 	get_handle = stack_depot_save_flags(get_entries, ARRAY_SIZE(get_entries),
 					    GFP_KERNEL,
@@ -286,9 +321,11 @@ static void stackdepot_fetch_into_rejects_missing_or_short_stack(struct kunit *t
 	KUNIT_EXPECT_MEMEQ(test, fetched, expected, sizeof(expected));
 }
 
-static void stackdepot_trie_topology_roundtrip(struct kunit *test)
+static void stackdepot_trie_topology_roundtrip(struct kunit *test,
+					       bool constrained)
 {
 	union handle_parts parts;
+	unsigned long seed[] = { 0x191000UL, 0x192000UL };
 	unsigned long stacks[][3] = {
 		{ 0x201000UL, 0x202000UL },
 		{ 0x201000UL, 0x203000UL },
@@ -306,16 +343,31 @@ static void stackdepot_trie_topology_roundtrip(struct kunit *test)
 	};
 	unsigned int nr_entries[] = { 2, 2, 1, 3, 2, 2, 2, 2, 2, 3, 2, 3, 2 };
 	depot_stack_handle_t handles[ARRAY_SIZE(stacks)];
+	depot_stack_handle_t seed_handle;
 	unsigned long fetched[ARRAY_SIZE(stacks[0])];
+	gfp_t no_spin = GFP_NOWAIT & ~__GFP_RECLAIM;
 	u32 pool_index_plus_1;
+	unsigned int j;
 	unsigned int i;
 
 	if (expected_trie_pool_limit < 0)
 		kunit_skip(test, "trie pool limit was not provided");
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
+	if (constrained) {
+		seed_handle = stack_depot_save(seed, ARRAY_SIZE(seed), GFP_KERNEL);
+		KUNIT_ASSERT_NE(test, seed_handle, (depot_stack_handle_t)0);
+		for (i = 0; i < ARRAY_SIZE(stacks); i++)
+			for (j = 0; j < nr_entries[i]; j++)
+				stacks[i][j] += 0x10000000UL;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(stacks); i++) {
-		handles[i] = stack_depot_save(stacks[i], nr_entries[i], GFP_KERNEL);
+		if (constrained)
+			handles[i] = stack_depot_save_flags(stacks[i], nr_entries[i],
+							    no_spin, 0);
+		else
+			handles[i] = stack_depot_save(stacks[i], nr_entries[i],
+						      GFP_KERNEL);
 		KUNIT_ASSERT_NE(test, handles[i], (depot_stack_handle_t)0);
 	}
 	parts.handle = handles[0];
@@ -331,10 +383,27 @@ static void stackdepot_trie_topology_roundtrip(struct kunit *test)
 				nr_entries[i]);
 		KUNIT_EXPECT_MEMEQ(test, fetched, stacks[i],
 				   nr_entries[i] * sizeof(fetched[0]));
-		KUNIT_EXPECT_EQ(test,
-				stack_depot_save(stacks[i], nr_entries[i], GFP_KERNEL),
-				handles[i]);
+		if (constrained)
+			KUNIT_EXPECT_EQ(test,
+					stack_depot_save_flags(stacks[i], nr_entries[i],
+							       no_spin, 0),
+					handles[i]);
+		else
+			KUNIT_EXPECT_EQ(test,
+					stack_depot_save(stacks[i], nr_entries[i],
+							 GFP_KERNEL),
+					handles[i]);
 	}
+}
+
+static void stackdepot_trie_topology_allocating(struct kunit *test)
+{
+	stackdepot_trie_topology_roundtrip(test, false);
+}
+
+static void stackdepot_trie_topology_constrained(struct kunit *test)
+{
+	stackdepot_trie_topology_roundtrip(test, true);
 }
 
 static void stackdepot_frame_storage_roundtrip(struct kunit *test)
@@ -449,7 +518,8 @@ static struct kunit_case stackdepot_test_cases[] = {
 	KUNIT_CASE(stackdepot_countable_public),
 	KUNIT_CASE(stackdepot_fetch_into_roundtrip),
 	KUNIT_CASE(stackdepot_fetch_into_rejects_missing_or_short_stack),
-	KUNIT_CASE(stackdepot_trie_topology_roundtrip),
+	KUNIT_CASE(stackdepot_trie_topology_allocating),
+	KUNIT_CASE(stackdepot_trie_topology_constrained),
 	KUNIT_CASE(stackdepot_frame_storage_roundtrip),
 	KUNIT_CASE(stackdepot_frame_raw_fallback),
 #if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
