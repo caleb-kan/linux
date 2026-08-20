@@ -30,6 +30,7 @@
 #include <linux/mm.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/percpu.h>
 #include <linux/poison.h>
 #include <linux/printk.h>
 #include <linux/rculist.h>
@@ -182,6 +183,24 @@ static DEFINE_STATIC_KEY_FALSE(stack_depot_trie_enabled);
 static const struct stack_depot_trie_children __rcu *stack_depot_trie_root;
 static DEFINE_RAW_SPINLOCK(stack_depot_trie_writer_lock);
 static bool stack_depot_trie_requested;
+
+/* Temporary counters for saves when page allocation is unavailable. */
+struct stack_depot_experiment_outcomes {
+	u64 hit;
+	u64 miss_success;
+	u64 miss_failure;
+};
+
+struct stack_depot_experiment_counters {
+	struct stack_depot_experiment_outcomes trie_non_nmi;
+	u64 trie_nmi_hit;
+	u64 trie_nmi_miss;
+	struct stack_depot_experiment_outcomes hash_non_nmi;
+	struct stack_depot_experiment_outcomes hash_nmi;
+};
+
+static DEFINE_PER_CPU(struct stack_depot_experiment_counters,
+			      stack_depot_experiment);
 
 module_param_named(trie_enabled, stack_depot_trie_requested, bool, 0);
 MODULE_PARM_DESC(trie_enabled, "Enable stack depot trie storage at boot");
@@ -1351,14 +1370,19 @@ stack_depot_trie_save_constrained(unsigned long *entries,
 	u32 stack_id;
 
 	handle = trie_find_handle(entries, nr_entries);
-	if (handle)
+	if (handle) {
+		this_cpu_inc(stack_depot_experiment.trie_non_nmi.hit);
 		return handle;
+	}
 
 	if (trylock) {
-		if (!raw_spin_trylock_irqsave(&stack_depot_trie_writer_lock, flags))
+		if (!raw_spin_trylock_irqsave(&stack_depot_trie_writer_lock, flags)) {
+			this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
 			return 0;
+		}
 		if (!raw_spin_trylock(&pool_lock)) {
 			raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
+			this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
 			return 0;
 		}
 	} else {
@@ -1373,7 +1397,13 @@ stack_depot_trie_save_constrained(unsigned long *entries,
 	raw_spin_unlock(&pool_lock);
 	raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
 
-	return stack_id ? trie_handle(stack_id) : 0;
+	if (stack_id) {
+		this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_success);
+		return trie_handle(stack_id);
+	}
+
+	this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
+	return 0;
 }
 
 depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
@@ -1388,6 +1418,9 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	void *prealloc = NULL;
 	bool allow_spin = gfpflags_allow_spinning(alloc_flags);
 	bool can_alloc = (depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC) && allow_spin;
+	bool hash_no_page_alloc = false;
+	bool hash_lookup_miss = false;
+	bool nmi_context = in_nmi();
 	unsigned long flags;
 	u32 hash;
 
@@ -1414,9 +1447,14 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	    static_branch_unlikely(&stack_depot_trie_enabled)) {
 		if (nr_entries > CONFIG_STACKDEPOT_MAX_FRAMES)
 			nr_entries = CONFIG_STACKDEPOT_MAX_FRAMES;
-		if (in_nmi()) {
+		if (nmi_context) {
 			WARN_ON_ONCE(can_alloc);
-			return trie_find_handle(entries, nr_entries);
+			handle = trie_find_handle(entries, nr_entries);
+			if (handle)
+				this_cpu_inc(stack_depot_experiment.trie_nmi_hit);
+			else
+				this_cpu_inc(stack_depot_experiment.trie_nmi_miss);
+			return handle;
 		}
 		if (!can_alloc)
 			return stack_depot_trie_save_constrained(entries, nr_entries,
@@ -1424,13 +1462,24 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		return stack_depot_trie_save(entries, nr_entries, alloc_flags);
 	}
 
+	hash_no_page_alloc = !can_alloc &&
+		!(depot_flags & (STACK_DEPOT_FLAG_GET |
+				  STACK_DEPOT_FLAG_COUNTABLE));
 	hash = hash_stack(entries, nr_entries);
 	bucket = &stack_table[hash & stack_hash_mask];
 
 	/* Fast path: look the stack trace up without locking. */
 	found = find_stack(bucket, entries, nr_entries, hash, depot_flags);
-	if (found)
+	if (found) {
+		if (hash_no_page_alloc) {
+			if (nmi_context)
+				this_cpu_inc(stack_depot_experiment.hash_nmi.hit);
+			else
+				this_cpu_inc(stack_depot_experiment.hash_non_nmi.hit);
+		}
 		goto exit;
+	}
+	hash_lookup_miss = hash_no_page_alloc;
 
 	/*
 	 * Allocate memory for a new pool if required now:
@@ -1443,7 +1492,7 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 			prealloc = page_address(page);
 	}
 
-	if (in_nmi() || !allow_spin) {
+	if (nmi_context || !allow_spin) {
 		/* We can never allocate in NMI context. */
 		WARN_ON_ONCE(can_alloc);
 		/* Best effort; bail if we fail to take the lock. */
@@ -1482,6 +1531,19 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	printk_deferred_exit();
 	raw_spin_unlock_irqrestore(&pool_lock, flags);
 exit:
+	if (hash_lookup_miss) {
+		if (nmi_context) {
+			if (found)
+				this_cpu_inc(stack_depot_experiment.hash_nmi.miss_success);
+			else
+				this_cpu_inc(stack_depot_experiment.hash_nmi.miss_failure);
+		} else {
+			if (found)
+				this_cpu_inc(stack_depot_experiment.hash_non_nmi.miss_success);
+			else
+				this_cpu_inc(stack_depot_experiment.hash_non_nmi.miss_failure);
+		}
+	}
 	if (prealloc) {
 		/* Stack depot didn't use this memory, free it. */
 		if (!allow_spin)
