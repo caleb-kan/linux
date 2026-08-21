@@ -191,16 +191,96 @@ struct stack_depot_experiment_outcomes {
 	u64 miss_failure;
 };
 
+struct stack_depot_experiment_trie_failures {
+	u64 writer_lock_busy;
+	u64 writer_owner;
+	u64 writer_other;
+	u64 writer_relookup;
+	u64 writer_alloc;
+	u64 writer_noalloc;
+	u64 writer_unknown;
+	u64 writer_pool;
+	u64 writer_drain;
+	u64 writer_ins;
+	u64 pool_lock_busy;
+	u64 stack_id_exhausted;
+	u64 side_dir_missing;
+	u64 side_chunk;
+	u64 dir_cache;
+	u64 chunk_cache;
+	u64 append_too_large;
+	u64 object_too_large;
+	u64 pool_limit;
+	u64 no_new_pool;
+	u64 other;
+	u64 no_new_pool_after_pool_consumed;
+	u64 no_new_pool_existing_slots_sufficient;
+	u64 no_new_pool_pending_ready;
+	u64 no_new_pool_pending_waiting;
+	u64 no_new_pool_pending_empty;
+};
+
+struct stack_depot_experiment_trie_operations {
+	u64 append_try;
+	u64 append_fail;
+	u64 split_try;
+	u64 split_fail;
+	u64 promote_try;
+	u64 promote_fail;
+	u64 dup;
+};
+
+struct stack_depot_experiment_hash_failures {
+	u64 pool_lock_busy;
+	u64 pool_limit;
+	u64 no_new_pool;
+	u64 other;
+};
+
 struct stack_depot_experiment_counters {
 	struct stack_depot_experiment_outcomes trie_non_nmi;
+	struct stack_depot_experiment_trie_failures trie_fail;
+	struct stack_depot_experiment_trie_operations trie_ops;
 	u64 trie_nmi_hit;
 	u64 trie_nmi_miss;
 	struct stack_depot_experiment_outcomes hash_non_nmi;
+	struct stack_depot_experiment_hash_failures hash_fail;
 	struct stack_depot_experiment_outcomes hash_nmi;
 };
 
 static DEFINE_PER_CPU(struct stack_depot_experiment_counters,
 			      stack_depot_experiment);
+static DEFINE_PER_CPU(bool, stack_depot_experiment_trie_insert_active);
+static DEFINE_PER_CPU(bool, stack_depot_experiment_trie_failure_recorded);
+static DEFINE_PER_CPU(unsigned int, stack_depot_experiment_trie_start_pools);
+static struct task_struct *stack_depot_experiment_trie_writer_owner;
+
+enum stack_depot_experiment_writer {
+	STACK_DEPOT_EXPERIMENT_WRITER_NONE,
+	STACK_DEPOT_EXPERIMENT_WRITER_ALLOCATING,
+	STACK_DEPOT_EXPERIMENT_WRITER_CONSTRAINED,
+};
+
+static unsigned int stack_depot_experiment_trie_writer_kind;
+
+enum stack_depot_experiment_writer_phase {
+	STACK_DEPOT_EXPERIMENT_PHASE_NONE,
+	STACK_DEPOT_EXPERIMENT_PHASE_WAIT_POOL,
+	STACK_DEPOT_EXPERIMENT_PHASE_DRAIN,
+	STACK_DEPOT_EXPERIMENT_PHASE_INSERT,
+};
+
+static unsigned int stack_depot_experiment_trie_writer_phase;
+
+static bool stack_depot_experiment_trie_active(void)
+{
+	return this_cpu_read(stack_depot_experiment_trie_insert_active);
+}
+
+static void stack_depot_experiment_trie_mark_failure(void)
+{
+	this_cpu_write(stack_depot_experiment_trie_failure_recorded, true);
+}
 
 module_param_named(trie_enabled, stack_depot_trie_requested, bool, 0);
 MODULE_PARM_DESC(trie_enabled, "Enable stack depot trie storage at boot");
@@ -376,15 +456,28 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
 
 	id = trie_side_table_last_stack_id + 1;
-	if (id > trie_max_stack_id())
+	if (id > trie_max_stack_id()) {
+		if (stack_depot_experiment_trie_active()) {
+			this_cpu_inc(stack_depot_experiment.trie_fail.stack_id_exhausted);
+			stack_depot_experiment_trie_mark_failure();
+		}
 		return 0;
+	}
 
 	root_vec = trie_side_table_root;
 	root = trie_side_table_root_index(id);
 	dir = trie_side_table_load_dir(root);
 	if (!dir) {
-		if (!prealloc->dir || !prealloc->chunk)
+		if (!prealloc->dir || !prealloc->chunk) {
+			if (stack_depot_experiment_trie_active()) {
+				this_cpu_inc(stack_depot_experiment.trie_fail.side_dir_missing);
+				if (READ_ONCE(trie_side_table_cache.dir) &&
+				    READ_ONCE(trie_side_table_cache.chunk))
+					this_cpu_inc(stack_depot_experiment.trie_fail.dir_cache);
+				stack_depot_experiment_trie_mark_failure();
+			}
 			return 0;
+		}
 		dir = prealloc->dir;
 		prealloc->dir = NULL;
 		/* Publish the zeroed directory before readers can load it locklessly. */
@@ -394,8 +487,15 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	idx = trie_side_table_dir_index(id);
 	chunk = trie_side_table_dir_load_chunk(dir, idx);
 	if (!chunk) {
-		if (!prealloc->chunk)
+		if (!prealloc->chunk) {
+			if (stack_depot_experiment_trie_active()) {
+				this_cpu_inc(stack_depot_experiment.trie_fail.side_chunk);
+				if (READ_ONCE(trie_side_table_cache.chunk))
+					this_cpu_inc(stack_depot_experiment.trie_fail.chunk_cache);
+				stack_depot_experiment_trie_mark_failure();
+			}
 			return 0;
+		}
 		chunk = prealloc->chunk;
 		prealloc->chunk = NULL;
 		rcu_assign_pointer(dir->chunks[idx], chunk);
@@ -579,26 +679,75 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 	return STACK_DEPOT_TRIE_POOL_SLOTS;
 }
 
+static void stack_depot_experiment_no_pool(unsigned int nr_slots,
+					   unsigned int total_free_slots)
+{
+	struct stack_depot_experiment_counters *experiment;
+	struct stack_depot_trie_retired_children *retired;
+
+	lockdep_assert_held(&pool_lock);
+	lockdep_assert_held(&stack_depot_trie_writer_lock);
+
+	experiment = this_cpu_ptr(&stack_depot_experiment);
+	experiment->trie_fail.no_new_pool++;
+	if (total_free_slots >= nr_slots)
+		experiment->trie_fail.no_new_pool_existing_slots_sufficient++;
+	if (pools_num > this_cpu_read(stack_depot_experiment_trie_start_pools))
+		experiment->trie_fail.no_new_pool_after_pool_consumed++;
+
+	if (list_empty(&pending_trie_children)) {
+		experiment->trie_fail.no_new_pool_pending_empty++;
+	} else {
+		retired = list_first_entry(&pending_trie_children,
+					   struct stack_depot_trie_retired_children,
+					   list);
+		if (poll_state_synchronize_rcu(retired->rcu_state))
+			experiment->trie_fail.no_new_pool_pending_ready++;
+		else
+			experiment->trie_fail.no_new_pool_pending_waiting++;
+	}
+	stack_depot_experiment_trie_mark_failure();
+}
+
 /* Allocate at least @size bytes from one contiguous trie-pool slot run. */
 static void *trie_pool_alloc(size_t size, void **prealloc)
 {
 	struct stack_depot_trie_pool *pool;
+	unsigned int total_free_slots = 0;
 	unsigned int nr_slots;
 	unsigned int slot;
+	bool experiment_active;
 
 	lockdep_assert_held(&pool_lock);
 
-	if (size > STACK_DEPOT_TRIE_POOL_USABLE_SIZE)
+	if (size > STACK_DEPOT_TRIE_POOL_USABLE_SIZE) {
+		if (stack_depot_experiment_trie_active()) {
+			this_cpu_inc(stack_depot_experiment.trie_fail.object_too_large);
+			stack_depot_experiment_trie_mark_failure();
+		}
 		return NULL;
+	}
 	nr_slots = DIV_ROUND_UP(size, STACK_DEPOT_TRIE_SLOT_SIZE);
+	experiment_active = stack_depot_experiment_trie_active();
 	list_for_each_entry_reverse(pool, &stack_depot_trie_pools, list) {
+		if (experiment_active)
+			total_free_slots += pool->free_slots;
 		slot = trie_pool_reserve_slots(pool, nr_slots);
 		if (slot != STACK_DEPOT_TRIE_POOL_SLOTS)
 			return (char *)pool + slot * STACK_DEPOT_TRIE_SLOT_SIZE;
 	}
 
-	if (!depot_init_pool(prealloc))
+	if (!depot_init_pool(prealloc)) {
+		if (experiment_active) {
+			if (pools_num >= stack_max_pools) {
+				this_cpu_inc(stack_depot_experiment.trie_fail.pool_limit);
+				stack_depot_experiment_trie_mark_failure();
+			} else {
+				stack_depot_experiment_no_pool(nr_slots, total_free_slots);
+			}
+		}
 		return NULL;
+	}
 	pool = stack_pools[pools_num - 1];
 	/* Keep hash records out of this bitmap-owned pool. */
 	pool_offset = DEPOT_POOL_SIZE;
@@ -1338,15 +1487,29 @@ stack_depot_trie_save(unsigned long *entries, unsigned int nr_entries,
 		}
 
 		raw_spin_lock_irqsave(&stack_depot_trie_writer_lock, flags);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_owner, current);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+			   STACK_DEPOT_EXPERIMENT_WRITER_ALLOCATING);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_WAIT_POOL);
 		raw_spin_lock(&pool_lock);
 		printk_deferred_enter();
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_DRAIN);
 		trie_drain_pending_children();
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_INSERT);
 		stack_id = stack_depot_trie_insert(entries, nr_entries,
 						   &pool_prealloc, &side_prealloc);
 		if (pool_prealloc)
 			depot_keep_new_pool(&pool_prealloc);
 		printk_deferred_exit();
 		raw_spin_unlock(&pool_lock);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_NONE);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+			   STACK_DEPOT_EXPERIMENT_WRITER_NONE);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_owner, NULL);
 		raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
 
 		if (pool_prealloc)
@@ -1367,6 +1530,7 @@ stack_depot_trie_save_constrained(unsigned long *entries,
 	void *pool_prealloc = NULL;
 	depot_stack_handle_t handle;
 	unsigned long flags;
+	bool failure_recorded;
 	u32 stack_id;
 
 	handle = trie_find_handle(entries, nr_entries);
@@ -1377,24 +1541,75 @@ stack_depot_trie_save_constrained(unsigned long *entries,
 
 	if (trylock) {
 		if (!raw_spin_trylock_irqsave(&stack_depot_trie_writer_lock, flags)) {
+			unsigned int writer_kind =
+				READ_ONCE(stack_depot_experiment_trie_writer_kind);
+			unsigned int writer_phase =
+				READ_ONCE(stack_depot_experiment_trie_writer_phase);
+
+			if (READ_ONCE(stack_depot_experiment_trie_writer_owner) == current)
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_owner);
+			else
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_other);
+			if (writer_kind == STACK_DEPOT_EXPERIMENT_WRITER_ALLOCATING) {
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_alloc);
+				if (writer_phase == STACK_DEPOT_EXPERIMENT_PHASE_WAIT_POOL)
+					this_cpu_inc(stack_depot_experiment.trie_fail.writer_pool);
+				else if (writer_phase == STACK_DEPOT_EXPERIMENT_PHASE_DRAIN)
+					this_cpu_inc(stack_depot_experiment.trie_fail.writer_drain);
+				else if (writer_phase == STACK_DEPOT_EXPERIMENT_PHASE_INSERT)
+					this_cpu_inc(stack_depot_experiment.trie_fail.writer_ins);
+			} else if (writer_kind == STACK_DEPOT_EXPERIMENT_WRITER_CONSTRAINED) {
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_noalloc);
+			} else {
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_unknown);
+			}
+			if (trie_find_handle(entries, nr_entries))
+				this_cpu_inc(stack_depot_experiment.trie_fail.writer_relookup);
+			this_cpu_inc(stack_depot_experiment.trie_fail.writer_lock_busy);
 			this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
 			return 0;
 		}
+		WRITE_ONCE(stack_depot_experiment_trie_writer_owner, current);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+			   STACK_DEPOT_EXPERIMENT_WRITER_CONSTRAINED);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_INSERT);
 		if (!raw_spin_trylock(&pool_lock)) {
+			WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+				   STACK_DEPOT_EXPERIMENT_PHASE_NONE);
+			WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+				   STACK_DEPOT_EXPERIMENT_WRITER_NONE);
+			WRITE_ONCE(stack_depot_experiment_trie_writer_owner, NULL);
 			raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
+			this_cpu_inc(stack_depot_experiment.trie_fail.pool_lock_busy);
 			this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
 			return 0;
 		}
 	} else {
 		raw_spin_lock_irqsave(&stack_depot_trie_writer_lock, flags);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_owner, current);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+			   STACK_DEPOT_EXPERIMENT_WRITER_CONSTRAINED);
+		WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+			   STACK_DEPOT_EXPERIMENT_PHASE_INSERT);
 		raw_spin_lock(&pool_lock);
 	}
 
 	printk_deferred_enter();
+	this_cpu_write(stack_depot_experiment_trie_failure_recorded, false);
+	this_cpu_write(stack_depot_experiment_trie_start_pools, pools_num);
+	this_cpu_write(stack_depot_experiment_trie_insert_active, true);
 	stack_id = stack_depot_trie_insert(entries, nr_entries, &pool_prealloc,
 					   &side_prealloc);
+	failure_recorded = this_cpu_read(stack_depot_experiment_trie_failure_recorded);
+	this_cpu_write(stack_depot_experiment_trie_insert_active, false);
 	printk_deferred_exit();
 	raw_spin_unlock(&pool_lock);
+	WRITE_ONCE(stack_depot_experiment_trie_writer_phase,
+		   STACK_DEPOT_EXPERIMENT_PHASE_NONE);
+	WRITE_ONCE(stack_depot_experiment_trie_writer_kind,
+		   STACK_DEPOT_EXPERIMENT_WRITER_NONE);
+	WRITE_ONCE(stack_depot_experiment_trie_writer_owner, NULL);
 	raw_spin_unlock_irqrestore(&stack_depot_trie_writer_lock, flags);
 
 	if (stack_id) {
@@ -1402,6 +1617,8 @@ stack_depot_trie_save_constrained(unsigned long *entries,
 		return trie_handle(stack_id);
 	}
 
+	if (!failure_recorded)
+		this_cpu_inc(stack_depot_experiment.trie_fail.other);
 	this_cpu_inc(stack_depot_experiment.trie_non_nmi.miss_failure);
 	return 0;
 }
@@ -1418,6 +1635,7 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 	void *prealloc = NULL;
 	bool allow_spin = gfpflags_allow_spinning(alloc_flags);
 	bool can_alloc = (depot_flags & STACK_DEPOT_FLAG_CAN_ALLOC) && allow_spin;
+	bool hash_failure_recorded = false;
 	bool hash_no_page_alloc = false;
 	bool hash_lookup_miss = false;
 	bool nmi_context = in_nmi();
@@ -1496,8 +1714,13 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 		/* We can never allocate in NMI context. */
 		WARN_ON_ONCE(can_alloc);
 		/* Best effort; bail if we fail to take the lock. */
-		if (!raw_spin_trylock_irqsave(&pool_lock, flags))
+		if (!raw_spin_trylock_irqsave(&pool_lock, flags)) {
+			if (hash_lookup_miss && !nmi_context) {
+				this_cpu_inc(stack_depot_experiment.hash_fail.pool_lock_busy);
+				hash_failure_recorded = true;
+			}
 			goto exit;
+		}
 	} else {
 		raw_spin_lock_irqsave(&pool_lock, flags);
 	}
@@ -1516,6 +1739,12 @@ depot_stack_handle_t stack_depot_save_flags(unsigned long *entries,
 			 */
 			list_add_rcu(&new->hash_list, bucket);
 			found = new;
+		} else if (hash_lookup_miss && !nmi_context) {
+			if (pools_num >= stack_max_pools)
+				this_cpu_inc(stack_depot_experiment.hash_fail.pool_limit);
+			else
+				this_cpu_inc(stack_depot_experiment.hash_fail.no_new_pool);
+			hash_failure_recorded = true;
 		}
 	}
 
@@ -1538,10 +1767,13 @@ exit:
 			else
 				this_cpu_inc(stack_depot_experiment.hash_nmi.miss_failure);
 		} else {
-			if (found)
+			if (found) {
 				this_cpu_inc(stack_depot_experiment.hash_non_nmi.miss_success);
-			else
+			} else {
+				if (!hash_failure_recorded)
+					this_cpu_inc(stack_depot_experiment.hash_fail.other);
 				this_cpu_inc(stack_depot_experiment.hash_non_nmi.miss_failure);
+			}
 		}
 	}
 	if (prealloc) {
@@ -1929,8 +2161,13 @@ trie_insert_path(const struct stack_depot_trie_children __rcu **slot,
 			children->nr_children < children->capacity;
 	}
 	if (!tail_append && trie_children_alloc_size(capacity) >
-	    STACK_DEPOT_TRIE_POOL_USABLE_SIZE)
+	    STACK_DEPOT_TRIE_POOL_USABLE_SIZE) {
+		if (stack_depot_experiment_trie_active()) {
+			this_cpu_inc(stack_depot_experiment.trie_fail.append_too_large);
+			stack_depot_experiment_trie_mark_failure();
+		}
 		return 0;
+	}
 
 	new_stack_id = trie_side_table_prepare_stack_slot(side_prealloc);
 	if (!new_stack_id)
@@ -2152,9 +2389,13 @@ stack_depot_trie_insert(const unsigned long *entries,
 		/* No matching child: attach the remaining path. */
 		if (!children ||
 		    !trie_children_find_position(children, entries[0], &pos)) {
+			if (stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.append_try);
 			stack_id = trie_insert_path(slot, parent, children, pos,
 						    entries, nr_entries, pool_prealloc,
 						    side_prealloc);
+			if (!stack_id && stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.append_fail);
 			break;
 		}
 
@@ -2162,18 +2403,29 @@ stack_depot_trie_insert(const unsigned long *entries,
 		matched = trie_node_match(child, entries, nr_entries);
 		/* A partial child match requires a prefix/suffix split. */
 		if (matched < child->run.nr_entries) {
+			if (stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.split_try);
 			stack_id = trie_split_child(slot, children, child, pos,
 						    matched, entries, nr_entries,
 						    pool_prealloc, side_prealloc);
+			if (!stack_id && stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.split_fail);
 			break;
 		}
 
 		/* The input ends here: reuse a stack node or promote an internal one. */
 		if (matched == nr_entries) {
-			if (child->stack_id)
+			if (child->stack_id) {
+				if (stack_depot_experiment_trie_active())
+					this_cpu_inc(stack_depot_experiment.trie_ops.dup);
 				return child->stack_id;
+			}
+			if (stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.promote_try);
 			stack_id = trie_promote_child(slot, children, child, pos,
 						      pool_prealloc, side_prealloc);
+			if (!stack_id && stack_depot_experiment_trie_active())
+				this_cpu_inc(stack_depot_experiment.trie_ops.promote_fail);
 			break;
 		}
 
