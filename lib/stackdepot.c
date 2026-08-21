@@ -274,7 +274,7 @@ static DEFINE_RAW_SPINLOCK(trie_side_table_cache_lock);
 static struct stack_depot_trie_side_prealloc trie_side_table_cache;
 static u32 trie_side_table_last_stack_id;
 
-/* Lock order: writer_lock -> pool_lock. The cache lock is never nested. */
+/* Lock order: writer_lock -> pool_lock -> side-table cache lock. */
 
 static inline size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
 {
@@ -344,6 +344,37 @@ trie_side_table_dir_load_chunk(struct stack_depot_trie_side_dir *dir,
 				     rcu_read_lock_sched_held());
 }
 
+/* Published capacity remains useful if insertion fails and needs no rollback. */
+static bool
+trie_side_table_try_take_cache(struct stack_depot_trie_side_prealloc *prealloc,
+			       bool need_dir)
+{
+	bool taken = false;
+
+	lockdep_assert_held(&stack_depot_trie_writer_lock);
+	lockdep_assert_held(&pool_lock);
+
+	if (!raw_spin_trylock(&trie_side_table_cache_lock))
+		return false;
+	if ((!prealloc->chunk && !trie_side_table_cache.chunk) ||
+	    (need_dir && !prealloc->dir && !trie_side_table_cache.dir))
+		goto out_unlock;
+
+	if (need_dir && !prealloc->dir) {
+		prealloc->dir = trie_side_table_cache.dir;
+		trie_side_table_cache.dir = NULL;
+	}
+	if (!prealloc->chunk) {
+		prealloc->chunk = trie_side_table_cache.chunk;
+		trie_side_table_cache.chunk = NULL;
+	}
+	taken = true;
+
+out_unlock:
+	raw_spin_unlock(&trie_side_table_cache_lock);
+	return taken;
+}
+
 static u32
 trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *prealloc)
 {
@@ -355,6 +386,7 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	u32 id;
 
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
+	lockdep_assert_held(&pool_lock);
 
 	id = trie_side_table_last_stack_id + 1;
 	if (id > trie_max_stack_id())
@@ -364,7 +396,8 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	root = trie_side_table_root_index(id);
 	dir = trie_side_table_load_dir(root);
 	if (!dir) {
-		if (!prealloc->dir || !prealloc->chunk)
+		if ((!prealloc->dir || !prealloc->chunk) &&
+		    !trie_side_table_try_take_cache(prealloc, true))
 			return 0;
 		dir = prealloc->dir;
 		prealloc->dir = NULL;
@@ -375,7 +408,8 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	idx = trie_side_table_dir_index(id);
 	chunk = trie_side_table_dir_load_chunk(dir, idx);
 	if (!chunk) {
-		if (!prealloc->chunk)
+		if (!prealloc->chunk &&
+		    !trie_side_table_try_take_cache(prealloc, false))
 			return 0;
 		chunk = prealloc->chunk;
 		prealloc->chunk = NULL;
