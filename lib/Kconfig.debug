@@ -2723,6 +2723,18 @@ config STACKDEPOT_KUNIT_TEST
 
 	  If unsure, say N.
 
+config STACKDEPOT_BENCHMARK
+	bool "Benchmark stack depot"
+	depends on STACKDEPOT && 64BIT
+	help
+	  Build a temporary benchmark for stack depot save and fetch operations.
+	  The benchmark is disabled by default and runs only when triggered through
+	  its module parameters. Persistent benchmark records consume stack depot
+	  capacity for the lifetime of the system, so collect each result from one
+	  benchmark invocation on a fresh boot.
+
+	  If unsure, say N.
+
 config SYSCTL_KUNIT_TEST
 	tristate "KUnit test for sysctl" if !KUNIT_ALL_TESTS
 	depends on KUNIT
