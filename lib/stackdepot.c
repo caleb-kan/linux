@@ -204,10 +204,13 @@ struct stack_depot_experiment_trie_failures {
 	u64 writer_ins;
 	u64 pool_lock_busy;
 	u64 stack_id_exhausted;
+	u64 side_cache_lock_busy;
 	u64 side_dir_missing;
 	u64 side_chunk;
 	u64 dir_cache;
 	u64 chunk_cache;
+	u64 dir_cache_taken;
+	u64 chunk_cache_taken;
 	u64 append_too_large;
 	u64 object_too_large;
 	u64 pool_limit;
@@ -373,7 +376,7 @@ static DEFINE_RAW_SPINLOCK(trie_side_table_cache_lock);
 static struct stack_depot_trie_side_prealloc trie_side_table_cache;
 static u32 trie_side_table_last_stack_id;
 
-/* Lock order: writer_lock -> pool_lock. The cache lock is never nested. */
+/* Lock order: writer_lock -> pool_lock -> side-table cache lock. */
 
 static inline size_t stack_depot_frame_run_entry_bytes(enum stack_depot_frame_mode mode)
 {
@@ -443,6 +446,53 @@ trie_side_table_dir_load_chunk(struct stack_depot_trie_side_dir *dir,
 				     rcu_read_lock_sched_held());
 }
 
+/* Published capacity remains useful if insertion fails and needs no rollback. */
+static bool
+trie_side_table_try_take_cache(struct stack_depot_trie_side_prealloc *prealloc,
+			       bool need_dir)
+{
+	bool take_chunk;
+	bool take_dir;
+	bool taken = false;
+
+	lockdep_assert_held(&stack_depot_trie_writer_lock);
+	lockdep_assert_held(&pool_lock);
+
+	if (!raw_spin_trylock(&trie_side_table_cache_lock)) {
+		if (stack_depot_experiment_trie_active()) {
+			this_cpu_inc(stack_depot_experiment.trie_fail.side_cache_lock_busy);
+			stack_depot_experiment_trie_mark_failure();
+		}
+		return false;
+	}
+
+	take_dir = need_dir && !prealloc->dir;
+	take_chunk = !prealloc->chunk;
+	if ((take_chunk && !trie_side_table_cache.chunk) ||
+	    (take_dir && !trie_side_table_cache.dir))
+		goto out_unlock;
+
+	if (take_dir) {
+		prealloc->dir = trie_side_table_cache.dir;
+		trie_side_table_cache.dir = NULL;
+	}
+	if (take_chunk) {
+		prealloc->chunk = trie_side_table_cache.chunk;
+		trie_side_table_cache.chunk = NULL;
+	}
+	if (stack_depot_experiment_trie_active()) {
+		if (take_dir)
+			this_cpu_inc(stack_depot_experiment.trie_fail.dir_cache_taken);
+		if (take_chunk)
+			this_cpu_inc(stack_depot_experiment.trie_fail.chunk_cache_taken);
+	}
+	taken = true;
+
+out_unlock:
+	raw_spin_unlock(&trie_side_table_cache_lock);
+	return taken;
+}
+
 static u32
 trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *prealloc)
 {
@@ -454,6 +504,7 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	u32 id;
 
 	lockdep_assert_held(&stack_depot_trie_writer_lock);
+	lockdep_assert_held(&pool_lock);
 
 	id = trie_side_table_last_stack_id + 1;
 	if (id > trie_max_stack_id()) {
@@ -468,8 +519,10 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	root = trie_side_table_root_index(id);
 	dir = trie_side_table_load_dir(root);
 	if (!dir) {
-		if (!prealloc->dir || !prealloc->chunk) {
-			if (stack_depot_experiment_trie_active()) {
+		if ((!prealloc->dir || !prealloc->chunk) &&
+		    !trie_side_table_try_take_cache(prealloc, true)) {
+			if (stack_depot_experiment_trie_active() &&
+			    !this_cpu_read(stack_depot_experiment_trie_failure_recorded)) {
 				this_cpu_inc(stack_depot_experiment.trie_fail.side_dir_missing);
 				if (READ_ONCE(trie_side_table_cache.dir) &&
 				    READ_ONCE(trie_side_table_cache.chunk))
@@ -487,8 +540,10 @@ trie_side_table_prepare_stack_slot(struct stack_depot_trie_side_prealloc *preall
 	idx = trie_side_table_dir_index(id);
 	chunk = trie_side_table_dir_load_chunk(dir, idx);
 	if (!chunk) {
-		if (!prealloc->chunk) {
-			if (stack_depot_experiment_trie_active()) {
+		if (!prealloc->chunk &&
+		    !trie_side_table_try_take_cache(prealloc, false)) {
+			if (stack_depot_experiment_trie_active() &&
+			    !this_cpu_read(stack_depot_experiment_trie_failure_recorded)) {
 				this_cpu_inc(stack_depot_experiment.trie_fail.side_chunk);
 				if (READ_ONCE(trie_side_table_cache.chunk))
 					this_cpu_inc(stack_depot_experiment.trie_fail.chunk_cache);
