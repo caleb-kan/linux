@@ -1,68 +1,83 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/compiler.h>
 #include <linux/ktime.h>
 #include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/mutex.h>
 #include <linux/sched.h>
+#include <linux/sched/cputime.h>
 #include <linux/stackdepot.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 
+#ifdef CONFIG_ARM64
+#include <asm/memory.h>
+#elif defined(CONFIG_X86_64)
+#include <asm/setup.h>
+#endif
 #include <asm/sections.h>
 
-#define STACKDEPOT_BENCH_MAX_STACKS	4096U
-#define STACKDEPOT_BENCH_MAX_ITERATIONS	100000U
-#define STACKDEPOT_BENCH_MAX_DEPTH	256U
+#define STACKDEPOT_BENCH_MAX_STACKS	32768U
+#define STACKDEPOT_BENCH_MAX_PASSES	1024U
 #define STACKDEPOT_BENCH_MAX_SEED	3U
-#define STACKDEPOT_BENCH_GROUP_SIZE	16U
+#define STACKDEPOT_BENCH_GROUP_SIZE	64U
+#define STACKDEPOT_BENCH_SCENARIO_LEN	16U
 
 #define STACKDEPOT_BENCH_FRAME_BITS	8U
 #define STACKDEPOT_BENCH_OWNER_SHIFT	STACKDEPOT_BENCH_FRAME_BITS
-#define STACKDEPOT_BENCH_CORPUS_SHIFT	20U
-#define STACKDEPOT_BENCH_SEED_SHIFT	22U
 
 #define STACKDEPOT_BENCH_FINGERPRINT_INIT	1469598103934665603ULL
 #define STACKDEPOT_BENCH_FINGERPRINT_PRIME	1099511628211ULL
 
-enum stackdepot_bench_corpus {
-	STACKDEPOT_BENCH_ALLOC,
-	STACKDEPOT_BENCH_NOALLOC_SPIN,
-	STACKDEPOT_BENCH_NOALLOC_TRYLOCK,
+enum stackdepot_bench_scenario {
+	STACKDEPOT_BENCH_INSERT_ALLOC,
+	STACKDEPOT_BENCH_SAVE_HIT,
+	STACKDEPOT_BENCH_FETCH,
 };
+
+static const char *
+stackdepot_bench_scenario_name(enum stackdepot_bench_scenario scenario)
+{
+	if (scenario == STACKDEPOT_BENCH_INSERT_ALLOC)
+		return "insert_alloc";
+	if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+		return "save_hit";
+	return "fetch";
+}
 
 struct stackdepot_bench_data {
 	unsigned long *entries;
 	unsigned long *fetched;
 	depot_stack_handle_t *handles;
+	unsigned int *insert_order;
+	unsigned int *replay_order;
 	u64 fingerprint;
 	unsigned int nr_stacks;
 	unsigned int depth;
 };
 
 struct stackdepot_bench_result {
-	u64 elapsed_ns;
-	u64 checksum;
+	u64 wall_ns;
+	u64 cpu_ns;
 	u64 operations;
 	u64 corpus_fingerprint;
 	unsigned int save_failures;
 	unsigned int validation_errors;
-	int cpu_start;
-	int cpu_end;
+	int cpu;
 };
 
 static unsigned int stackdepot_bench_depth = 32;
 module_param_named(depth, stackdepot_bench_depth, uint, 0644);
 MODULE_PARM_DESC(depth, "Frames in each synthetic stack");
 
-static unsigned int stackdepot_bench_stacks = 2048;
+static unsigned int stackdepot_bench_stacks = 32768;
 module_param_named(stacks, stackdepot_bench_stacks, uint, 0644);
 MODULE_PARM_DESC(stacks, "Distinct stacks in each corpus");
 
-static unsigned int stackdepot_bench_iterations = 20000;
-module_param_named(iterations, stackdepot_bench_iterations, uint, 0644);
-MODULE_PARM_DESC(iterations, "Operations in lookup-hit and fetch measurements");
+static unsigned int stackdepot_bench_passes = 32;
+module_param_named(passes, stackdepot_bench_passes, uint, 0644);
+MODULE_PARM_DESC(passes, "Complete corpus passes in save-hit and fetch measurements");
 
 static unsigned int stackdepot_bench_shared_percent = 75;
 module_param_named(shared_percent, stackdepot_bench_shared_percent, uint, 0644);
@@ -74,23 +89,20 @@ MODULE_PARM_DESC(raw_percent, "Percentage of full-width frames at the end of eac
 
 static unsigned int stackdepot_bench_seed = 1;
 module_param_named(seed, stackdepot_bench_seed, uint, 0644);
-MODULE_PARM_DESC(seed, "Synthetic stack corpus seed");
+MODULE_PARM_DESC(seed, "Synthetic stack insertion-order seed");
 
-static bool stackdepot_bench_noalloc_trylock;
-module_param_named(noalloc_trylock, stackdepot_bench_noalloc_trylock, bool, 0644);
-MODULE_PARM_DESC(noalloc_trylock, "Benchmark trylock instead of spin-capable no-allocation saves");
+static char stackdepot_bench_scenario[STACKDEPOT_BENCH_SCENARIO_LEN] =
+	"insert_alloc";
+module_param_string(scenario, stackdepot_bench_scenario,
+		    sizeof(stackdepot_bench_scenario), 0644);
+MODULE_PARM_DESC(scenario, "Scenario: insert_alloc, save_hit, or fetch");
 
-static DEFINE_MUTEX(stackdepot_bench_lock);
 static bool stackdepot_bench_done;
 static bool stackdepot_bench_run;
 
-static u32 stackdepot_bench_token(unsigned int owner, unsigned int frame,
-				  unsigned int seed,
-				  enum stackdepot_bench_corpus corpus)
+static u32 stackdepot_bench_token(unsigned int owner, unsigned int frame)
 {
-	return (seed << STACKDEPOT_BENCH_SEED_SHIFT) |
-		(corpus << STACKDEPOT_BENCH_CORPUS_SHIFT) |
-		(owner << STACKDEPOT_BENCH_OWNER_SHIFT) | frame;
+	return (owner << STACKDEPOT_BENCH_OWNER_SHIFT) | frame;
 }
 
 static unsigned long stackdepot_bench_frame(u32 token, bool raw)
@@ -98,13 +110,30 @@ static unsigned long stackdepot_bench_frame(u32 token, bool raw)
 	unsigned long offset = (unsigned long)token << 2;
 
 	if (!raw)
-		return (unsigned long)_stext - 0x100000UL - offset;
+		return (unsigned long)_stext + 0x100000UL + offset;
 
 	return 0x100000UL + (offset << 1);
 }
 
-static void stackdepot_bench_fill(struct stackdepot_bench_data *data,
-				  enum stackdepot_bench_corpus corpus)
+static u32 stackdepot_bench_random(u32 *state)
+{
+	*state = *state * 1664525U + 1013904223U;
+	return *state;
+}
+
+static void stackdepot_bench_shuffle(unsigned int *order,
+				     unsigned int nr_stacks, u32 state)
+{
+	unsigned int stack;
+
+	for (stack = nr_stacks - 1; stack > 0; stack--) {
+		unsigned int other = stackdepot_bench_random(&state) % (stack + 1);
+
+		swap(order[stack], order[other]);
+	}
+}
+
+static void stackdepot_bench_fill(struct stackdepot_bench_data *data)
 {
 	unsigned int shared = data->depth * stackdepot_bench_shared_percent / 100;
 	unsigned int compressed = data->depth *
@@ -112,45 +141,66 @@ static void stackdepot_bench_fill(struct stackdepot_bench_data *data,
 	unsigned int stack, frame;
 	u64 fingerprint = STACKDEPOT_BENCH_FINGERPRINT_INIT;
 
-	if (shared == data->depth)
-		shared--;
-
 	for (stack = 0; stack < data->nr_stacks; stack++) {
 		unsigned int group = stack / STACKDEPOT_BENCH_GROUP_SIZE;
 
 		for (frame = 0; frame < data->depth; frame++) {
 			unsigned int owner = frame < shared ? group : stack;
-			u32 token = stackdepot_bench_token(owner, frame,
-						     stackdepot_bench_seed,
-						     corpus);
+			u32 token = stackdepot_bench_token(owner, frame);
+			bool raw = frame >= compressed;
 			unsigned long entry;
+			u64 corpus_token;
 
-			entry = stackdepot_bench_frame(token, frame >= compressed);
+			entry = stackdepot_bench_frame(token, raw);
 			data->entries[stack * data->depth + frame] = entry;
-			fingerprint ^= entry;
+			corpus_token = (u64)token << 1 | raw;
+			fingerprint ^= corpus_token;
 			fingerprint *= STACKDEPOT_BENCH_FINGERPRINT_PRIME;
 		}
+		data->insert_order[stack] = stack;
+		data->replay_order[stack] = stack;
+	}
+	stackdepot_bench_shuffle(data->insert_order, data->nr_stacks,
+				 stackdepot_bench_seed + 1);
+	stackdepot_bench_shuffle(data->replay_order, data->nr_stacks,
+				 stackdepot_bench_seed + 0x9e3779b9U);
+	for (stack = 0; stack < data->nr_stacks; stack++) {
+		fingerprint ^= data->insert_order[stack];
+		fingerprint *= STACKDEPOT_BENCH_FINGERPRINT_PRIME;
+	}
+	fingerprint ^= U32_MAX;
+	fingerprint *= STACKDEPOT_BENCH_FINGERPRINT_PRIME;
+	for (stack = 0; stack < data->nr_stacks; stack++) {
+		fingerprint ^= data->replay_order[stack];
+		fingerprint *= STACKDEPOT_BENCH_FINGERPRINT_PRIME;
 	}
 	data->fingerprint = fingerprint;
 }
 
 static int stackdepot_bench_alloc_data(struct stackdepot_bench_data *data)
 {
+	size_t order_size = sizeof(*data->insert_order);
+
 	data->nr_stacks = stackdepot_bench_stacks;
 	data->depth = stackdepot_bench_depth;
 	data->entries = kvmalloc_array(data->nr_stacks,
 				       data->depth * sizeof(*data->entries),
 				       GFP_KERNEL);
-	data->handles = kvmalloc_array(data->nr_stacks, sizeof(*data->handles),
-				       GFP_KERNEL);
+	data->handles = kvcalloc(data->nr_stacks, sizeof(*data->handles),
+				 GFP_KERNEL);
 	data->fetched = kvmalloc_array(data->depth, sizeof(*data->fetched),
 				       GFP_KERNEL);
-	if (!data->entries || !data->handles || !data->fetched)
+	data->insert_order = kvmalloc_array(data->nr_stacks, order_size, GFP_KERNEL);
+	data->replay_order = kvmalloc_array(data->nr_stacks, order_size, GFP_KERNEL);
+	if (!data->entries || !data->handles || !data->fetched ||
+	    !data->insert_order || !data->replay_order)
 		goto err_free;
 
 	return 0;
 
 err_free:
+	kvfree(data->replay_order);
+	kvfree(data->insert_order);
 	kvfree(data->fetched);
 	kvfree(data->handles);
 	kvfree(data->entries);
@@ -159,12 +209,15 @@ err_free:
 
 static void stackdepot_bench_free_data(struct stackdepot_bench_data *data)
 {
+	kvfree(data->replay_order);
+	kvfree(data->insert_order);
 	kvfree(data->fetched);
 	kvfree(data->handles);
 	kvfree(data->entries);
 }
 
-static unsigned int stackdepot_bench_validate(struct stackdepot_bench_data *data)
+static noinline unsigned int
+stackdepot_bench_validate(struct stackdepot_bench_data *data)
 {
 	unsigned int errors = 0;
 	unsigned int stack;
@@ -186,120 +239,170 @@ static unsigned int stackdepot_bench_validate(struct stackdepot_bench_data *data
 	return errors;
 }
 
+static noinline unsigned int
+stackdepot_bench_validate_hits(struct stackdepot_bench_data *data)
+{
+	unsigned int errors = 0;
+	unsigned int stack;
+
+	for (stack = 0; stack < data->nr_stacks; stack++) {
+		unsigned long *entries = &data->entries[stack * data->depth];
+
+		if (stack_depot_save(entries, data->depth, GFP_KERNEL) !=
+		    data->handles[stack])
+			errors++;
+	}
+
+	return errors;
+}
+
 static void stackdepot_bench_report(const char *scenario,
 				    const struct stackdepot_bench_result *result)
 {
-	u64 ns_per_op = result->operations ?
-		div64_u64(result->elapsed_ns, result->operations) : 0;
+	u64 cpu_ns_per_op = result->operations ?
+		div64_u64(result->cpu_ns, result->operations) : 0;
+	u64 wall_ns_per_op = result->operations ?
+		div64_u64(result->wall_ns, result->operations) : 0;
 
-	pr_info("stackdepot_bench: scenario=%s cpu_start=%d cpu_end=%d operations=%llu elapsed_ns=%llu ns_per_op=%llu save_failures=%u validation_errors=%u corpus_fingerprint=%llu checksum=%llu\n",
-		scenario, result->cpu_start, result->cpu_end, result->operations,
-		result->elapsed_ns, ns_per_op, result->save_failures,
-		result->validation_errors, result->corpus_fingerprint,
-		result->checksum);
+	pr_info("stackdepot_bench: scenario=%s cpu=%d operations=%llu wall_ns=%llu wall_ns_per_op=%llu cpu_ns=%llu cpu_ns_per_op=%llu save_failures=%u validation_errors=%u corpus_fingerprint=%llu\n",
+		scenario, result->cpu, result->operations, result->wall_ns,
+		wall_ns_per_op, result->cpu_ns, cpu_ns_per_op,
+		result->save_failures, result->validation_errors,
+		result->corpus_fingerprint);
 	cond_resched();
 }
 
-static struct stackdepot_bench_result
-stackdepot_bench_insert(struct stackdepot_bench_data *data, gfp_t gfp_flags,
-			depot_flags_t depot_flags)
+static noinline struct stackdepot_bench_result
+stackdepot_bench_insert(struct stackdepot_bench_data *data)
 {
 	struct stackdepot_bench_result result = {
 		.operations = data->nr_stacks,
 		.corpus_fingerprint = data->fingerprint,
 	};
-	unsigned int stack;
+	unsigned int position;
+	u64 cpu_start;
 	u64 start;
 
-	result.cpu_start = task_cpu(current);
+	migrate_disable();
+	result.cpu = smp_processor_id();
+	cpu_start = task_sched_runtime(current);
 	start = ktime_get_ns();
-	for (stack = 0; stack < data->nr_stacks; stack++) {
-		unsigned long *entries = &data->entries[stack * data->depth];
-		depot_stack_handle_t handle;
-
-		handle = stack_depot_save_flags(entries, data->depth, gfp_flags,
-						depot_flags);
-		data->handles[stack] = handle;
-		result.checksum += handle;
-		if (!handle)
-			result.save_failures++;
-	}
-	result.elapsed_ns = ktime_get_ns() - start;
-	result.cpu_end = task_cpu(current);
-	result.validation_errors = stackdepot_bench_validate(data);
-	return result;
-}
-
-static struct stackdepot_bench_result
-stackdepot_bench_hit(struct stackdepot_bench_data *data)
-{
-	struct stackdepot_bench_result result = {
-		.operations = stackdepot_bench_iterations,
-		.corpus_fingerprint = data->fingerprint,
-	};
-	unsigned int operation;
-	u64 start;
-
-	result.cpu_start = task_cpu(current);
-	start = ktime_get_ns();
-	for (operation = 0; operation < stackdepot_bench_iterations; operation++) {
-		unsigned int stack = operation % data->nr_stacks;
+	for (position = 0; position < data->nr_stacks; position++) {
+		unsigned int stack = data->insert_order[position];
 		unsigned long *entries = &data->entries[stack * data->depth];
 		depot_stack_handle_t handle;
 
 		handle = stack_depot_save(entries, data->depth, GFP_KERNEL);
-		result.checksum += handle;
-		if (handle != data->handles[stack])
-			result.validation_errors++;
+		data->handles[stack] = handle;
+		if (!handle)
+			result.save_failures++;
 	}
-	result.elapsed_ns = ktime_get_ns() - start;
-	result.cpu_end = task_cpu(current);
+	result.wall_ns = ktime_get_ns() - start;
+	result.cpu_ns = task_sched_runtime(current) - cpu_start;
+	migrate_enable();
 	return result;
 }
 
-static struct stackdepot_bench_result
+static noinline struct stackdepot_bench_result
+stackdepot_bench_hit(struct stackdepot_bench_data *data)
+{
+	struct stackdepot_bench_result result = {
+		.operations = (u64)data->nr_stacks * stackdepot_bench_passes,
+		.corpus_fingerprint = data->fingerprint,
+	};
+	unsigned int position;
+	unsigned int pass;
+	u64 cpu_start;
+	u64 start;
+
+	migrate_disable();
+	result.cpu = smp_processor_id();
+	cpu_start = task_sched_runtime(current);
+	start = ktime_get_ns();
+	for (pass = 0; pass < stackdepot_bench_passes; pass++) {
+		for (position = 0; position < data->nr_stacks; position++) {
+			unsigned int stack = data->replay_order[position];
+			unsigned long *entries = &data->entries[stack * data->depth];
+
+			stack_depot_save(entries, data->depth, GFP_KERNEL);
+		}
+	}
+	result.wall_ns = ktime_get_ns() - start;
+	result.cpu_ns = task_sched_runtime(current) - cpu_start;
+	migrate_enable();
+	return result;
+}
+
+static noinline struct stackdepot_bench_result
 stackdepot_bench_fetch(struct stackdepot_bench_data *data)
 {
 	struct stackdepot_bench_result result = {
-		.operations = stackdepot_bench_iterations,
+		.operations = (u64)data->nr_stacks * stackdepot_bench_passes,
 		.corpus_fingerprint = data->fingerprint,
 	};
-	unsigned int operation;
+	unsigned int position;
+	unsigned int pass;
+	u64 cpu_start;
 	u64 start;
 
-	result.cpu_start = task_cpu(current);
+	migrate_disable();
+	result.cpu = smp_processor_id();
+	cpu_start = task_sched_runtime(current);
 	start = ktime_get_ns();
-	for (operation = 0; operation < stackdepot_bench_iterations; operation++) {
-		unsigned int stack = operation % data->nr_stacks;
-		depot_stack_handle_t handle = data->handles[stack];
-		unsigned int nr_entries;
+	for (pass = 0; pass < stackdepot_bench_passes; pass++) {
+		for (position = 0; position < data->nr_stacks; position++) {
+			unsigned int stack = data->replay_order[position];
+			depot_stack_handle_t handle = data->handles[stack];
 
-		nr_entries = stack_depot_fetch_into(handle, data->fetched, data->depth);
-		if (nr_entries == data->depth)
-			result.checksum += data->fetched[operation % data->depth];
-		else
-			result.validation_errors++;
+			stack_depot_fetch_into(handle, data->fetched, data->depth);
+		}
 	}
-	result.elapsed_ns = ktime_get_ns() - start;
-	result.cpu_end = task_cpu(current);
+	result.wall_ns = ktime_get_ns() - start;
+	result.cpu_ns = task_sched_runtime(current) - cpu_start;
+	migrate_enable();
 	return result;
 }
 
-static int stackdepot_bench_validate_params(void)
+static bool stackdepot_bench_kaslr_enabled(void)
+{
+#ifdef CONFIG_ARM64
+	return kaslr_enabled();
+#else
+	return kaslr_offset() != 0;
+#endif
+}
+
+static int stackdepot_bench_validate_params(enum stackdepot_bench_scenario *scenario)
 {
 	if (!stackdepot_bench_depth ||
-	    stackdepot_bench_depth > CONFIG_STACKDEPOT_MAX_FRAMES ||
-	    stackdepot_bench_depth > STACKDEPOT_BENCH_MAX_DEPTH)
+	    stackdepot_bench_depth > CONFIG_STACKDEPOT_MAX_FRAMES)
 		return -EINVAL;
 	if (!stackdepot_bench_stacks ||
 	    stackdepot_bench_stacks > STACKDEPOT_BENCH_MAX_STACKS)
 		return -EINVAL;
-	if (!stackdepot_bench_iterations ||
-	    stackdepot_bench_iterations > STACKDEPOT_BENCH_MAX_ITERATIONS)
+	if (!stackdepot_bench_passes ||
+	    stackdepot_bench_passes > STACKDEPOT_BENCH_MAX_PASSES)
 		return -EINVAL;
-	if (stackdepot_bench_shared_percent > 100 ||
+	if (stackdepot_bench_shared_percent >= 100 ||
 	    stackdepot_bench_raw_percent > 100 ||
 	    stackdepot_bench_seed > STACKDEPOT_BENCH_MAX_SEED)
+		return -EINVAL;
+	if (stackdepot_bench_kaslr_enabled()) {
+		pr_err("stackdepot_bench: KASLR is enabled; reboot with nokaslr\n");
+		return -EINVAL;
+	}
+	if (current->nr_cpus_allowed != 1) {
+		pr_err("stackdepot_bench: invoking task must be pinned to one CPU\n");
+		return -EINVAL;
+	}
+
+	if (sysfs_streq(stackdepot_bench_scenario, "insert_alloc"))
+		*scenario = STACKDEPOT_BENCH_INSERT_ALLOC;
+	else if (sysfs_streq(stackdepot_bench_scenario, "save_hit"))
+		*scenario = STACKDEPOT_BENCH_SAVE_HIT;
+	else if (sysfs_streq(stackdepot_bench_scenario, "fetch"))
+		*scenario = STACKDEPOT_BENCH_FETCH;
+	else
 		return -EINVAL;
 
 	return 0;
@@ -308,57 +411,69 @@ static int stackdepot_bench_validate_params(void)
 static int stackdepot_benchmark(void)
 {
 	struct stackdepot_bench_data data = {};
+	struct stackdepot_bench_result prepare;
 	struct stackdepot_bench_result result;
-	enum stackdepot_bench_corpus corpus;
-	const char *scenario;
-	gfp_t gfp_flags;
-	int ret;
+	enum stackdepot_bench_scenario scenario;
+	const char *scenario_name;
+	unsigned int compressed;
+	unsigned int shared;
+	int ret = 0;
 
 	if (stackdepot_bench_done)
 		return -EBUSY;
-	stackdepot_bench_done = true;
-	ret = stackdepot_bench_validate_params();
+	ret = stackdepot_bench_validate_params(&scenario);
 	if (ret)
 		return ret;
-	ret = stack_depot_init();
-	if (ret)
-		return ret;
+	scenario_name = stackdepot_bench_scenario_name(scenario);
 	ret = stackdepot_bench_alloc_data(&data);
 	if (ret)
 		return ret;
+	stackdepot_bench_fill(&data);
+	ret = stack_depot_init();
+	if (ret)
+		goto out_free;
+	stackdepot_bench_done = true;
 
-	pr_info("stackdepot_bench: begin depth=%u stacks=%u iterations=%u shared_percent=%u raw_percent=%u seed=%u noalloc_trylock=%u\n",
-		stackdepot_bench_depth, stackdepot_bench_stacks,
-		stackdepot_bench_iterations, stackdepot_bench_shared_percent,
-		stackdepot_bench_raw_percent, stackdepot_bench_seed,
-		stackdepot_bench_noalloc_trylock);
+	shared = data.depth * stackdepot_bench_shared_percent / 100;
+	compressed = data.depth * (100 - stackdepot_bench_raw_percent) / 100;
+	pr_info("stackdepot_bench: begin scenario=%s depth=%u stacks=%u passes=%u shared_percent=%u shared_frames=%u raw_percent=%u raw_frames=%u group_size=%u seed=%u corpus_fingerprint=%llu\n",
+		scenario_name, data.depth, data.nr_stacks,
+		stackdepot_bench_passes, stackdepot_bench_shared_percent, shared,
+		stackdepot_bench_raw_percent, data.depth - compressed,
+		STACKDEPOT_BENCH_GROUP_SIZE, stackdepot_bench_seed,
+		data.fingerprint);
 
-	stackdepot_bench_fill(&data, STACKDEPOT_BENCH_ALLOC);
-	result = stackdepot_bench_insert(&data, GFP_KERNEL,
-					 STACK_DEPOT_FLAG_CAN_ALLOC);
-	stackdepot_bench_report("insert_alloc", &result);
-	result = stackdepot_bench_hit(&data);
-	stackdepot_bench_report("save_hit", &result);
-	result = stackdepot_bench_fetch(&data);
-	stackdepot_bench_report("fetch", &result);
-
-	memset(data.handles, 0, data.nr_stacks * sizeof(*data.handles));
-	if (stackdepot_bench_noalloc_trylock) {
-		corpus = STACKDEPOT_BENCH_NOALLOC_TRYLOCK;
-		scenario = "insert_noalloc_trylock";
-		gfp_flags = GFP_NOWAIT & ~__GFP_RECLAIM;
-	} else {
-		corpus = STACKDEPOT_BENCH_NOALLOC_SPIN;
-		scenario = "insert_noalloc_spin";
-		gfp_flags = GFP_KERNEL;
+	if (scenario != STACKDEPOT_BENCH_INSERT_ALLOC) {
+		prepare = stackdepot_bench_insert(&data);
+		prepare.validation_errors = stackdepot_bench_validate(&data);
+		if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+			prepare.validation_errors += stackdepot_bench_validate_hits(&data);
+		stackdepot_bench_report("prepare_insert", &prepare);
+		if (prepare.save_failures || prepare.validation_errors) {
+			ret = -EIO;
+			goto out_report;
+		}
 	}
-	stackdepot_bench_fill(&data, corpus);
-	result = stackdepot_bench_insert(&data, gfp_flags, 0);
-	stackdepot_bench_report(scenario, &result);
 
+	if (scenario == STACKDEPOT_BENCH_INSERT_ALLOC)
+		result = stackdepot_bench_insert(&data);
+	else if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+		result = stackdepot_bench_hit(&data);
+	else
+		result = stackdepot_bench_fetch(&data);
+	if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+		result.validation_errors = stackdepot_bench_validate_hits(&data);
+	else
+		result.validation_errors = stackdepot_bench_validate(&data);
+	stackdepot_bench_report(scenario_name, &result);
+	if (result.save_failures || result.validation_errors)
+		ret = -EIO;
+
+out_report:
+	pr_info("stackdepot_bench: end status=%d\n", ret);
+out_free:
 	stackdepot_bench_free_data(&data);
-	pr_info("stackdepot_bench: end\n");
-	return 0;
+	return ret;
 }
 
 static int stackdepot_bench_run_set(const char *val,
@@ -375,14 +490,13 @@ static int stackdepot_bench_run_set(const char *val,
 	}
 	if (!stackdepot_bench_run)
 		return 0;
-	if (system_state != SYSTEM_RUNNING)
+	if (system_state != SYSTEM_RUNNING) {
+		stackdepot_bench_run = false;
 		return 0;
+	}
 
 	stackdepot_bench_run = false;
-	mutex_lock(&stackdepot_bench_lock);
-	ret = stackdepot_benchmark();
-	mutex_unlock(&stackdepot_bench_lock);
-	return ret;
+	return stackdepot_benchmark();
 }
 
 static const struct kernel_param_ops stackdepot_bench_run_ops = {
@@ -391,16 +505,6 @@ static const struct kernel_param_ops stackdepot_bench_run_ops = {
 };
 module_param_cb(run, &stackdepot_bench_run_ops, &stackdepot_bench_run, 0200);
 MODULE_PARM_DESC(run, "Run the stack depot benchmark");
-
-static int __init stackdepot_bench_init(void)
-{
-	if (!stackdepot_bench_run)
-		return 0;
-
-	stackdepot_bench_run = false;
-	return stackdepot_benchmark();
-}
-late_initcall(stackdepot_bench_init);
 
 MODULE_DESCRIPTION("Stack depot microbenchmark");
 MODULE_LICENSE("GPL");
