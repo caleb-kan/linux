@@ -257,11 +257,13 @@ KCOV_INSTRUMENT_stackdepot.o := n
 
 ifneq ($(filter y,$(CONFIG_ARM64) $(CONFIG_X86_64)),)
 ifeq ($(CONFIG_SYSFS),y)
+ifeq ($(CONFIG_DEBUG_FS),y)
 # Temporary one-off benchmark, inert until its runtime trigger is written.
 obj-$(CONFIG_STACKDEPOT) += stackdepot_benchmark.o
 KASAN_SANITIZE_stackdepot_benchmark.o := n
 KMSAN_SANITIZE_stackdepot_benchmark.o := n
 KCOV_INSTRUMENT_stackdepot_benchmark.o := n
+endif
 endif
 endif
 
