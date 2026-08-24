@@ -26,6 +26,7 @@
 #define STACKDEPOT_BENCH_MAX_PASSES	1024U
 #define STACKDEPOT_BENCH_MAX_SEED	3U
 #define STACKDEPOT_BENCH_GROUP_SIZE	64U
+#define STACKDEPOT_BENCH_RESCHED_INTERVAL	1024U
 #define STACKDEPOT_BENCH_SCENARIO_LEN	16U
 /* The benchmark protocol must not override stack_depot_max_pools. */
 #define STACKDEPOT_BENCH_DEFAULT_MAX_POOLS \
@@ -264,9 +265,10 @@ static noinline unsigned int
 stackdepot_bench_validate(struct stackdepot_bench_data *data)
 {
 	unsigned int errors = 0;
-	unsigned int stack;
+	unsigned int position;
 
-	for (stack = 0; stack < data->nr_stacks; stack++) {
+	for (position = 0; position < data->nr_stacks; position++) {
+		unsigned int stack = data->replay_order[position];
 		unsigned long *expected = &data->entries[stack * data->depth];
 		depot_stack_handle_t handle = data->handles[stack];
 		unsigned int nr_entries;
@@ -292,9 +294,10 @@ static noinline unsigned int
 stackdepot_bench_validate_hits(struct stackdepot_bench_data *data)
 {
 	unsigned int errors = 0;
-	unsigned int stack;
+	unsigned int position;
 
-	for (stack = 0; stack < data->nr_stacks; stack++) {
+	for (position = 0; position < data->nr_stacks; position++) {
+		unsigned int stack = data->replay_order[position];
 		unsigned long *entries = &data->entries[stack * data->depth];
 
 		if (stack_depot_save(entries, data->depth, GFP_KERNEL) !=
@@ -346,6 +349,9 @@ stackdepot_bench_insert(struct stackdepot_bench_data *data)
 		data->handles[stack] = handle;
 		if (!handle)
 			result.save_failures++;
+		if (position + 1 < data->nr_stacks &&
+		    !((position + 1) % STACKDEPOT_BENCH_RESCHED_INTERVAL))
+			cond_resched();
 	}
 	result.wall_ns = ktime_get_ns() - start;
 	result.cpu_ns = task_sched_runtime(current) - cpu_start;
@@ -380,6 +386,8 @@ stackdepot_bench_hit(struct stackdepot_bench_data *data)
 			handle = stack_depot_save(entries, data->depth, GFP_KERNEL);
 			result.validation_errors += handle != data->handles[stack];
 		}
+		if (pass + 1 < data->config.passes)
+			cond_resched();
 	}
 	result.wall_ns = ktime_get_ns() - start;
 	result.cpu_ns = task_sched_runtime(current) - cpu_start;
@@ -413,6 +421,8 @@ stackdepot_bench_fetch(struct stackdepot_bench_data *data)
 			nr_entries = stack_depot_fetch_into(handle, data->fetched, data->depth);
 			result.validation_errors += nr_entries != data->depth;
 		}
+		if (pass + 1 < data->config.passes)
+			cond_resched();
 	}
 	result.wall_ns = ktime_get_ns() - start;
 	result.cpu_ns = task_sched_runtime(current) - cpu_start;
@@ -510,6 +520,7 @@ static int stackdepot_benchmark(void)
 	enum stackdepot_bench_scenario scenario;
 	const char *scenario_name;
 	unsigned int compressed;
+	unsigned int errors;
 	unsigned int shared;
 	int ret = 0;
 
@@ -544,7 +555,10 @@ static int stackdepot_benchmark(void)
 						    STACKDEPOT_BENCH_INSERT_ALLOC);
 		if (ret)
 			goto out_report;
-		if (stackdepot_bench_validate_hits(&data)) {
+		errors = stackdepot_bench_validate_hits(&data);
+		if (errors) {
+			pr_err("stackdepot_bench: phase=save_hit_warmup validation_errors=%u\n",
+			       errors);
 			ret = -EIO;
 			goto out_report;
 		}
@@ -552,7 +566,10 @@ static int stackdepot_benchmark(void)
 						    STACKDEPOT_BENCH_SAVE_HIT);
 		if (ret)
 			goto out_report;
-		if (stackdepot_bench_validate(&data)) {
+		errors = stackdepot_bench_validate(&data);
+		if (errors) {
+			pr_err("stackdepot_bench: phase=fetch_warmup validation_errors=%u\n",
+			       errors);
 			ret = -EIO;
 			goto out_report;
 		}
@@ -563,10 +580,18 @@ static int stackdepot_benchmark(void)
 	if (scenario != STACKDEPOT_BENCH_INSERT_ALLOC) {
 		prepare = stackdepot_bench_insert(&data);
 		prepare.validation_errors = stackdepot_bench_validate(&data);
-		if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
-			prepare.validation_errors += stackdepot_bench_validate_hits(&data);
 		stackdepot_bench_report("prepare_insert", &prepare);
 		if (prepare.save_failures || prepare.validation_errors) {
+			ret = -EIO;
+			goto out_report;
+		}
+		if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+			errors = stackdepot_bench_validate_hits(&data);
+		else
+			errors = stackdepot_bench_validate(&data);
+		if (errors) {
+			pr_err("stackdepot_bench: phase=%s_warmup validation_errors=%u\n",
+			       scenario_name, errors);
 			ret = -EIO;
 			goto out_report;
 		}
