@@ -31,6 +31,7 @@
 #define STACKDEPOT_BENCH_FINGERPRINT_PRIME	1099511628211ULL
 
 enum stackdepot_bench_scenario {
+	STACKDEPOT_BENCH_ALL,
 	STACKDEPOT_BENCH_INSERT_ALLOC,
 	STACKDEPOT_BENCH_SAVE_HIT,
 	STACKDEPOT_BENCH_FETCH,
@@ -39,6 +40,8 @@ enum stackdepot_bench_scenario {
 static const char *
 stackdepot_bench_scenario_name(enum stackdepot_bench_scenario scenario)
 {
+	if (scenario == STACKDEPOT_BENCH_ALL)
+		return "all";
 	if (scenario == STACKDEPOT_BENCH_INSERT_ALLOC)
 		return "insert_alloc";
 	if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
@@ -92,10 +95,10 @@ module_param_named(seed, stackdepot_bench_seed, uint, 0644);
 MODULE_PARM_DESC(seed, "Synthetic stack insertion-order seed");
 
 static char stackdepot_bench_scenario[STACKDEPOT_BENCH_SCENARIO_LEN] =
-	"insert_alloc";
+	"all";
 module_param_string(scenario, stackdepot_bench_scenario,
 		    sizeof(stackdepot_bench_scenario), 0644);
-MODULE_PARM_DESC(scenario, "Scenario: insert_alloc, save_hit, or fetch");
+MODULE_PARM_DESC(scenario, "Scenario: all, insert_alloc, save_hit, or fetch");
 
 static bool stackdepot_bench_done;
 static bool stackdepot_bench_run;
@@ -396,7 +399,9 @@ static int stackdepot_bench_validate_params(enum stackdepot_bench_scenario *scen
 		return -EINVAL;
 	}
 
-	if (sysfs_streq(stackdepot_bench_scenario, "insert_alloc"))
+	if (sysfs_streq(stackdepot_bench_scenario, "all"))
+		*scenario = STACKDEPOT_BENCH_ALL;
+	else if (sysfs_streq(stackdepot_bench_scenario, "insert_alloc"))
 		*scenario = STACKDEPOT_BENCH_INSERT_ALLOC;
 	else if (sysfs_streq(stackdepot_bench_scenario, "save_hit"))
 		*scenario = STACKDEPOT_BENCH_SAVE_HIT;
@@ -408,11 +413,31 @@ static int stackdepot_bench_validate_params(enum stackdepot_bench_scenario *scen
 	return 0;
 }
 
+static int
+stackdepot_bench_run_scenario(struct stackdepot_bench_data *data,
+			      enum stackdepot_bench_scenario scenario)
+{
+	struct stackdepot_bench_result result;
+
+	if (scenario == STACKDEPOT_BENCH_INSERT_ALLOC)
+		result = stackdepot_bench_insert(data);
+	else if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+		result = stackdepot_bench_hit(data);
+	else
+		result = stackdepot_bench_fetch(data);
+	if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
+		result.validation_errors = stackdepot_bench_validate_hits(data);
+	else
+		result.validation_errors = stackdepot_bench_validate(data);
+	stackdepot_bench_report(stackdepot_bench_scenario_name(scenario), &result);
+
+	return result.save_failures || result.validation_errors ? -EIO : 0;
+}
+
 static int stackdepot_benchmark(void)
 {
 	struct stackdepot_bench_data data = {};
 	struct stackdepot_bench_result prepare;
-	struct stackdepot_bench_result result;
 	enum stackdepot_bench_scenario scenario;
 	const char *scenario_name;
 	unsigned int compressed;
@@ -443,6 +468,23 @@ static int stackdepot_benchmark(void)
 		STACKDEPOT_BENCH_GROUP_SIZE, stackdepot_bench_seed,
 		data.fingerprint);
 
+	if (scenario == STACKDEPOT_BENCH_ALL) {
+		ret = stackdepot_bench_run_scenario(&data,
+						    STACKDEPOT_BENCH_INSERT_ALLOC);
+		if (ret)
+			goto out_report;
+		if (stackdepot_bench_validate_hits(&data)) {
+			ret = -EIO;
+			goto out_report;
+		}
+		ret = stackdepot_bench_run_scenario(&data,
+						    STACKDEPOT_BENCH_SAVE_HIT);
+		if (ret)
+			goto out_report;
+		ret = stackdepot_bench_run_scenario(&data, STACKDEPOT_BENCH_FETCH);
+		goto out_report;
+	}
+
 	if (scenario != STACKDEPOT_BENCH_INSERT_ALLOC) {
 		prepare = stackdepot_bench_insert(&data);
 		prepare.validation_errors = stackdepot_bench_validate(&data);
@@ -455,19 +497,7 @@ static int stackdepot_benchmark(void)
 		}
 	}
 
-	if (scenario == STACKDEPOT_BENCH_INSERT_ALLOC)
-		result = stackdepot_bench_insert(&data);
-	else if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
-		result = stackdepot_bench_hit(&data);
-	else
-		result = stackdepot_bench_fetch(&data);
-	if (scenario == STACKDEPOT_BENCH_SAVE_HIT)
-		result.validation_errors = stackdepot_bench_validate_hits(&data);
-	else
-		result.validation_errors = stackdepot_bench_validate(&data);
-	stackdepot_bench_report(scenario_name, &result);
-	if (result.save_failures || result.validation_errors)
-		ret = -EIO;
+	ret = stackdepot_bench_run_scenario(&data, scenario);
 
 out_report:
 	pr_info("stackdepot_bench: end status=%d\n", ret);
