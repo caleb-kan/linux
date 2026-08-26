@@ -3,6 +3,7 @@
 #include <kunit/test.h>
 #include <linux/array_size.h>
 #include <linux/gfp.h>
+#include <linux/kallsyms.h>
 #include <linux/limits.h>
 #include <linux/moduleparam.h>
 #include <linux/stackdepot.h>
@@ -24,6 +25,19 @@ static inline unsigned long stackdepot_arm64_frame(long offset)
 }
 #endif
 
+static unsigned long stackdepot_test_frame(unsigned int i)
+{
+#ifdef CONFIG_ARM64
+	return i & 1 ? 0x1000UL + i * 0x1000UL :
+		stackdepot_arm64_frame(i * 4);
+#elif defined(CONFIG_X86_64) && !defined(CONFIG_UML)
+	return i & 1 ? 0xffff888000000000UL + i * 0x1000UL :
+		0xffffffff10000000UL + i * 0x10UL;
+#else
+	return 0x1000UL + i * 0x1000UL;
+#endif
+}
+
 static void stackdepot_trie_max_path_roundtrip(struct kunit *test)
 {
 	union handle_parts parts;
@@ -43,17 +57,8 @@ static void stackdepot_trie_max_path_roundtrip(struct kunit *test)
 	fetched = kunit_kcalloc(test, CONFIG_STACKDEPOT_MAX_FRAMES,
 				sizeof(*fetched), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, fetched);
-	for (i = 0; i < CONFIG_STACKDEPOT_MAX_FRAMES; i++) {
-#ifdef CONFIG_ARM64
-		entries[i] = i & 1 ? 0x1000UL + i * 0x1000UL :
-			stackdepot_arm64_frame(i * 4);
-#elif defined(CONFIG_X86_64) && !defined(CONFIG_UML)
-		entries[i] = i & 1 ? 0xffff888000000000UL + i * 0x1000UL :
-			0xffffffff10000000UL + i * 0x10UL;
-#else
-		entries[i] = 0x1000UL + i * 0x1000UL;
-#endif
-	}
+	for (i = 0; i < CONFIG_STACKDEPOT_MAX_FRAMES; i++)
+		entries[i] = stackdepot_test_frame(i);
 
 	handle = stack_depot_save(entries, CONFIG_STACKDEPOT_MAX_FRAMES,
 				  GFP_KERNEL);
@@ -184,20 +189,54 @@ static void stackdepot_save_flags_public(struct kunit *test)
 
 static void stackdepot_snprint_public(struct kunit *test)
 {
-	unsigned long entries[] = { 0x1000UL, 0x2000UL, 0x3000UL };
-	char expected[256];
-	char actual[256];
+	const unsigned int nr_entries = CONFIG_STACKDEPOT_MAX_FRAMES;
+	const size_t buf_size = nr_entries * (KSYM_SYMBOL_LEN + 4);
+	unsigned long *entries;
+	char *expected;
+	char *actual;
 	depot_stack_handle_t handle;
 	unsigned int expected_len;
+	unsigned int prefix_entries;
+	unsigned int prefix_len;
+	size_t output_size;
+	unsigned int i;
 	int actual_len;
 
 	KUNIT_ASSERT_EQ(test, stack_depot_init(), 0);
-	handle = stack_depot_save(entries, ARRAY_SIZE(entries), GFP_KERNEL);
-	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	entries = kunit_kmalloc_array(test, nr_entries, sizeof(*entries),
+				      GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, entries);
+	expected = kunit_kzalloc(test, buf_size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, expected);
+	actual = kunit_kzalloc(test, buf_size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, actual);
+	for (i = 0; i < nr_entries; i++)
+		entries[i] = stackdepot_test_frame(i);
 
-	expected_len = stack_trace_snprint(expected, sizeof(expected), entries,
-					   ARRAY_SIZE(entries), 2);
-	actual_len = stack_depot_snprint(handle, actual, sizeof(actual), 2);
+	handle = stack_depot_save(entries, nr_entries, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, handle, (depot_stack_handle_t)0);
+	if (expected_trie_pool_limit >= 0) {
+		union handle_parts parts = { .handle = handle };
+
+		KUNIT_EXPECT_GT(test, (u32)parts.pool_index_plus_1,
+				(u32)expected_trie_pool_limit);
+	}
+	expected_len = stack_trace_snprint(expected, buf_size, entries,
+					   nr_entries, 2);
+	actual_len = stack_depot_snprint(handle, actual, buf_size, 2);
+	KUNIT_EXPECT_EQ(test, actual_len, (int)expected_len);
+	KUNIT_EXPECT_STREQ(test, actual, expected);
+
+	prefix_entries = nr_entries / 2 + 1;
+	prefix_len = stack_trace_snprint(expected, buf_size, entries,
+					 prefix_entries, 2);
+	KUNIT_ASSERT_LE(test, (size_t)prefix_len + 2, buf_size);
+	output_size = prefix_len + 2;
+	memset(expected, 0, buf_size);
+	memset(actual, 0, buf_size);
+	expected_len = stack_trace_snprint(expected, output_size, entries,
+					   nr_entries, 2);
+	actual_len = stack_depot_snprint(handle, actual, output_size, 2);
 	KUNIT_EXPECT_EQ(test, actual_len, (int)expected_len);
 	KUNIT_EXPECT_STREQ(test, actual, expected);
 }
