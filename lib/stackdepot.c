@@ -65,6 +65,9 @@ static bool __stack_depot_early_init_passed __initdata;
 /* Initial seed for jhash2. */
 #define STACK_HASH_SEED 0x9747b28c
 
+/* Bound 64-bit print scratch to 128 bytes while amortizing trie walks. */
+#define STACK_DEPOT_PRINT_CHUNK_FRAMES 16
+
 /* Hash table of stored stack records. */
 static struct list_head *stack_table;
 /* Fixed order of the number of table buckets. Used when KASAN is enabled. */
@@ -2186,6 +2189,37 @@ static unsigned int trie_fetch_into(const struct stack_depot_trie_node *node,
 	return total;
 }
 
+static unsigned int trie_fetch_range(const struct stack_depot_trie_node *node,
+				     unsigned int offset,
+				     unsigned long *entries,
+				     unsigned int max_entries)
+{
+	const struct stack_depot_trie_node *cur;
+	unsigned int end;
+	unsigned int start;
+	unsigned int total;
+	unsigned int pos;
+	unsigned int i;
+
+	total = 0;
+	for (cur = node; cur; cur = trie_load_parent(cur))
+		total += cur->run.nr_entries;
+	if (offset >= total)
+		return 0;
+
+	max_entries = min(max_entries, total - offset);
+	end = offset + max_entries;
+	pos = total;
+	for (cur = node; cur; cur = trie_load_parent(cur)) {
+		pos -= cur->run.nr_entries;
+		start = max(pos, offset);
+		for (i = start; i < min(pos + cur->run.nr_entries, end); i++)
+			stack_depot_trie_node_frame(cur, i - pos, &entries[i - offset]);
+	}
+
+	return max_entries;
+}
+
 static unsigned int trie_fetch_handle_into(depot_stack_handle_t handle,
 					   unsigned long *entries,
 					   unsigned int max_entries)
@@ -2202,6 +2236,30 @@ static unsigned int trie_fetch_handle_into(depot_stack_handle_t handle,
 		return 0;
 	}
 	nr_entries = trie_fetch_into(node, entries, max_entries);
+	rcu_read_unlock_sched_notrace();
+	if (nr_entries)
+		kmsan_unpoison_memory(entries, nr_entries * sizeof(*entries));
+
+	return nr_entries;
+}
+
+static unsigned int trie_fetch_handle_range(depot_stack_handle_t handle,
+					    unsigned int offset,
+					    unsigned long *entries,
+					    unsigned int max_entries)
+{
+	const struct stack_depot_trie_node *node;
+	u32 stack_id;
+	unsigned int nr_entries;
+
+	stack_id = trie_stack_id(handle);
+	rcu_read_lock_sched_notrace();
+	node = trie_side_table_lookup(stack_id);
+	if (WARN_ONCE(!node, "corrupt trie handle %08x\n", handle)) {
+		rcu_read_unlock_sched_notrace();
+		return 0;
+	}
+	nr_entries = trie_fetch_range(node, offset, entries, max_entries);
 	rcu_read_unlock_sched_notrace();
 	if (nr_entries)
 		kmsan_unpoison_memory(entries, nr_entries * sizeof(*entries));
@@ -2293,17 +2351,50 @@ void stack_depot_put(depot_stack_handle_t handle)
 }
 EXPORT_SYMBOL_GPL(stack_depot_put);
 
+static void trie_print(depot_stack_handle_t handle)
+{
+	unsigned long entries[STACK_DEPOT_PRINT_CHUNK_FRAMES];
+	unsigned int nr_entries;
+	unsigned int offset = 0;
+
+	while ((nr_entries = trie_fetch_handle_range(handle, offset, entries,
+						     ARRAY_SIZE(entries)))) {
+		stack_trace_print(entries, nr_entries, 0);
+		offset += nr_entries;
+	}
+}
+
+static int trie_snprint(depot_stack_handle_t handle, char *buf, size_t size,
+			int spaces)
+{
+	unsigned long entries[STACK_DEPOT_PRINT_CHUNK_FRAMES];
+	unsigned int generated;
+	unsigned int nr_entries;
+	unsigned int offset = 0;
+	unsigned int total = 0;
+
+	while (size &&
+	       (nr_entries = trie_fetch_handle_range(handle, offset, entries,
+						    ARRAY_SIZE(entries)))) {
+		generated = stack_trace_snprint(buf, size, entries, nr_entries, spaces);
+		total += generated;
+		if (generated >= size)
+			break;
+		buf += generated;
+		size -= generated;
+		offset += nr_entries;
+	}
+
+	return total;
+}
+
 void stack_depot_print(depot_stack_handle_t stack)
 {
 	unsigned long *entries;
 	unsigned int nr_entries;
 
 	if (stack_depot_handle_is_trie(stack)) {
-		unsigned long trie_entries[CONFIG_STACKDEPOT_MAX_FRAMES];
-
-		nr_entries = trie_fetch_handle_into(stack, trie_entries,
-						    ARRAY_SIZE(trie_entries));
-		stack_trace_print(trie_entries, nr_entries, 0);
+		trie_print(stack);
 		return;
 	}
 
@@ -2319,14 +2410,8 @@ int stack_depot_snprint(depot_stack_handle_t handle, char *buf, size_t size,
 	unsigned long *entries;
 	unsigned int nr_entries;
 
-	if (stack_depot_handle_is_trie(handle)) {
-		unsigned long trie_entries[CONFIG_STACKDEPOT_MAX_FRAMES];
-
-		nr_entries = trie_fetch_handle_into(handle, trie_entries,
-						    ARRAY_SIZE(trie_entries));
-		return stack_trace_snprint(buf, size, trie_entries, nr_entries,
-					   spaces);
-	}
+	if (stack_depot_handle_is_trie(handle))
+		return trie_snprint(handle, buf, size, spaces);
 
 	nr_entries = stack_depot_fetch(handle, &entries);
 	return nr_entries ? stack_trace_snprint(buf, size, entries, nr_entries,
