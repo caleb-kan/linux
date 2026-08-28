@@ -169,6 +169,8 @@ static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_children, data
 struct stack_depot_trie_pool {
 	struct list_head list;
 	unsigned int free_slots;
+	/* The largest free run cannot exceed this value. */
+	unsigned int free_run_upper_bound;
 	DECLARE_BITMAP(used, STACK_DEPOT_TRIE_POOL_SLOTS);
 };
 
@@ -574,9 +576,6 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 	unsigned int i;
 	unsigned int slot;
 
-	if (pool->free_slots < nr_slots)
-		return STACK_DEPOT_TRIE_POOL_SLOTS;
-
 	/* A free run can cross any previous allocation position. */
 	for (slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
 	     slot < STACK_DEPOT_TRIE_POOL_SLOTS; slot++) {
@@ -594,6 +593,7 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 		return slot + 1 - nr_slots;
 	}
 
+	pool->free_run_upper_bound = nr_slots - 1;
 	return STACK_DEPOT_TRIE_POOL_SLOTS;
 }
 
@@ -610,6 +610,9 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 		return NULL;
 	nr_slots = DIV_ROUND_UP(size, STACK_DEPOT_TRIE_SLOT_SIZE);
 	list_for_each_entry_reverse(pool, &stack_depot_trie_pools, list) {
+		if (pool->free_slots < nr_slots ||
+		    pool->free_run_upper_bound < nr_slots)
+			continue;
 		slot = trie_pool_reserve_slots(pool, nr_slots);
 		if (slot != STACK_DEPOT_TRIE_POOL_SLOTS)
 			return (char *)pool + slot * STACK_DEPOT_TRIE_SLOT_SIZE;
@@ -623,6 +626,7 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 	memset(pool, 0, sizeof(*pool));
 	pool->free_slots = STACK_DEPOT_TRIE_POOL_SLOTS -
 			   STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
+	pool->free_run_upper_bound = pool->free_slots;
 	list_add_tail(&pool->list, &stack_depot_trie_pools);
 
 	slot = trie_pool_reserve_slots(pool, nr_slots);
@@ -634,6 +638,8 @@ static void trie_pool_release(const void *ptr, size_t size)
 {
 	struct stack_depot_trie_pool *pool;
 	unsigned long pfn;
+	unsigned int run_start;
+	unsigned int run_end;
 	unsigned int nr_slots;
 	unsigned int slot;
 	unsigned int i;
@@ -648,6 +654,19 @@ static void trie_pool_release(const void *ptr, size_t size)
 	for (i = slot; i < slot + nr_slots; i++)
 		pool->used[i / BITS_PER_LONG] &= ~BIT(i % BITS_PER_LONG);
 	pool->free_slots += nr_slots;
+
+	run_start = slot;
+	while (run_start > STACK_DEPOT_TRIE_POOL_FIRST_SLOT &&
+	       !(pool->used[(run_start - 1) / BITS_PER_LONG] &
+		 BIT((run_start - 1) % BITS_PER_LONG)))
+		run_start--;
+	run_end = slot + nr_slots;
+	while (run_end < STACK_DEPOT_TRIE_POOL_SLOTS &&
+	       !(pool->used[run_end / BITS_PER_LONG] &
+		 BIT(run_end % BITS_PER_LONG)))
+		run_end++;
+	pool->free_run_upper_bound = max(pool->free_run_upper_bound,
+					 run_end - run_start);
 }
 
 static struct stack_depot_trie_children *
