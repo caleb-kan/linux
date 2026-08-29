@@ -169,7 +169,7 @@ static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_children, data
 struct stack_depot_trie_pool {
 	struct list_head list;
 	unsigned int free_slots;
-	/* The largest free run cannot exceed this value. */
+	/* Conservative upper bound on the largest free run. */
 	unsigned int free_run_upper_bound;
 	DECLARE_BITMAP(used, STACK_DEPOT_TRIE_POOL_SLOTS);
 };
@@ -638,8 +638,6 @@ static void trie_pool_release(const void *ptr, size_t size)
 {
 	struct stack_depot_trie_pool *pool;
 	unsigned long pfn;
-	unsigned int run_start;
-	unsigned int run_end;
 	unsigned int nr_slots;
 	unsigned int slot;
 	unsigned int i;
@@ -654,19 +652,9 @@ static void trie_pool_release(const void *ptr, size_t size)
 	for (i = slot; i < slot + nr_slots; i++)
 		pool->used[i / BITS_PER_LONG] &= ~BIT(i % BITS_PER_LONG);
 	pool->free_slots += nr_slots;
-
-	run_start = slot;
-	while (run_start > STACK_DEPOT_TRIE_POOL_FIRST_SLOT &&
-	       !(pool->used[(run_start - 1) / BITS_PER_LONG] &
-		 BIT((run_start - 1) % BITS_PER_LONG)))
-		run_start--;
-	run_end = slot + nr_slots;
-	while (run_end < STACK_DEPOT_TRIE_POOL_SLOTS &&
-	       !(pool->used[run_end / BITS_PER_LONG] &
-		 BIT(run_end % BITS_PER_LONG)))
-		run_end++;
-	pool->free_run_upper_bound = max(pool->free_run_upper_bound,
-					 run_end - run_start);
+	/* A release can join at most two runs bounded by the old value. */
+	pool->free_run_upper_bound = min(pool->free_slots,
+					 2 * pool->free_run_upper_bound + nr_slots);
 }
 
 static struct stack_depot_trie_children *
