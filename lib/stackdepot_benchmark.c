@@ -26,8 +26,8 @@
 #define STACKDEPOT_BENCH_MAX_PASSES	1024U
 #define STACKDEPOT_BENCH_MAX_SEED	3U
 #define STACKDEPOT_BENCH_GROUP_SIZE	64U
-#define STACKDEPOT_BENCH_RESCHED_INTERVAL	1024U
 #define STACKDEPOT_BENCH_SCENARIO_LEN	16U
+#define STACKDEPOT_BENCH_ORDER_LEN	16U
 /* The benchmark protocol must not override stack_depot_max_pools. */
 #define STACKDEPOT_BENCH_DEFAULT_MAX_POOLS \
 	MIN((1U << DEPOT_POOL_INDEX_BITS) - 1, 8192U)
@@ -45,8 +45,15 @@ enum stackdepot_bench_scenario {
 	STACKDEPOT_BENCH_FETCH,
 };
 
+enum stackdepot_bench_order {
+	STACKDEPOT_BENCH_ORDER_SHUFFLED,
+	STACKDEPOT_BENCH_ORDER_GROUPED,
+	STACKDEPOT_BENCH_ORDER_SORTED,
+};
+
 struct stackdepot_bench_config {
 	enum stackdepot_bench_scenario scenario;
+	enum stackdepot_bench_order insert_order;
 	unsigned int depth;
 	unsigned int nr_stacks;
 	unsigned int passes;
@@ -69,6 +76,16 @@ stackdepot_bench_scenario_name(enum stackdepot_bench_scenario scenario)
 	return "fetch";
 }
 
+static const char *
+stackdepot_bench_order_name(enum stackdepot_bench_order order)
+{
+	if (order == STACKDEPOT_BENCH_ORDER_GROUPED)
+		return "grouped";
+	if (order == STACKDEPOT_BENCH_ORDER_SORTED)
+		return "sorted";
+	return "shuffled";
+}
+
 struct stackdepot_bench_data {
 	struct stackdepot_bench_config config;
 	unsigned long *entries;
@@ -77,6 +94,7 @@ struct stackdepot_bench_data {
 	unsigned int *insert_order;
 	unsigned int *replay_order;
 	u64 fingerprint;
+	u64 trace_fingerprint;
 	unsigned int nr_stacks;
 	unsigned int depth;
 };
@@ -115,6 +133,12 @@ MODULE_PARM_DESC(raw_percent, "Percentage of full-width frames at the end of eac
 static unsigned int stackdepot_bench_seed = 1;
 module_param_named(seed, stackdepot_bench_seed, uint, 0644);
 MODULE_PARM_DESC(seed, "Synthetic stack insertion-order seed");
+
+static char stackdepot_bench_insert_order[STACKDEPOT_BENCH_ORDER_LEN] =
+	"shuffled";
+module_param_string(insert_order, stackdepot_bench_insert_order,
+		    sizeof(stackdepot_bench_insert_order), 0644);
+MODULE_PARM_DESC(insert_order, "Insertion order: shuffled, grouped, or sorted");
 
 static char stackdepot_bench_scenario[STACKDEPOT_BENCH_SCENARIO_LEN] =
 	"all";
@@ -168,6 +192,36 @@ static void stackdepot_bench_shuffle(unsigned int *order,
 	}
 }
 
+static void stackdepot_bench_group_order(struct stackdepot_bench_data *data)
+{
+	unsigned int nr_groups = DIV_ROUND_UP(data->nr_stacks,
+					      STACKDEPOT_BENCH_GROUP_SIZE);
+	unsigned int position = 0;
+	unsigned int group_pos;
+	unsigned int group;
+
+	for (group = 0; group < nr_groups; group++)
+		data->replay_order[group] = group;
+	stackdepot_bench_shuffle(data->replay_order, nr_groups,
+				 data->config.seed + 1);
+
+	for (group_pos = 0; group_pos < nr_groups; group_pos++) {
+		unsigned int first;
+		unsigned int members;
+		unsigned int member;
+
+		group = data->replay_order[group_pos];
+		first = group * STACKDEPOT_BENCH_GROUP_SIZE;
+		members = min(STACKDEPOT_BENCH_GROUP_SIZE,
+			      data->nr_stacks - first);
+		for (member = 0; member < members; member++)
+			data->insert_order[position + member] = first + member;
+		stackdepot_bench_shuffle(&data->insert_order[position], members,
+					 data->config.seed + 0x85ebca6bU + group);
+		position += members;
+	}
+}
+
 static void stackdepot_bench_fill(struct stackdepot_bench_data *data)
 {
 	unsigned int shared = data->depth * data->config.shared_percent / 100;
@@ -193,10 +247,15 @@ static void stackdepot_bench_fill(struct stackdepot_bench_data *data)
 			fingerprint *= STACKDEPOT_BENCH_FINGERPRINT_PRIME;
 		}
 		data->insert_order[stack] = stack;
-		data->replay_order[stack] = stack;
 	}
-	stackdepot_bench_shuffle(data->insert_order, data->nr_stacks,
-				 data->config.seed + 1);
+	data->trace_fingerprint = fingerprint;
+	if (data->config.insert_order == STACKDEPOT_BENCH_ORDER_GROUPED)
+		stackdepot_bench_group_order(data);
+	else if (data->config.insert_order == STACKDEPOT_BENCH_ORDER_SHUFFLED)
+		stackdepot_bench_shuffle(data->insert_order, data->nr_stacks,
+					 data->config.seed + 1);
+	for (stack = 0; stack < data->nr_stacks; stack++)
+		data->replay_order[stack] = stack;
 	stackdepot_bench_shuffle(data->replay_order, data->nr_stacks,
 				 data->config.seed + 0x9e3779b9U);
 	for (stack = 0; stack < data->nr_stacks; stack++) {
@@ -349,9 +408,6 @@ stackdepot_bench_insert(struct stackdepot_bench_data *data)
 		data->handles[stack] = handle;
 		if (!handle)
 			result.save_failures++;
-		if (position + 1 < data->nr_stacks &&
-		    !((position + 1) % STACKDEPOT_BENCH_RESCHED_INTERVAL))
-			cond_resched();
 	}
 	result.wall_ns = ktime_get_ns() - start;
 	result.cpu_ns = task_sched_runtime(current) - cpu_start;
@@ -463,6 +519,14 @@ static int stackdepot_bench_validate_params(struct stackdepot_bench_config *conf
 		pr_err("stackdepot_bench: KASLR is enabled; reboot with nokaslr\n");
 		return -EINVAL;
 	}
+	if (sysfs_streq(stackdepot_bench_insert_order, "shuffled"))
+		config->insert_order = STACKDEPOT_BENCH_ORDER_SHUFFLED;
+	else if (sysfs_streq(stackdepot_bench_insert_order, "grouped"))
+		config->insert_order = STACKDEPOT_BENCH_ORDER_GROUPED;
+	else if (sysfs_streq(stackdepot_bench_insert_order, "sorted"))
+		config->insert_order = STACKDEPOT_BENCH_ORDER_SORTED;
+	else
+		return -EINVAL;
 	if (current->nr_cpus_allowed != 1) {
 		pr_err("stackdepot_bench: invoking task must be pinned to one CPU\n");
 		return -EINVAL;
@@ -544,11 +608,13 @@ static int stackdepot_benchmark(void)
 
 	shared = data.depth * config.shared_percent / 100;
 	compressed = data.depth * (100 - config.raw_percent) / 100;
-	pr_info("stackdepot_bench: begin expected_backend=%s scenario=%s depth=%u stacks=%u passes=%u shared_percent=%u shared_frames=%u raw_percent=%u raw_frames=%u group_size=%u seed=%u corpus_fingerprint=%llu\n",
+	pr_info("stackdepot_bench: begin expected_backend=%s scenario=%s depth=%u stacks=%u passes=%u shared_percent=%u shared_frames=%u raw_percent=%u raw_frames=%u group_size=%u seed=%u corpus_fingerprint=%llu insert_order=%s storage=persistent trace_fingerprint=%llu\n",
 		config.expect_trie ? "trie" : "hash", scenario_name, data.depth,
 		data.nr_stacks, config.passes, config.shared_percent, shared,
 		config.raw_percent, data.depth - compressed,
-		STACKDEPOT_BENCH_GROUP_SIZE, config.seed, data.fingerprint);
+		STACKDEPOT_BENCH_GROUP_SIZE, config.seed, data.fingerprint,
+		stackdepot_bench_order_name(config.insert_order),
+		data.trace_fingerprint);
 
 	if (scenario == STACKDEPOT_BENCH_ALL) {
 		ret = stackdepot_bench_run_scenario(&data,
