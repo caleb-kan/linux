@@ -170,6 +170,8 @@ static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_children, data
 struct stack_depot_trie_pool {
 	struct list_head list;
 	unsigned int free_slots;
+	/* Conservative upper bound on the largest free run. */
+	unsigned int free_run_upper_bound;
 	DECLARE_BITMAP(used, STACK_DEPOT_TRIE_POOL_SLOTS);
 };
 
@@ -714,9 +716,6 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 	unsigned int i;
 	unsigned int slot;
 
-	if (pool->free_slots < nr_slots)
-		return STACK_DEPOT_TRIE_POOL_SLOTS;
-
 	/* A free run can cross any previous allocation position. */
 	for (slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
 	     slot < STACK_DEPOT_TRIE_POOL_SLOTS; slot++) {
@@ -734,6 +733,7 @@ static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 		return slot + 1 - nr_slots;
 	}
 
+	pool->free_run_upper_bound = nr_slots - 1;
 	return STACK_DEPOT_TRIE_POOL_SLOTS;
 }
 
@@ -790,6 +790,9 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 	list_for_each_entry_reverse(pool, &stack_depot_trie_pools, list) {
 		if (experiment_active)
 			total_free_slots += pool->free_slots;
+		if (pool->free_slots < nr_slots ||
+		    pool->free_run_upper_bound < nr_slots)
+			continue;
 		slot = trie_pool_reserve_slots(pool, nr_slots);
 		if (slot != STACK_DEPOT_TRIE_POOL_SLOTS)
 			return (char *)pool + slot * STACK_DEPOT_TRIE_SLOT_SIZE;
@@ -812,6 +815,7 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 	memset(pool, 0, sizeof(*pool));
 	pool->free_slots = STACK_DEPOT_TRIE_POOL_SLOTS -
 			   STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
+	pool->free_run_upper_bound = pool->free_slots;
 	list_add_tail(&pool->list, &stack_depot_trie_pools);
 
 	slot = trie_pool_reserve_slots(pool, nr_slots);
@@ -837,6 +841,9 @@ static void trie_pool_release(const void *ptr, size_t size)
 	for (i = slot; i < slot + nr_slots; i++)
 		pool->used[i / BITS_PER_LONG] &= ~BIT(i % BITS_PER_LONG);
 	pool->free_slots += nr_slots;
+	/* A release can join at most two runs bounded by the old value. */
+	pool->free_run_upper_bound = min(pool->free_slots,
+					 2 * pool->free_run_upper_bound + nr_slots);
 }
 
 static struct stack_depot_trie_children *
