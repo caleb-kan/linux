@@ -166,11 +166,15 @@ static_assert(IS_ALIGNED(offsetof(struct stack_depot_trie_retired_children, data
 #define STACK_DEPOT_TRIE_POOL_SLOTS \
 	(DEPOT_POOL_SIZE / STACK_DEPOT_TRIE_SLOT_SIZE)
 
+static_assert(STACK_DEPOT_TRIE_POOL_SLOTS - 1 <= U16_MAX);
+
 struct stack_depot_trie_pool {
 	struct list_head list;
 	unsigned int free_slots;
 	/* Conservative upper bound on the largest free run. */
-	unsigned int free_run_upper_bound;
+	u16 free_run_upper_bound;
+	/* First physical slot considered by the next reservation. */
+	u16 next_slot;
 	DECLARE_BITMAP(used, STACK_DEPOT_TRIE_POOL_SLOTS);
 };
 
@@ -572,28 +576,43 @@ static bool depot_init_pool(void **prealloc);
 static unsigned int trie_pool_reserve_slots(struct stack_depot_trie_pool *pool,
 					    unsigned int nr_slots)
 {
+	unsigned int start = pool->next_slot;
 	unsigned int run = 0;
+	unsigned int longest_run = 0;
 	unsigned int i;
 	unsigned int slot;
 
-	/* A free run can cross any previous allocation position. */
-	for (slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
-	     slot < STACK_DEPOT_TRIE_POOL_SLOTS; slot++) {
+scan:
+	run = 0;
+	longest_run = 0;
+	for (slot = start; slot < STACK_DEPOT_TRIE_POOL_SLOTS; slot++) {
 		if (pool->used[slot / BITS_PER_LONG] &
 		    BIT(slot % BITS_PER_LONG)) {
 			run = 0;
 			continue;
 		}
-		if (++run != nr_slots)
+		run++;
+		longest_run = max(longest_run, run);
+		if (run != nr_slots)
 			continue;
 
 		for (i = slot + 1 - nr_slots; i <= slot; i++)
 			pool->used[i / BITS_PER_LONG] |= BIT(i % BITS_PER_LONG);
 		pool->free_slots -= nr_slots;
+		if (slot + 1 == STACK_DEPOT_TRIE_POOL_SLOTS)
+			pool->next_slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
+		else
+			pool->next_slot = slot + 1;
 		return slot + 1 - nr_slots;
 	}
 
-	pool->free_run_upper_bound = nr_slots - 1;
+	if (start != STACK_DEPOT_TRIE_POOL_FIRST_SLOT) {
+		/* Keep holes and runs crossing the cursor visible. */
+		start = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
+		goto scan;
+	}
+
+	pool->free_run_upper_bound = longest_run;
 	return STACK_DEPOT_TRIE_POOL_SLOTS;
 }
 
@@ -627,6 +646,7 @@ static void *trie_pool_alloc(size_t size, void **prealloc)
 	pool->free_slots = STACK_DEPOT_TRIE_POOL_SLOTS -
 			   STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
 	pool->free_run_upper_bound = pool->free_slots;
+	pool->next_slot = STACK_DEPOT_TRIE_POOL_FIRST_SLOT;
 	list_add_tail(&pool->list, &stack_depot_trie_pools);
 
 	slot = trie_pool_reserve_slots(pool, nr_slots);
