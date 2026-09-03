@@ -33,13 +33,17 @@ def stack_depot_fetch(handle):
     parts = handle.cast(handle_parts_t)
     offset = parts['offset'] << DEPOT_STACK_ALIGN
     pools_num = gdb.parse_and_eval('pools_num')
+    stack_max_pools = gdb.parse_and_eval('stack_max_pools')
 
     if handle == 0:
         raise gdb.GdbError("handle is 0\n")
 
+    if parts['pool_index_plus_1'] > stack_max_pools:
+        raise gdb.GdbError("trie-backed stackdepot handles are not supported\n")
+
     pool_index = parts['pool_index_plus_1'] - 1
     if pool_index >= pools_num:
-        gdb.write("pool index %d out of bounds (%d) for stack id 0x%08x\n" % (parts['pool_index'], pools_num, handle))
+        gdb.write("pool index %d out of bounds (%d) for stack id 0x%08x\n" % (pool_index, pools_num, handle))
         return gdb.Value(0), 0
 
     stack_pools = gdb.parse_and_eval('stack_pools')

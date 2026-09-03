@@ -81,9 +81,12 @@
 static DEFINE_WW_CLASS(crtc_ww_class);
 
 #if IS_ENABLED(CONFIG_DRM_DEBUG_MODESET_LOCK)
+/* Existing debug output only records a short caller chain; keep save/fetch caps in sync. */
+#define DRM_STACK_DEPOT_MAX_FRAMES 8
+
 static noinline depot_stack_handle_t __drm_stack_depot_save(void)
 {
-	unsigned long entries[8];
+	unsigned long entries[DRM_STACK_DEPOT_MAX_FRAMES];
 	unsigned int n;
 
 	n = stack_trace_save(entries, ARRAY_SIZE(entries), 1);
@@ -94,7 +97,7 @@ static noinline depot_stack_handle_t __drm_stack_depot_save(void)
 static void __drm_stack_depot_print(depot_stack_handle_t stack_depot)
 {
 	struct drm_printer p = drm_dbg_printer(NULL, DRM_UT_KMS, "drm_modeset_lock");
-	unsigned long *entries;
+	unsigned long entries[DRM_STACK_DEPOT_MAX_FRAMES];
 	unsigned int nr_entries;
 	char *buf;
 
@@ -102,7 +105,7 @@ static void __drm_stack_depot_print(depot_stack_handle_t stack_depot)
 	if (!buf)
 		return;
 
-	nr_entries = stack_depot_fetch(stack_depot, &entries);
+	nr_entries = stack_depot_fetch_into(stack_depot, entries, ARRAY_SIZE(entries));
 	stack_trace_snprint(buf, PAGE_SIZE, entries, nr_entries, 2);
 
 	drm_printf(&p, "attempting to lock a contended lock without backoff:\n%s", buf);
