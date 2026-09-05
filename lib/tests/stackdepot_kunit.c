@@ -125,7 +125,7 @@ static void stackdepot_save_flags_public(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, noalloc_handle, plain_handle);
 	noalloc_handle = stack_depot_save_flags(missing_entries,
 						ARRAY_SIZE(missing_entries),
-						no_spin, 0);
+						GFP_KERNEL, 0);
 	KUNIT_ASSERT_NE(test, noalloc_handle, (depot_stack_handle_t)0);
 	if (expected_trie_pool_limit >= 0) {
 		parts.handle = noalloc_handle;
@@ -403,7 +403,7 @@ static void stackdepot_trie_topology_roundtrip(struct kunit *test,
 	for (i = 0; i < ARRAY_SIZE(stacks); i++) {
 		if (constrained)
 			handles[i] = stack_depot_save_flags(stacks[i], nr_entries[i],
-							    no_spin, 0);
+							    GFP_KERNEL, 0);
 		else
 			handles[i] = stack_depot_save(stacks[i], nr_entries[i],
 						      GFP_KERNEL);
